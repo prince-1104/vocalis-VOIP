@@ -1,0 +1,18 @@
+packages:
+  "framer-motion": "For page transitions and micro-interactions"
+  "recharts": "For analytics charts and dashboards"
+  "date-fns": "For formatting dates in call logs and tables"
+  "clsx": "Utility for constructing className strings conditionally"
+  "tailwind-merge": "Utility to merge tailwind classes safely"
+
+images:
+  - path: "artifacts/sales-sutra/public/images/logo-icon.png"
+    description: "Minimalist glowing geometric logo for an AI SaaS platform, deep purple and indigo, dark background"
+    aspect_ratio: "1:1"
+  - path: "artifacts/sales-sutra/public/images/mesh-bg.png"
+    description: "Abstract dark background with subtle deep purple and blue gradient mesh glowing nodes"
+    aspect_ratio: "16:9"
+
+notes:
+  - Using Twilio for calling infrastructure, UI instructs users to forward Google Voice to Twilio.
+  - Using generated Orval hooks from @workspace/api-client-react.

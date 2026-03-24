@@ -1,0 +1,31 @@
+kind = "web"
+previewPath = "/"
+title = "SalesSutra"
+version = "1.0.0"
+id = "artifacts/sales-sutra"
+router = "path"
+
+[[integratedSkills]]
+name = "react-vite"
+version = "1.0.0"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 22614
+
+[services.development]
+run = "pnpm --filter @workspace/sales-sutra run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/sales-sutra", "run", "build" ]
+publicDir = "artifacts/sales-sutra/dist/public"
+serve = "static"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "22614"
+BASE_PATH = "/"

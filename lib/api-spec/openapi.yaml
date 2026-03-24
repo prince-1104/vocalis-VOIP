@@ -1,22 +1,37 @@
 openapi: 3.1.0
 info:
-  # Do not change the title, if the title changes, the import paths will be broken
   title: Api
   version: 0.1.0
-  description: API specification
+  description: SalesSutra AI Voice Agent SaaS API
 servers:
   - url: /api
     description: Base API path
 tags:
   - name: health
     description: Health operations
+  - name: auth
+    description: Authentication
+  - name: contacts
+    description: Contact management
+  - name: campaigns
+    description: Outbound call campaigns
+  - name: calls
+    description: Call logs and history
+  - name: agents
+    description: AI voice agent configuration
+  - name: training
+    description: Agent training data
+  - name: scripts
+    description: Calling scripts
+  - name: analytics
+    description: Analytics and reporting
+
 paths:
   /healthz:
     get:
       operationId: healthCheck
       tags: [health]
       summary: Health check
-      description: Returns server health status
       responses:
         "200":
           description: Healthy
@@ -24,6 +39,477 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+
+  /auth/me:
+    get:
+      operationId: getMe
+      tags: [auth]
+      summary: Get current user
+      responses:
+        "200":
+          description: Current user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "401":
+          description: Unauthorized
+
+  /contacts:
+    get:
+      operationId: listContacts
+      tags: [contacts]
+      summary: List contacts
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+        - name: search
+          in: query
+          schema:
+            type: string
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [pending, called, no_answer, interested, not_interested, callback]
+      responses:
+        "200":
+          description: List of contacts
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContactListResponse"
+    post:
+      operationId: createContact
+      tags: [contacts]
+      summary: Create a contact
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateContactRequest"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Contact"
+
+  /contacts/import:
+    post:
+      operationId: importContacts
+      tags: [contacts]
+      summary: Import contacts from CSV
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImportContactsRequest"
+      responses:
+        "200":
+          description: Import result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImportResult"
+
+  /contacts/{id}:
+    get:
+      operationId: getContact
+      tags: [contacts]
+      summary: Get a contact
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Contact
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Contact"
+    put:
+      operationId: updateContact
+      tags: [contacts]
+      summary: Update a contact
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateContactRequest"
+      responses:
+        "200":
+          description: Updated contact
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Contact"
+    delete:
+      operationId: deleteContact
+      tags: [contacts]
+      summary: Delete a contact
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "204":
+          description: Deleted
+
+  /campaigns:
+    get:
+      operationId: listCampaigns
+      tags: [campaigns]
+      summary: List campaigns
+      responses:
+        "200":
+          description: List of campaigns
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Campaign"
+    post:
+      operationId: createCampaign
+      tags: [campaigns]
+      summary: Create a campaign
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateCampaignRequest"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Campaign"
+
+  /campaigns/{id}:
+    get:
+      operationId: getCampaign
+      tags: [campaigns]
+      summary: Get a campaign
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Campaign
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Campaign"
+    put:
+      operationId: updateCampaign
+      tags: [campaigns]
+      summary: Update a campaign
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateCampaignRequest"
+      responses:
+        "200":
+          description: Updated campaign
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Campaign"
+
+  /campaigns/{id}/start:
+    post:
+      operationId: startCampaign
+      tags: [campaigns]
+      summary: Start a campaign
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Campaign started
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Campaign"
+
+  /campaigns/{id}/pause:
+    post:
+      operationId: pauseCampaign
+      tags: [campaigns]
+      summary: Pause a campaign
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Campaign paused
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Campaign"
+
+  /calls:
+    get:
+      operationId: listCalls
+      tags: [calls]
+      summary: List call logs
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+        - name: campaignId
+          in: query
+          schema:
+            type: integer
+        - name: outcome
+          in: query
+          schema:
+            type: string
+            enum: [answered, no_answer, busy, voicemail, interested, not_interested, callback_requested]
+      responses:
+        "200":
+          description: Call logs
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CallListResponse"
+
+  /calls/{id}:
+    get:
+      operationId: getCall
+      tags: [calls]
+      summary: Get a call log
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Call log
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CallLog"
+
+  /agents:
+    get:
+      operationId: getAgent
+      tags: [agents]
+      summary: Get agent configuration
+      responses:
+        "200":
+          description: Agent configuration
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentConfig"
+    put:
+      operationId: updateAgent
+      tags: [agents]
+      summary: Update agent configuration
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateAgentRequest"
+      responses:
+        "200":
+          description: Updated agent
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentConfig"
+
+  /training:
+    get:
+      operationId: listTrainingData
+      tags: [training]
+      summary: List training data items
+      responses:
+        "200":
+          description: Training data
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TrainingData"
+    post:
+      operationId: addTrainingData
+      tags: [training]
+      summary: Add training data
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateTrainingDataRequest"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TrainingData"
+
+  /training/{id}:
+    delete:
+      operationId: deleteTrainingData
+      tags: [training]
+      summary: Delete training data
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "204":
+          description: Deleted
+
+  /scripts:
+    get:
+      operationId: listScripts
+      tags: [scripts]
+      summary: List calling scripts
+      responses:
+        "200":
+          description: Scripts
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/CallingScript"
+    post:
+      operationId: createScript
+      tags: [scripts]
+      summary: Create a calling script
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateScriptRequest"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CallingScript"
+
+  /scripts/{id}:
+    put:
+      operationId: updateScript
+      tags: [scripts]
+      summary: Update a calling script
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateScriptRequest"
+      responses:
+        "200":
+          description: Updated script
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CallingScript"
+    delete:
+      operationId: deleteScript
+      tags: [scripts]
+      summary: Delete a script
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "204":
+          description: Deleted
+
+  /analytics/summary:
+    get:
+      operationId: getAnalyticsSummary
+      tags: [analytics]
+      summary: Get analytics summary
+      parameters:
+        - name: period
+          in: query
+          schema:
+            type: string
+            enum: [today, week, month, all]
+            default: week
+      responses:
+        "200":
+          description: Analytics summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnalyticsSummary"
+
 components:
   schemas:
     HealthStatus:
@@ -34,3 +520,540 @@ components:
       required:
         - status
 
+    User:
+      type: object
+      properties:
+        id:
+          type: integer
+        email:
+          type: string
+        name:
+          type: string
+        businessName:
+          type: string
+        plan:
+          type: string
+          enum: [free, starter, pro, enterprise]
+        createdAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - email
+        - plan
+        - createdAt
+
+    Contact:
+      type: object
+      properties:
+        id:
+          type: integer
+        firstName:
+          type: string
+        lastName:
+          type: string
+        phone:
+          type: string
+        email:
+          type: string
+        company:
+          type: string
+        status:
+          type: string
+          enum: [pending, called, no_answer, interested, not_interested, callback]
+        notes:
+          type: string
+        lastCalledAt:
+          type: string
+          format: date-time
+        callbackAt:
+          type: string
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - phone
+        - status
+        - createdAt
+
+    CreateContactRequest:
+      type: object
+      properties:
+        firstName:
+          type: string
+        lastName:
+          type: string
+        phone:
+          type: string
+        email:
+          type: string
+        company:
+          type: string
+        notes:
+          type: string
+      required:
+        - phone
+
+    UpdateContactRequest:
+      type: object
+      properties:
+        firstName:
+          type: string
+        lastName:
+          type: string
+        phone:
+          type: string
+        email:
+          type: string
+        company:
+          type: string
+        status:
+          type: string
+          enum: [pending, called, no_answer, interested, not_interested, callback]
+        notes:
+          type: string
+        callbackAt:
+          type: string
+          format: date-time
+
+    ContactListResponse:
+      type: object
+      properties:
+        contacts:
+          type: array
+          items:
+            $ref: "#/components/schemas/Contact"
+        total:
+          type: integer
+        page:
+          type: integer
+        limit:
+          type: integer
+      required:
+        - contacts
+        - total
+        - page
+        - limit
+
+    ImportContactsRequest:
+      type: object
+      properties:
+        csvData:
+          type: string
+          description: CSV content as a string
+        mapping:
+          type: object
+          description: Column mapping (firstName, lastName, phone, email, company)
+          additionalProperties:
+            type: string
+      required:
+        - csvData
+
+    ImportResult:
+      type: object
+      properties:
+        imported:
+          type: integer
+        skipped:
+          type: integer
+        errors:
+          type: array
+          items:
+            type: string
+      required:
+        - imported
+        - skipped
+        - errors
+
+    Campaign:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        description:
+          type: string
+        status:
+          type: string
+          enum: [draft, active, paused, completed]
+        scriptId:
+          type: integer
+        totalContacts:
+          type: integer
+        calledCount:
+          type: integer
+        answeredCount:
+          type: integer
+        interestedCount:
+          type: integer
+        startTime:
+          type: string
+          description: Daily start time (HH:MM)
+        endTime:
+          type: string
+          description: Daily end time (HH:MM)
+        timezone:
+          type: string
+        maxConcurrentCalls:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - name
+        - status
+        - createdAt
+
+    CreateCampaignRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        scriptId:
+          type: integer
+        contactIds:
+          type: array
+          items:
+            type: integer
+        startTime:
+          type: string
+        endTime:
+          type: string
+        timezone:
+          type: string
+        maxConcurrentCalls:
+          type: integer
+          default: 1
+      required:
+        - name
+
+    UpdateCampaignRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        scriptId:
+          type: integer
+        startTime:
+          type: string
+        endTime:
+          type: string
+        timezone:
+          type: string
+        maxConcurrentCalls:
+          type: integer
+
+    CallLog:
+      type: object
+      properties:
+        id:
+          type: integer
+        contactId:
+          type: integer
+        campaignId:
+          type: integer
+        direction:
+          type: string
+          enum: [outbound, inbound]
+        phone:
+          type: string
+        duration:
+          type: integer
+          description: Duration in seconds
+        outcome:
+          type: string
+          enum: [answered, no_answer, busy, voicemail, interested, not_interested, callback_requested]
+        transcript:
+          type: string
+        recordingUrl:
+          type: string
+        aiSummary:
+          type: string
+        startedAt:
+          type: string
+          format: date-time
+        endedAt:
+          type: string
+          format: date-time
+        contact:
+          $ref: "#/components/schemas/Contact"
+      required:
+        - id
+        - direction
+        - phone
+        - startedAt
+
+    CallListResponse:
+      type: object
+      properties:
+        calls:
+          type: array
+          items:
+            $ref: "#/components/schemas/CallLog"
+        total:
+          type: integer
+        page:
+          type: integer
+        limit:
+          type: integer
+      required:
+        - calls
+        - total
+        - page
+        - limit
+
+    AgentConfig:
+      type: object
+      properties:
+        id:
+          type: integer
+        agentName:
+          type: string
+        voice:
+          type: string
+          enum: [alloy, echo, fable, onyx, nova, shimmer]
+        language:
+          type: string
+        phoneNumber:
+          type: string
+        twilioAccountSid:
+          type: string
+        twilioConfigured:
+          type: boolean
+        greeting:
+          type: string
+        personality:
+          type: string
+          enum: [professional, friendly, energetic, calm]
+        maxCallDuration:
+          type: integer
+          description: Max call duration in minutes
+        voicemailMessage:
+          type: string
+        businessHoursOnly:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - agentName
+        - voice
+        - personality
+        - twilioConfigured
+        - createdAt
+
+    UpdateAgentRequest:
+      type: object
+      properties:
+        agentName:
+          type: string
+        voice:
+          type: string
+          enum: [alloy, echo, fable, onyx, nova, shimmer]
+        language:
+          type: string
+        phoneNumber:
+          type: string
+        twilioAccountSid:
+          type: string
+        twilioAuthToken:
+          type: string
+        greeting:
+          type: string
+        personality:
+          type: string
+          enum: [professional, friendly, energetic, calm]
+        maxCallDuration:
+          type: integer
+        voicemailMessage:
+          type: string
+        businessHoursOnly:
+          type: boolean
+
+    TrainingData:
+      type: object
+      properties:
+        id:
+          type: integer
+        type:
+          type: string
+          enum: [product_info, faq, objection_handling, competitor_info, custom]
+        title:
+          type: string
+        content:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - type
+        - title
+        - content
+        - createdAt
+
+    CreateTrainingDataRequest:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [product_info, faq, objection_handling, competitor_info, custom]
+        title:
+          type: string
+        content:
+          type: string
+      required:
+        - type
+        - title
+        - content
+
+    CallingScript:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        description:
+          type: string
+        openingLine:
+          type: string
+        pitchPoints:
+          type: array
+          items:
+            type: string
+        closingLine:
+          type: string
+        fullScript:
+          type: string
+        isDefault:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - name
+        - openingLine
+        - fullScript
+        - createdAt
+
+    CreateScriptRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        openingLine:
+          type: string
+        pitchPoints:
+          type: array
+          items:
+            type: string
+        closingLine:
+          type: string
+        fullScript:
+          type: string
+        isDefault:
+          type: boolean
+      required:
+        - name
+        - openingLine
+        - fullScript
+
+    UpdateScriptRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        openingLine:
+          type: string
+        pitchPoints:
+          type: array
+          items:
+            type: string
+        closingLine:
+          type: string
+        fullScript:
+          type: string
+        isDefault:
+          type: boolean
+
+    AnalyticsSummary:
+      type: object
+      properties:
+        totalCalls:
+          type: integer
+        answeredCalls:
+          type: integer
+        interestedLeads:
+          type: integer
+        callbackRequests:
+          type: integer
+        avgCallDuration:
+          type: number
+        answerRate:
+          type: number
+        conversionRate:
+          type: number
+        callsByDay:
+          type: array
+          items:
+            $ref: "#/components/schemas/DailyCallStat"
+        outcomeBreakdown:
+          type: array
+          items:
+            $ref: "#/components/schemas/OutcomeStat"
+      required:
+        - totalCalls
+        - answeredCalls
+        - interestedLeads
+        - callbackRequests
+        - avgCallDuration
+        - answerRate
+        - conversionRate
+        - callsByDay
+        - outcomeBreakdown
+
+    DailyCallStat:
+      type: object
+      properties:
+        date:
+          type: string
+        total:
+          type: integer
+        answered:
+          type: integer
+        interested:
+          type: integer
+      required:
+        - date
+        - total
+        - answered
+        - interested
+
+    OutcomeStat:
+      type: object
+      properties:
+        outcome:
+          type: string
+        count:
+          type: integer
+        percentage:
+          type: number
+      required:
+        - outcome
+        - count
+        - percentage
