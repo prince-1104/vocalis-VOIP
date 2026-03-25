@@ -1,12 +1,37 @@
-import React, { useEffect } from "react";
+import React, { useEffect, useState } from "react";
 import { useAgentConfig, useUpdateAgentMutation } from "@/hooks/use-agent";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
-import { Bot, Phone, Settings2, AlertCircle } from "lucide-react";
+import { Bot, Phone, Settings2, AlertCircle, Copy, CheckCircle2, Webhook } from "lucide-react";
 import { useForm } from "react-hook-form";
+
+function WebhookUrl({ label, path }: { label: string; path: string }) {
+  const [copied, setCopied] = useState(false);
+  const baseUrl = window.location.origin;
+  const fullUrl = `${baseUrl}${path}`;
+
+  const copy = () => {
+    navigator.clipboard.writeText(fullUrl).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  };
+
+  return (
+    <div className="space-y-1">
+      <p className="text-xs text-muted-foreground font-medium uppercase tracking-wider">{label}</p>
+      <div className="flex items-center gap-2 bg-background/50 border border-white/10 rounded-md px-3 py-2">
+        <code className="text-xs text-primary flex-1 truncate">{fullUrl}</code>
+        <button onClick={copy} className="shrink-0 hover:text-primary transition-colors">
+          {copied ? <CheckCircle2 className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4 text-muted-foreground" />}
+        </button>
+      </div>
+    </div>
+  );
+}
 
 export default function AgentSettings() {
   const { data: agent, isLoading } = useAgentConfig();
@@ -16,7 +41,7 @@ export default function AgentSettings() {
   const form = useForm({
     defaultValues: {
       agentName: "",
-      voice: "alloy",
+      voice: "nova",
       personality: "professional",
       greeting: "",
       voicemailMessage: "",
@@ -30,13 +55,13 @@ export default function AgentSettings() {
     if (agent) {
       form.reset({
         agentName: agent.agentName || "",
-        voice: agent.voice || "alloy",
+        voice: agent.voice || "nova",
         personality: agent.personality || "professional",
         greeting: agent.greeting || "",
         voicemailMessage: agent.voicemailMessage || "",
         phoneNumber: agent.phoneNumber || "",
         twilioAccountSid: agent.twilioAccountSid || "",
-        twilioAuthToken: "" // keep empty for security
+        twilioAuthToken: ""
       });
     }
   }, [agent, form]);
@@ -64,7 +89,7 @@ export default function AgentSettings() {
         <div>
           <h4 className="font-semibold text-primary">Google Voice Integration</h4>
           <p className="text-sm text-primary/80 mt-1">
-            Google Voice does not permit direct API programmatic calling. To use your Google Voice number, set up Twilio below, then configure your Google Voice account to forward calls to your new Twilio number.
+            Google Voice does not permit direct API programmatic calling. To use your Google Voice number, set up Twilio below, then configure your Google Voice account to forward calls to your Twilio number.
           </p>
         </div>
       </div>
@@ -158,6 +183,25 @@ export default function AgentSettings() {
                 />
               </div>
             </div>
+          </CardContent>
+        </Card>
+
+        <Card className="glass-panel border-white/5">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Webhook className="w-5 h-5 text-primary" /> Twilio Webhook URLs
+            </CardTitle>
+            <CardDescription>
+              Copy these URLs into your Twilio phone number configuration. For inbound calls, paste the Inbound URL as your "A call comes in" webhook. For status updates, paste the Status Callback URL.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg p-3 text-sm text-amber-200">
+              <strong>Setup:</strong> Go to your Twilio Console → Phone Numbers → Active Numbers → select your number → configure Voice webhooks with the URLs below (HTTP POST).
+            </div>
+            <WebhookUrl label="Inbound Call Webhook (Voice URL)" path="/api/twilio/inbound" />
+            <WebhookUrl label="Call Status Callback" path="/api/twilio/status" />
+            <WebhookUrl label="Outbound Voice Handler" path="/api/twilio/outbound-voice" />
           </CardContent>
         </Card>
 

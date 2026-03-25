@@ -38,9 +38,38 @@ Multi-tenant: each user gets isolated data.
 
 ## Calling Integration
 
-Designed for **Twilio** integration (industry standard for AI voice + auto-dialing).
-Users configure Twilio Account SID + Auth Token in the AI Agent settings.
+Full **Twilio + OpenAI** AI voice agent implemented end-to-end:
+
+### Inbound Calls (TwiML webhook flow)
+1. Twilio POSTs to `POST /api/twilio/inbound` → responds with TwiML greeting + `<Gather input="speech">`
+2. Caller speaks → Twilio STT transcribes → POSTs to `POST /api/twilio/voice?userId=&callLogId=&history=`
+3. OpenAI `gpt-5.2` generates a contextual response using agent config + training data + calling scripts
+4. Response returned as TwiML `<Say>` + next `<Gather>` for continued conversation loop
+5. Call ends → Twilio POSTs to `POST /api/twilio/status` → call log updated in DB
+
+### Outbound Calls (REST API trigger)
+- `POST /api/contacts/:id/dial` — triggers a single call to a specific contact
+- `POST /api/campaigns/:id/dial-next` — dials the next pending contact in a campaign
+- Twilio REST API creates the call; webhook handles conversation via `POST /api/twilio/outbound-voice`
+- Campaign completion auto-detected: marks campaign `completed` when all contacts dialed
+
+### Voice Mapping
+OpenAI voices (alloy/echo/fable/onyx/nova/shimmer) are mapped to Amazon Polly voices for TwiML `<Say>`.
+
+### Multi-tenant Webhook Resolution
+Inbound calls are routed to the correct user account by matching the Twilio `To` phone number
+against stored `agent_configs.phone_number`. Falls back to `demo-user` if no match.
+
+### Webhook URLs (shown in-app on AI Agent page)
+- Voice URL: `{baseUrl}/api/twilio/inbound`
+- Status Callback: `{baseUrl}/api/twilio/status`
+
+Users configure Twilio Account SID + Auth Token + Phone Number in AI Agent settings.
 Google Voice users are instructed to forward their GV number to the Twilio number.
+
+### OpenAI Integration
+Uses `@workspace/integrations-openai-ai-server` (Replit AI Integrations proxy).
+AI system prompt is dynamically built from: agent persona + training data + default calling script.
 
 ## Structure
 

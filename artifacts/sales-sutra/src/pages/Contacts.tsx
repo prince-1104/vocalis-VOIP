@@ -1,14 +1,16 @@
 import React, { useState } from "react";
 import { useContactsList, useCreateContactMutation } from "@/hooks/use-contacts";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { StatusBadge } from "@/components/ui-custom/StatusBadge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { format } from "date-fns";
-import { Search, Plus, Upload, UserPlus } from "lucide-react";
+import { Search, Plus, Upload, UserPlus, Phone, Loader2 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
+import { apiClient } from "@/lib/api-client";
+import { useQueryClient } from "@tanstack/react-query";
 
 export default function Contacts() {
   const [search, setSearch] = useState("");
@@ -16,6 +18,8 @@ export default function Contacts() {
   const createContact = useCreateContactMutation();
   const { toast } = useToast();
   const [isDialogOpen, setIsDialogOpen] = useState(false);
+  const [dialingId, setDialingId] = useState<number | null>(null);
+  const queryClient = useQueryClient();
 
   const [formData, setFormData] = useState({
     firstName: "",
@@ -34,6 +38,29 @@ export default function Contacts() {
       setFormData({ firstName: "", lastName: "", phone: "", email: "", company: "" });
     } catch (err: any) {
       toast({ title: "Error", description: err.message, variant: "destructive" });
+    }
+  };
+
+  const handleDial = async (contactId: number, phone: string) => {
+    setDialingId(contactId);
+    try {
+      const response = await fetch(`/api/contacts/${contactId}/dial`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Failed to initiate call");
+      toast({
+        title: "Dialing " + phone,
+        description: `Call initiated. Call ID: ${result.callLogId}`,
+      });
+      queryClient.invalidateQueries({ queryKey: ["contacts"] });
+      queryClient.invalidateQueries({ queryKey: ["call-logs"] });
+    } catch (err: any) {
+      toast({ title: "Call failed", description: err.message, variant: "destructive" });
+    } finally {
+      setDialingId(null);
     }
   };
 
@@ -136,19 +163,38 @@ export default function Contacts() {
                   <TableHead className="text-muted-foreground">Company</TableHead>
                   <TableHead className="text-muted-foreground">Status</TableHead>
                   <TableHead className="text-muted-foreground text-right">Added</TableHead>
+                  <TableHead className="text-muted-foreground text-right">Action</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {data.contacts.map((contact) => (
                   <TableRow key={contact.id} className="border-white/5 hover:bg-white/5 transition-colors">
                     <TableCell className="font-medium text-foreground">
-                      {contact.firstName || contact.lastName ? `${contact.firstName || ''} ${contact.lastName || ''}` : 'Unknown'}
+                      {contact.firstName || contact.lastName ? `${contact.firstName || ''} ${contact.lastName || ''}`.trim() : 'Unknown'}
                     </TableCell>
                     <TableCell className="text-muted-foreground">{contact.phone}</TableCell>
                     <TableCell className="text-muted-foreground">{contact.company || '-'}</TableCell>
                     <TableCell><StatusBadge status={contact.status} /></TableCell>
                     <TableCell className="text-right text-muted-foreground">
                       {format(new Date(contact.createdAt), 'MMM d, yyyy')}
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="bg-primary/10 border-primary/20 hover:bg-primary/20 text-primary"
+                        disabled={dialingId === contact.id}
+                        onClick={() => handleDial(contact.id, contact.phone)}
+                      >
+                        {dialingId === contact.id ? (
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                        ) : (
+                          <Phone className="w-4 h-4" />
+                        )}
+                        <span className="ml-1.5 hidden sm:inline">
+                          {dialingId === contact.id ? "Dialing..." : "Call"}
+                        </span>
+                      </Button>
                     </TableCell>
                   </TableRow>
                 ))}

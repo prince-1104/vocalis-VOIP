@@ -6,8 +6,9 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { StatusBadge } from "@/components/ui-custom/StatusBadge";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
-import { Megaphone, Play, Pause, MoreHorizontal, Activity, Users } from "lucide-react";
+import { Megaphone, Play, Pause, PhoneCall, Loader2, Activity, Users } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
+import { useQueryClient } from "@tanstack/react-query";
 
 export default function Campaigns() {
   const { data: campaigns, isLoading } = useCampaignsList();
@@ -16,7 +17,9 @@ export default function Campaigns() {
   const startCampaign = useStartCampaignMutation();
   const pauseCampaign = usePauseCampaignMutation();
   const { toast } = useToast();
+  const queryClient = useQueryClient();
   const [isDialogOpen, setIsDialogOpen] = useState(false);
+  const [dialingCampaignId, setDialingCampaignId] = useState<number | null>(null);
 
   const [formData, setFormData] = useState({
     name: "",
@@ -47,10 +50,40 @@ export default function Campaigns() {
         toast({ title: "Campaign paused" });
       } else {
         await startCampaign.mutateAsync(id);
-        toast({ title: "Campaign started" });
+        toast({ title: "Campaign activated — use Dial Next to start calling." });
       }
     } catch (err: any) {
       toast({ title: "Action failed", description: err.message, variant: "destructive" });
+    }
+  };
+
+  const handleDialNext = async (campaignId: number) => {
+    setDialingCampaignId(campaignId);
+    try {
+      const response = await fetch(`/api/campaigns/${campaignId}/dial-next`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Failed to dial");
+      if (result.done) {
+        toast({ title: "Campaign complete", description: result.message });
+      } else {
+        const name = result.contact 
+          ? `${result.contact.firstName || ""} ${result.contact.lastName || ""}`.trim() || result.contact.phone
+          : "next contact";
+        toast({
+          title: `Dialing ${name}`,
+          description: `${result.remaining} contacts remaining in campaign.`,
+        });
+      }
+      queryClient.invalidateQueries({ queryKey: ["campaigns"] });
+      queryClient.invalidateQueries({ queryKey: ["call-logs"] });
+    } catch (err: any) {
+      toast({ title: "Dial failed", description: err.message, variant: "destructive" });
+    } finally {
+      setDialingCampaignId(null);
     }
   };
 
@@ -181,12 +214,23 @@ export default function Campaigns() {
                     {campaign.status === 'active' ? (
                       <><Pause className="w-4 h-4 mr-2" /> Pause</>
                     ) : (
-                      <><Play className="w-4 h-4 mr-2" /> Start</>
+                      <><Play className="w-4 h-4 mr-2" /> Activate</>
                     )}
                   </Button>
-                  <Button variant="outline" size="icon" className="shrink-0 bg-white/5">
-                    <MoreHorizontal className="w-4 h-4" />
-                  </Button>
+                  {campaign.status === 'active' && (
+                    <Button
+                      variant="default"
+                      className="flex-1 bg-green-600 hover:bg-green-700 shadow-md"
+                      onClick={() => handleDialNext(campaign.id)}
+                      disabled={dialingCampaignId === campaign.id}
+                    >
+                      {dialingCampaignId === campaign.id ? (
+                        <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Dialing...</>
+                      ) : (
+                        <><PhoneCall className="w-4 h-4 mr-2" /> Dial Next</>
+                      )}
+                    </Button>
+                  )}
                 </CardFooter>
               </Card>
             );

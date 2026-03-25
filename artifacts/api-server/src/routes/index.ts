@@ -8,6 +8,7 @@ import agentsRouter from "./agents";
 import trainingRouter from "./training";
 import scriptsRouter from "./scripts";
 import analyticsRouter from "./analytics";
+import twilioRouter from "./twilio";
 
 const router: IRouter = Router();
 
@@ -20,5 +21,6 @@ router.use(agentsRouter);
 router.use(trainingRouter);
 router.use(scriptsRouter);
 router.use(analyticsRouter);
+router.use(twilioRouter);
 
 export default router;
