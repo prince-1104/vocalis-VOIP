@@ -96,14 +96,15 @@ router.post("/twilio/inbound", async (req, res) => {
     input: ["speech"],
     action: `${baseUrl}/api/twilio/voice?callLogId=${callLog.id}&userId=${userId}&history=`,
     method: "POST",
-    speechTimeout: "3",
+    speechTimeout: "auto",
+    timeout: 10,
     language: agentConfig?.language || "en-US",
-    enhanced: true,
+    actionOnEmptyResult: true,
   });
 
   gather.say({ voice: mapVoice(agentConfig?.voice), language: agentConfig?.language || "en-US" }, greeting);
 
-  twiml.say("I didn't hear anything. Please call back when you're ready. Goodbye!");
+  twiml.redirect({ method: "POST" }, `${baseUrl}/api/twilio/voice?callLogId=${callLog.id}&userId=${userId}&history=&silent=1`);
 
   res.type("text/xml");
   res.send(twiml.toString());
@@ -116,6 +117,7 @@ router.post("/twilio/voice", async (req, res) => {
   const speechResult = req.body.SpeechResult || req.body.Digits || "";
   const callLogId = req.query.callLogId as string;
   const rawHistory = req.query.history as string || "";
+  const isSilent = req.query.silent === "1";
 
   const history: {role: string, content: string}[] = [];
   if (rawHistory) {
@@ -127,31 +129,42 @@ router.post("/twilio/voice", async (req, res) => {
   }
 
   const agentConfig = await db.query.agentConfigsTable.findFirst({ where: eq(agentConfigsTable.userId, userId) });
-  const systemPrompt = await buildSystemPrompt(userId, agentConfig || {});
+  const baseUrl = getBaseUrl(req);
+  const voice = mapVoice(agentConfig?.voice);
+  const lang = agentConfig?.language || "en-US";
 
-  let aiResponse = "I'm sorry, could you repeat that?";
-  try {
-    aiResponse = await generateAIResponse(systemPrompt, history, speechResult);
-  } catch (err) {
-    console.error("AI response error:", err);
+  let aiResponse: string;
+
+  if (isSilent || !speechResult.trim()) {
+    aiResponse = "I didn't quite catch that. Are you still there? Please go ahead and speak.";
+  } else {
+    const systemPrompt = await buildSystemPrompt(userId, agentConfig || {});
+    try {
+      aiResponse = await generateAIResponse(systemPrompt, history, speechResult);
+    } catch (err) {
+      console.error("AI response error:", err);
+      aiResponse = "I'm sorry, I had a technical issue. Could you please repeat that?";
+    }
   }
 
-  const newHistory = [...history, { role: "user", content: speechResult }, { role: "assistant", content: aiResponse }];
+  const newHistory = isSilent
+    ? history
+    : [...history, { role: "user", content: speechResult }, { role: "assistant", content: aiResponse }];
   const encodedHistory = encodeURIComponent(JSON.stringify(newHistory.slice(-10)));
-  const baseUrl = getBaseUrl(req);
 
   const gather = twiml.gather({
     input: ["speech"],
     action: `${baseUrl}/api/twilio/voice?callLogId=${callLogId}&userId=${userId}&history=${encodedHistory}`,
     method: "POST",
-    speechTimeout: "3",
-    language: agentConfig?.language || "en-US",
-    enhanced: true,
+    speechTimeout: "auto",
+    timeout: 10,
+    language: lang,
+    actionOnEmptyResult: true,
   });
 
-  gather.say({ voice: mapVoice(agentConfig?.voice), language: agentConfig?.language || "en-US" }, aiResponse);
+  gather.say({ voice, language: lang }, aiResponse);
 
-  twiml.say("Thank you for calling. Have a great day! Goodbye!");
+  twiml.redirect({ method: "POST" }, `${baseUrl}/api/twilio/voice?callLogId=${callLogId}&userId=${userId}&history=${encodedHistory}&silent=1`);
 
   res.type("text/xml");
   res.send(twiml.toString());
@@ -172,18 +185,22 @@ router.post("/twilio/outbound-voice", async (req, res) => {
 
   const baseUrl = getBaseUrl(req);
 
+  const voice = mapVoice(agentConfig?.voice);
+  const lang = agentConfig?.language || "en-US";
+
   const gather = twiml.gather({
     input: ["speech"],
-    action: `${baseUrl}/api/twilio/voice?callLogId=${callLogId}&history=`,
+    action: `${baseUrl}/api/twilio/voice?callLogId=${callLogId}&userId=${userId}&history=`,
     method: "POST",
-    speechTimeout: "3",
-    language: agentConfig?.language || "en-US",
-    enhanced: true,
+    speechTimeout: "auto",
+    timeout: 10,
+    language: lang,
+    actionOnEmptyResult: true,
   });
 
-  gather.say({ voice: mapVoice(agentConfig?.voice), language: agentConfig?.language || "en-US" }, openingLine);
+  gather.say({ voice, language: lang }, openingLine);
 
-  twiml.say({ voice: mapVoice(agentConfig?.voice) }, "It seems like now is not a great time. I'll try you again later. Goodbye!");
+  twiml.redirect({ method: "POST" }, `${baseUrl}/api/twilio/voice?callLogId=${callLogId}&userId=${userId}&history=&silent=1`);
 
   res.type("text/xml");
   res.send(twiml.toString());
