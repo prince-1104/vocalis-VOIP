@@ -1,5 +1,5 @@
 import { Router, type IRouter } from "express";
-import { requireRole, requireSuperadmin } from "../middleware/auth";
+import { requireRole } from "../middleware/auth";
 import healthRouter from "./health";
 import authRouter from "./auth";
 import contactsRouter from "./contacts";

@@ -1,8 +1,8 @@
 import { Router, type IRouter } from "express";
-import { db, usersTable, tenantUsersTable, tenantsTable } from "@workspace/db";
+import { db, usersTable, tenantUsersTable, tenantsTable, tenantSessionsTable } from "@workspace/db";
 import { eq, and } from "drizzle-orm";
 import bcrypt from "bcryptjs";
-import { signToken } from "../middleware/auth";
+import { signToken, generateSessionId, getSessionExpiry } from "../middleware/auth";
 
 const router: IRouter = Router();
 
@@ -119,7 +119,17 @@ router.post("/auth/login", async (req, res) => {
     return;
   }
 
-  const token = signToken({ tenantUserId: tenantUser.id });
+  const jti = generateSessionId();
+  const expiresAt = getSessionExpiry();
+
+  await db.insert(tenantSessionsTable).values({
+    tenantUserId: tenantUser.id,
+    tenantId: tenantUser.tenantId,
+    token: jti,
+    expiresAt,
+  });
+
+  const token = signToken({ tenantUserId: tenantUser.id, jti });
 
   res.json({
     token,
@@ -135,7 +145,13 @@ router.post("/auth/login", async (req, res) => {
   });
 });
 
-router.post("/auth/logout", (_req, res) => {
+router.post("/auth/logout", async (req, res) => {
+  const sessionToken = req.sessionToken;
+  if (sessionToken) {
+    await db.update(tenantSessionsTable)
+      .set({ revokedAt: new Date() })
+      .where(eq(tenantSessionsTable.token, sessionToken));
+  }
   res.json({ success: true });
 });
 
@@ -158,7 +174,6 @@ router.post("/auth/create-sub-user", async (req, res) => {
   }
 
   const targetTenantId: number = req.isSuperadmin && tenantId ? tenantId : req.tenantId!;
-
   const normalizedEmail = email.toLowerCase().trim();
 
   const existing = await db.query.tenantUsersTable.findFirst({

@@ -1,7 +1,8 @@
 import { Request, Response, NextFunction } from "express";
-import { db, usersTable, tenantsTable, tenantUsersTable, agentConfigsTable } from "@workspace/db";
-import { eq, and } from "drizzle-orm";
+import { db, usersTable, tenantsTable, tenantUsersTable, agentConfigsTable, tenantSessionsTable } from "@workspace/db";
+import { eq, and, gt } from "drizzle-orm";
 import jwt from "jsonwebtoken";
+import crypto from "crypto";
 
 const DEMO_USER_ID = "demo-user";
 
@@ -21,15 +22,17 @@ declare global {
       tenantOwnerId?: number;
       userRole?: "admin" | "manager" | "superadmin";
       isSuperadmin?: boolean;
+      sessionToken?: string;
     }
   }
 }
 
 interface JwtPayload {
   tenantUserId: number;
+  jti: string;
 }
 
-export function signToken(payload: JwtPayload): string {
+export function signToken(payload: { tenantUserId: number; jti: string }): string {
   return jwt.sign(payload, getJwtSecret(), { expiresIn: "7d" });
 }
 
@@ -39,6 +42,16 @@ export function verifyToken(token: string): JwtPayload | null {
   } catch {
     return null;
   }
+}
+
+export function generateSessionId(): string {
+  return crypto.randomBytes(32).toString("hex");
+}
+
+export function getSessionExpiry(): Date {
+  const d = new Date();
+  d.setDate(d.getDate() + 7);
+  return d;
 }
 
 async function ensureTenantForUser(user: {
@@ -85,11 +98,23 @@ export async function resolveUser(req: Request, res: Response, next: NextFunctio
     const authHeader = req.headers["authorization"] as string | undefined;
 
     if (authHeader && authHeader.startsWith("Bearer ")) {
-      const token = authHeader.slice(7);
-      const payload = verifyToken(token);
+      const rawToken = authHeader.slice(7);
+      const payload = verifyToken(rawToken);
 
       if (!payload) {
         res.status(401).json({ error: "Invalid or expired token" });
+        return;
+      }
+
+      const session = await db.query.tenantSessionsTable.findFirst({
+        where: and(
+          eq(tenantSessionsTable.token, payload.jti),
+          gt(tenantSessionsTable.expiresAt, new Date()),
+        ),
+      });
+
+      if (!session || session.revokedAt !== null) {
+        res.status(401).json({ error: "Session not found or has been revoked" });
         return;
       }
 
@@ -140,6 +165,7 @@ export async function resolveUser(req: Request, res: Response, next: NextFunctio
       req.tenantId = tenantUser.tenantId;
       req.userRole = isSuperadmin ? "superadmin" : (tenantUser.role as "admin" | "manager");
       req.isSuperadmin = isSuperadmin;
+      req.sessionToken = payload.jti;
       return next();
     }
 
