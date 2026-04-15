@@ -9,6 +9,7 @@ export const usersTable = pgTable("users", {
   name: text("name"),
   businessName: text("business_name"),
   plan: text("plan").notNull().default("free"),
+  isSuperadmin: boolean("is_superadmin").notNull().default(false),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 });

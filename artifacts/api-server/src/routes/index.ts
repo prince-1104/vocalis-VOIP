@@ -1,4 +1,5 @@
 import { Router, type IRouter } from "express";
+import { requireRole } from "../middleware/auth";
 import healthRouter from "./health";
 import authRouter from "./auth";
 import contactsRouter from "./contacts";
@@ -14,13 +15,16 @@ const router: IRouter = Router();
 
 router.use(healthRouter);
 router.use(authRouter);
+
 router.use(contactsRouter);
 router.use(campaignsRouter);
 router.use(callsRouter);
-router.use(agentsRouter);
-router.use(trainingRouter);
-router.use(scriptsRouter);
 router.use(analyticsRouter);
+
+router.use(requireRole("admin"), agentsRouter);
+router.use(requireRole("admin"), trainingRouter);
+router.use(requireRole("admin"), scriptsRouter);
+
 router.use(twilioRouter);
 
 export default router;

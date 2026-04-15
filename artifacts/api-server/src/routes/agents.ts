@@ -22,7 +22,8 @@ router.get("/agents", async (req, res) => {
 
   res.json({
     ...config,
-    twilioAuthToken: config.twilioAuthToken ? "***" : undefined,
+    twilioAccountSid: req.isSuperadmin ? config.twilioAccountSid : (config.twilioAccountSid ? "***configured***" : null),
+    twilioAuthToken: req.isSuperadmin ? config.twilioAuthToken : (config.twilioAuthToken ? "***" : null),
     twilioConfigured: !!(config.twilioAccountSid && config.twilioAuthToken),
   });
 });
@@ -40,15 +41,21 @@ router.put("/agents", async (req, res) => {
   if (agentName !== undefined) updateData.agentName = agentName;
   if (voice !== undefined) updateData.voice = voice;
   if (language !== undefined) updateData.language = language;
-  if (phoneNumber !== undefined) updateData.phoneNumber = phoneNumber;
-  if (twilioAccountSid !== undefined) updateData.twilioAccountSid = twilioAccountSid;
-  if (twilioAuthToken !== undefined) updateData.twilioAuthToken = twilioAuthToken;
   if (greeting !== undefined) updateData.greeting = greeting;
   if (personality !== undefined) updateData.personality = personality;
   if (maxCallDuration !== undefined) updateData.maxCallDuration = maxCallDuration;
   if (voicemailMessage !== undefined) updateData.voicemailMessage = voicemailMessage;
   if (businessHoursOnly !== undefined) updateData.businessHoursOnly = businessHoursOnly;
   if (aiModel !== undefined && VALID_MODELS.includes(aiModel)) updateData.aiModel = aiModel;
+
+  if (req.isSuperadmin) {
+    if (phoneNumber !== undefined) updateData.phoneNumber = phoneNumber;
+    if (twilioAccountSid !== undefined) updateData.twilioAccountSid = twilioAccountSid;
+    if (twilioAuthToken !== undefined && twilioAuthToken !== "***") updateData.twilioAuthToken = twilioAuthToken;
+  } else if (phoneNumber !== undefined || twilioAccountSid !== undefined || twilioAuthToken !== undefined) {
+    res.status(403).json({ error: "Only superadmin can configure telephony credentials" });
+    return;
+  }
 
   const [config] = await db.update(agentConfigsTable)
     .set(updateData)
@@ -59,7 +66,8 @@ router.put("/agents", async (req, res) => {
 
   res.json({
     ...config,
-    twilioAuthToken: config.twilioAuthToken ? "***" : undefined,
+    twilioAccountSid: req.isSuperadmin ? config.twilioAccountSid : (config.twilioAccountSid ? "***configured***" : null),
+    twilioAuthToken: req.isSuperadmin ? config.twilioAuthToken : (config.twilioAuthToken ? "***" : null),
     twilioConfigured: !!(config.twilioAccountSid && config.twilioAuthToken),
   });
 });
