@@ -6,3 +6,4 @@ export * from "./calls";
 export * from "./agents";
 export * from "./training";
 export * from "./scripts";
+export * from "./settings";

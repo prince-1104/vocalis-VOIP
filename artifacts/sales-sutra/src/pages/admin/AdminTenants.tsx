@@ -1,8 +1,8 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { Link } from "wouter";
 import {
   Building2, Users, Phone, TrendingUp, Plus, ChevronRight,
-  CheckCircle2, XCircle, Loader2
+  CheckCircle2, XCircle, Loader2, DollarSign
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -69,6 +69,23 @@ export default function AdminTenants() {
   const [showCreate, setShowCreate] = useState(false);
   const [creating, setCreating] = useState(false);
   const [form, setForm] = useState({ name: "", slug: "", commissionPct: "0", paymentTermsDays: "30" });
+
+  useEffect(() => {
+    (async () => {
+      const token = localStorage.getItem("ss_auth_token");
+      const headers: Record<string, string> = {};
+      if (token) headers["Authorization"] = `Bearer ${token}`;
+      const res = await fetch("/api/admin/settings", { headers });
+      if (res.ok) {
+        const settings = await res.json() as Record<string, string>;
+        setForm(prev => ({
+          ...prev,
+          commissionPct: settings.defaultCommissionPct ?? prev.commissionPct,
+          paymentTermsDays: settings.defaultPaymentTermsDays ?? prev.paymentTermsDays,
+        }));
+      }
+    })();
+  }, []);
 
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
@@ -152,6 +169,12 @@ export default function AdminTenants() {
                     <div className="flex items-center gap-1.5 text-muted-foreground">
                       <Phone className="w-4 h-4" />
                       <span className="text-sm">{tenant.callsThisMonth} calls</span>
+                    </div>
+                  </div>
+                  <div className="text-center hidden md:block">
+                    <div className="flex items-center gap-1.5 text-muted-foreground">
+                      <DollarSign className="w-4 h-4" />
+                      <span className="text-sm">${tenant.costThisMonth.toFixed(2)}</span>
                     </div>
                   </div>
                   <div className="text-center hidden md:block">

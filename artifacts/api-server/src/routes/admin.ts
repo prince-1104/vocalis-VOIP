@@ -1,5 +1,5 @@
 import { Router, type IRouter } from "express";
-import { db, tenantsTable, tenantUsersTable, callLogsTable, agentConfigsTable, usersTable } from "@workspace/db";
+import { db, tenantsTable, tenantUsersTable, callLogsTable, agentConfigsTable, usersTable, platformSettingsTable } from "@workspace/db";
 import { eq, and, gte, sql } from "drizzle-orm";
 import bcrypt from "bcryptjs";
 
@@ -298,6 +298,34 @@ router.put("/admin/tenants/:id/telephony", async (req, res) => {
 
   await db.update(agentConfigsTable).set(updateData).where(eq(agentConfigsTable.userId, tenant.ownerId));
   res.json({ success: true });
+});
+
+// Platform-wide settings (global defaults for commission, payment terms, etc.)
+router.get("/admin/settings", async (_req, res) => {
+  const rows = await db.select().from(platformSettingsTable);
+  const settings: Record<string, string> = {};
+  for (const row of rows) settings[row.key] = row.value;
+  res.json(settings);
+});
+
+router.patch("/admin/settings", async (req, res) => {
+  const updates = req.body as Record<string, string>;
+  const ALLOWED_KEYS = new Set(["defaultCommissionPct", "defaultPaymentTermsDays", "platformName"]);
+
+  for (const [key, value] of Object.entries(updates)) {
+    if (!ALLOWED_KEYS.has(key)) continue;
+    await db.insert(platformSettingsTable)
+      .values({ key, value: String(value) })
+      .onConflictDoUpdate({
+        target: platformSettingsTable.key,
+        set: { value: String(value), updatedAt: new Date() },
+      });
+  }
+
+  const rows = await db.select().from(platformSettingsTable);
+  const settings: Record<string, string> = {};
+  for (const row of rows) settings[row.key] = row.value;
+  res.json(settings);
 });
 
 export default router;
