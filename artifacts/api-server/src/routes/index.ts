@@ -1,5 +1,5 @@
 import { Router, type IRouter } from "express";
-import { requireRole } from "../middleware/auth";
+import { requireRole, requireSuperadmin } from "../middleware/auth";
 import healthRouter from "./health";
 import authRouter from "./auth";
 import contactsRouter from "./contacts";
@@ -16,10 +16,10 @@ const router: IRouter = Router();
 router.use(healthRouter);
 router.use(authRouter);
 
-router.use(contactsRouter);
-router.use(campaignsRouter);
-router.use(callsRouter);
-router.use(analyticsRouter);
+router.use(requireRole("manager", "admin"), contactsRouter);
+router.use(requireRole("manager", "admin"), campaignsRouter);
+router.use(requireRole("manager", "admin"), callsRouter);
+router.use(requireRole("manager", "admin"), analyticsRouter);
 
 router.use(requireRole("admin"), agentsRouter);
 router.use(requireRole("admin"), trainingRouter);

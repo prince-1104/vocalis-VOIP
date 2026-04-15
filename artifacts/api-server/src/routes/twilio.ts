@@ -3,6 +3,7 @@ import twilio from "twilio";
 import { db, agentConfigsTable, callLogsTable, trainingDataTable, callingScriptsTable, contactsTable, campaignsTable, campaignContactsTable } from "@workspace/db";
 import { eq, and } from "drizzle-orm";
 import { openai } from "@workspace/integrations-openai-ai-server";
+import { requireRole } from "../middleware/auth";
 
 const router: IRouter = Router();
 
@@ -283,7 +284,7 @@ router.post("/twilio/status", async (req, res) => {
   res.status(200).send("OK");
 });
 
-router.post("/contacts/:id/dial", async (req, res) => {
+router.post("/contacts/:id/dial", requireRole("admin"), async (req, res) => {
   const userId = req.userId!;
 
   const contact = await db.query.contactsTable.findFirst({
@@ -339,7 +340,7 @@ router.post("/contacts/:id/dial", async (req, res) => {
   res.json({ callSid: call.sid, callLogId: callLog.id, status: "dialing" });
 });
 
-router.post("/campaigns/:id/dial-next", async (req, res) => {
+router.post("/campaigns/:id/dial-next", requireRole("admin"), async (req, res) => {
   const userId = req.userId!;
 
   const campaign = await db.query.campaignsTable.findFirst({

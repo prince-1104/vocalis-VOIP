@@ -4,13 +4,21 @@ import { eq, and } from "drizzle-orm";
 import jwt from "jsonwebtoken";
 
 const DEMO_USER_ID = "demo-user";
-const JWT_SECRET = process.env.JWT_SECRET || "dev-secret-change-in-production";
+
+function getJwtSecret(): string {
+  const secret = process.env.JWT_SECRET;
+  if (!secret) {
+    throw new Error("JWT_SECRET environment variable is required but not set");
+  }
+  return secret;
+}
 
 declare global {
   namespace Express {
     interface Request {
       userId?: number;
       tenantId?: number;
+      tenantOwnerId?: number;
       userRole?: "admin" | "manager" | "superadmin";
       isSuperadmin?: boolean;
     }
@@ -20,23 +28,28 @@ declare global {
 interface JwtPayload {
   tenantUserId: number;
   tenantId: number;
-  userId: number;
+  tenantOwnerId: number;
   role: "admin" | "manager";
 }
 
 export function signToken(payload: JwtPayload): string {
-  return jwt.sign(payload, JWT_SECRET, { expiresIn: "7d" });
+  return jwt.sign(payload, getJwtSecret(), { expiresIn: "7d" });
 }
 
 export function verifyToken(token: string): JwtPayload | null {
   try {
-    return jwt.verify(token, JWT_SECRET) as JwtPayload;
+    return jwt.verify(token, getJwtSecret()) as JwtPayload;
   } catch {
     return null;
   }
 }
 
-async function ensureTenantForUser(user: { id: number; name: string | null; email: string | null; businessName: string | null }) {
+async function ensureTenantForUser(user: {
+  id: number;
+  name: string | null;
+  email: string | null;
+  businessName: string | null;
+}) {
   const existing = await db.query.tenantUsersTable.findFirst({
     where: and(eq(tenantUsersTable.userId, user.id), eq(tenantUsersTable.role, "admin")),
   });
@@ -63,10 +76,10 @@ async function ensureTenantForUser(user: { id: number; name: string | null; emai
   return tenantUser;
 }
 
-const TWILIO_WEBHOOK_PATHS = ["/api/twilio/inbound", "/api/twilio/voice", "/api/twilio/outbound-voice", "/api/twilio/status"];
+const TWILIO_WEBHOOK_PATHS = ["/twilio/inbound", "/twilio/voice", "/twilio/outbound-voice", "/twilio/status"];
 
 function isTwilioWebhook(req: Request): boolean {
-  return TWILIO_WEBHOOK_PATHS.some(p => req.path.startsWith(p.replace("/api", "")));
+  return TWILIO_WEBHOOK_PATHS.some(p => req.path === p || req.path.startsWith(p + "?"));
 }
 
 export async function resolveUser(req: Request, res: Response, next: NextFunction) {
@@ -108,29 +121,14 @@ export async function resolveUser(req: Request, res: Response, next: NextFunctio
         return;
       }
 
-      let resolvedUserId = tenantUser.userId;
-      if (!resolvedUserId) {
-        const [linkedUser] = await db.insert(usersTable).values({
-          name: tenantUser.name || tenantUser.email,
-          email: tenantUser.email,
-          plan: "free",
-        }).returning();
-        resolvedUserId = linkedUser.id;
-        await db.update(tenantUsersTable)
-          .set({ userId: linkedUser.id })
-          .where(eq(tenantUsersTable.id, tenantUser.id));
-
-        await db.insert(agentConfigsTable).values({
-          userId: linkedUser.id,
-          agentName: "SalesBot",
-          voice: "nova",
-          personality: "professional",
-          greeting: "Hi, this is SalesBot calling on behalf of [Business Name]. Is this a good time to speak?",
-          voicemailMessage: "Hi, this is a message for [Name]. Please call us back at your earliest convenience. Thank you!",
-        }).onConflictDoNothing();
+      const tenantOwnerId = payload.tenantOwnerId || tenant?.ownerId;
+      if (!tenantOwnerId) {
+        res.status(500).json({ error: "Tenant configuration error: no owner found" });
+        return;
       }
 
-      req.userId = resolvedUserId;
+      req.userId = tenantOwnerId;
+      req.tenantOwnerId = tenantOwnerId;
       req.tenantId = tenantUser.tenantId;
       req.userRole = tenantUser.role as "admin" | "manager";
       req.isSuperadmin = false;
@@ -178,6 +176,7 @@ export async function resolveUser(req: Request, res: Response, next: NextFunctio
     }
 
     req.userId = user.id;
+    req.tenantOwnerId = user.id;
     req.tenantId = tenantUser.tenantId;
     req.userRole = user.isSuperadmin ? "superadmin" : "admin";
     req.isSuperadmin = user.isSuperadmin;

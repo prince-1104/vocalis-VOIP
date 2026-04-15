@@ -18,15 +18,6 @@ router.get("/auth/me", async (req, res) => {
     return;
   }
 
-  const tenantUser = req.tenantId
-    ? await db.query.tenantUsersTable.findFirst({
-        where: and(
-          eq(tenantUsersTable.userId, userId),
-          eq(tenantUsersTable.tenantId, req.tenantId),
-        ),
-      })
-    : null;
-
   const tenant = req.tenantId
     ? await db.query.tenantsTable.findFirst({
         where: eq(tenantsTable.id, req.tenantId),
@@ -42,6 +33,7 @@ router.get("/auth/me", async (req, res) => {
     isSuperadmin: user.isSuperadmin,
     role: req.userRole,
     tenantId: req.tenantId,
+    tenantOwnerId: req.tenantOwnerId,
     tenantName: tenant?.name,
     tenantStatus: tenant?.status,
     createdAt: user.createdAt,
@@ -78,7 +70,12 @@ router.post("/auth/login", async (req, res) => {
     where: eq(tenantsTable.id, tenantUser.tenantId),
   });
 
-  if (!tenant || tenant.status === "suspended") {
+  if (!tenant) {
+    res.status(500).json({ error: "Tenant not found" });
+    return;
+  }
+
+  if (tenant.status === "suspended") {
     res.status(402).json({
       error: "Account suspended — outstanding invoice",
       suspended: true,
@@ -86,32 +83,34 @@ router.post("/auth/login", async (req, res) => {
     return;
   }
 
-  let userId = tenantUser.userId;
-  if (!userId) {
-    const [newUser] = await db.insert(usersTable).values({
-      name: tenantUser.name || email,
-      email: tenantUser.email,
-      plan: "free",
-    }).returning();
-    userId = newUser.id;
-    await db.update(tenantUsersTable)
-      .set({ userId: newUser.id })
-      .where(eq(tenantUsersTable.id, tenantUser.id));
+  const tenantOwnerId = tenant.ownerId;
+  if (!tenantOwnerId) {
+    res.status(500).json({ error: "Tenant owner not configured" });
+    return;
+  }
+
+  const tenantOwner = await db.query.usersTable.findFirst({
+    where: eq(usersTable.id, tenantOwnerId),
+  });
+
+  if (!tenantOwner) {
+    res.status(500).json({ error: "Tenant owner account not found" });
+    return;
   }
 
   const token = signToken({
     tenantUserId: tenantUser.id,
     tenantId: tenantUser.tenantId,
-    userId,
+    tenantOwnerId,
     role: tenantUser.role as "admin" | "manager",
   });
 
   res.json({
     token,
     user: {
-      id: userId,
+      id: tenantOwnerId,
       email: tenantUser.email,
-      name: tenantUser.name,
+      name: tenantUser.name || tenantOwner.name,
       role: tenantUser.role,
       tenantId: tenantUser.tenantId,
       tenantName: tenant.name,
@@ -119,7 +118,7 @@ router.post("/auth/login", async (req, res) => {
   });
 });
 
-router.post("/auth/logout", (req, res) => {
+router.post("/auth/logout", (_req, res) => {
   res.json({ success: true });
 });
 
@@ -141,7 +140,7 @@ router.post("/auth/create-sub-user", async (req, res) => {
     return;
   }
 
-  const targetTenantId = req.isSuperadmin && tenantId ? tenantId : req.tenantId!;
+  const targetTenantId: number = req.isSuperadmin && tenantId ? tenantId : req.tenantId!;
 
   const existing = await db.query.tenantUsersTable.findFirst({
     where: and(
