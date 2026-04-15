@@ -2,7 +2,7 @@ import express, { type Express } from "express";
 import cors from "cors";
 import pinoHttp from "pino-http";
 import { logger } from "./lib/logger";
-import { resolveUser, requireRole } from "./middleware/auth";
+import { resolveUser, requireRole, requireSuperadmin } from "./middleware/auth";
 import healthRouter from "./routes/health";
 import authPublicRouter from "./routes/auth-public";
 import authRouter from "./routes/auth";
@@ -15,6 +15,7 @@ import scriptsRouter from "./routes/scripts";
 import analyticsRouter from "./routes/analytics";
 import twilioRouter from "./routes/twilio";
 import dialRouter from "./routes/dial";
+import adminRouter from "./routes/admin";
 
 const app: Express = express();
 
@@ -59,5 +60,7 @@ app.use("/api", requireRole("admin"), trainingRouter);
 app.use("/api", requireRole("admin"), scriptsRouter);
 
 app.use("/api", requireRole("admin"), dialRouter);
+
+app.use("/api", requireSuperadmin, adminRouter);
 
 export default app;
