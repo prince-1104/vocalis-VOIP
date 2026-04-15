@@ -1,4 +1,4 @@
-import { pgTable, text, serial, timestamp, integer, boolean, numeric } from "drizzle-orm/pg-core";
+import { pgTable, text, serial, timestamp, integer, boolean, numeric, uniqueIndex } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 import { usersTable } from "./users";
@@ -27,7 +27,9 @@ export const tenantUsersTable = pgTable("tenant_users", {
   isActive: boolean("is_active").notNull().default(true),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
-});
+}, (table) => [
+  uniqueIndex("tenant_users_tenant_email_unique").on(table.tenantId, table.email),
+]);
 
 export const tenantSessionsTable = pgTable("tenant_sessions", {
   id: serial("id").primaryKey(),

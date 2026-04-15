@@ -41,28 +41,49 @@ router.get("/auth/me", async (req, res) => {
 });
 
 router.post("/auth/login", async (req, res) => {
-  const { email, password } = req.body;
+  const { email, password, tenantSlug } = req.body;
 
   if (!email || !password) {
     res.status(400).json({ error: "Email and password are required" });
     return;
   }
 
-  const tenantUser = await db.query.tenantUsersTable.findFirst({
-    where: and(
-      eq(tenantUsersTable.email, email.toLowerCase().trim()),
-      eq(tenantUsersTable.isActive, true),
-    ),
-  });
+  const normalizedEmail = email.toLowerCase().trim();
+
+  let tenantUser;
+
+  if (tenantSlug) {
+    const tenant = await db.query.tenantsTable.findFirst({
+      where: eq(tenantsTable.slug, tenantSlug),
+    });
+    if (!tenant) {
+      res.status(401).json({ error: "Invalid credentials" });
+      return;
+    }
+    tenantUser = await db.query.tenantUsersTable.findFirst({
+      where: and(
+        eq(tenantUsersTable.email, normalizedEmail),
+        eq(tenantUsersTable.tenantId, tenant.id),
+        eq(tenantUsersTable.isActive, true),
+      ),
+    });
+  } else {
+    tenantUser = await db.query.tenantUsersTable.findFirst({
+      where: and(
+        eq(tenantUsersTable.email, normalizedEmail),
+        eq(tenantUsersTable.isActive, true),
+      ),
+    });
+  }
 
   if (!tenantUser || !tenantUser.passwordHash) {
-    res.status(401).json({ error: "Invalid email or password" });
+    res.status(401).json({ error: "Invalid credentials" });
     return;
   }
 
   const valid = await bcrypt.compare(password, tenantUser.passwordHash);
   if (!valid) {
-    res.status(401).json({ error: "Invalid email or password" });
+    res.status(401).json({ error: "Invalid credentials" });
     return;
   }
 
@@ -98,12 +119,7 @@ router.post("/auth/login", async (req, res) => {
     return;
   }
 
-  const token = signToken({
-    tenantUserId: tenantUser.id,
-    tenantId: tenantUser.tenantId,
-    tenantOwnerId,
-    role: tenantUser.role as "admin" | "manager",
-  });
+  const token = signToken({ tenantUserId: tenantUser.id });
 
   res.json({
     token,
@@ -114,6 +130,7 @@ router.post("/auth/login", async (req, res) => {
       role: tenantUser.role,
       tenantId: tenantUser.tenantId,
       tenantName: tenant.name,
+      tenantSlug: tenant.slug,
     },
   });
 });
@@ -142,9 +159,11 @@ router.post("/auth/create-sub-user", async (req, res) => {
 
   const targetTenantId: number = req.isSuperadmin && tenantId ? tenantId : req.tenantId!;
 
+  const normalizedEmail = email.toLowerCase().trim();
+
   const existing = await db.query.tenantUsersTable.findFirst({
     where: and(
-      eq(tenantUsersTable.email, email.toLowerCase().trim()),
+      eq(tenantUsersTable.email, normalizedEmail),
       eq(tenantUsersTable.tenantId, targetTenantId),
     ),
   });
@@ -159,7 +178,7 @@ router.post("/auth/create-sub-user", async (req, res) => {
   const [newTenantUser] = await db.insert(tenantUsersTable).values({
     tenantId: targetTenantId,
     role,
-    email: email.toLowerCase().trim(),
+    email: normalizedEmail,
     name: name || null,
     passwordHash,
     isActive: true,

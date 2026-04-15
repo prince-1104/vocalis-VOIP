@@ -27,9 +27,6 @@ declare global {
 
 interface JwtPayload {
   tenantUserId: number;
-  tenantId: number;
-  tenantOwnerId: number;
-  role: "admin" | "manager";
 }
 
 export function signToken(payload: JwtPayload): string {
@@ -121,7 +118,7 @@ export async function resolveUser(req: Request, res: Response, next: NextFunctio
         return;
       }
 
-      const tenantOwnerId = payload.tenantOwnerId || tenant?.ownerId;
+      const tenantOwnerId = tenant?.ownerId;
       if (!tenantOwnerId) {
         res.status(500).json({ error: "Tenant configuration error: no owner found" });
         return;
@@ -131,7 +128,12 @@ export async function resolveUser(req: Request, res: Response, next: NextFunctio
         where: eq(usersTable.id, tenantOwnerId),
       });
 
-      const isSuperadmin = ownerUser?.isSuperadmin ?? false;
+      if (!ownerUser) {
+        res.status(500).json({ error: "Tenant owner account not found" });
+        return;
+      }
+
+      const isSuperadmin = ownerUser.isSuperadmin;
 
       req.userId = tenantOwnerId;
       req.tenantOwnerId = tenantOwnerId;
