@@ -36,13 +36,13 @@ function useTenants() {
     try {
       setIsLoading(true);
       const token = localStorage.getItem("ss_auth_token");
-      const headers: HeadersInit = { "Content-Type": "application/json" };
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
       if (token) headers["Authorization"] = `Bearer ${token}`;
       const res = await fetch("/api/admin/tenants", { headers });
       if (!res.ok) throw new Error(await res.text());
       setData(await res.json());
-    } catch (e: any) {
-      setError(e.message);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Unknown error");
     } finally {
       setIsLoading(false);
     }
@@ -53,12 +53,12 @@ function useTenants() {
   return { data, isLoading, error, refetch: fetchTenants };
 }
 
-async function apiPost(path: string, body: any) {
+async function apiPost(path: string, body: Record<string, unknown>) {
   const token = localStorage.getItem("ss_auth_token");
-  const headers: HeadersInit = { "Content-Type": "application/json" };
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (token) headers["Authorization"] = `Bearer ${token}`;
   const res = await fetch(path, { method: "POST", headers, body: JSON.stringify(body) });
-  const data = await res.json();
+  const data = await res.json() as { error?: string };
   if (!res.ok) throw new Error(data.error || "Request failed");
   return data;
 }
@@ -84,8 +84,8 @@ export default function AdminTenants() {
       setShowCreate(false);
       setForm({ name: "", slug: "", commissionPct: "0", paymentTermsDays: "30" });
       refetch();
-    } catch (e: any) {
-      toast({ title: "Error", description: e.message, variant: "destructive" });
+    } catch (e: unknown) {
+      toast({ title: "Error", description: e instanceof Error ? e.message : "Unknown error", variant: "destructive" });
     } finally {
       setCreating(false);
     }

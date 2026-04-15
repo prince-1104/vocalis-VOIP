@@ -14,16 +14,16 @@ import {
 } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
 
-function authHeaders(): HeadersInit {
+function authHeaders(): Record<string, string> {
   const token = localStorage.getItem("ss_auth_token");
-  const h: HeadersInit = { "Content-Type": "application/json" };
+  const h: Record<string, string> = { "Content-Type": "application/json" };
   if (token) h["Authorization"] = `Bearer ${token}`;
   return h;
 }
 
-async function apiFetch(path: string, options: RequestInit = {}) {
-  const res = await fetch(path, { ...options, headers: { ...authHeaders(), ...(options.headers as any) } });
-  const data = await res.json();
+async function apiFetch(path: string, options: Omit<RequestInit, "headers"> = {}) {
+  const res = await fetch(path, { ...options, headers: authHeaders() });
+  const data = await res.json() as { error?: string };
   if (!res.ok) throw new Error(data.error || "Request failed");
   return data;
 }
@@ -90,8 +90,8 @@ export default function AdminTenantDetail() {
         twilioAccountSid: data.telephony.twilioAccountSid || "",
         twilioAuthToken: "",
       });
-    } catch (e: any) {
-      toast({ title: "Error", description: e.message, variant: "destructive" });
+    } catch (e: unknown) {
+      toast({ title: "Error", description: e instanceof Error ? e.message : "Unknown error", variant: "destructive" });
     } finally {
       setIsLoading(false);
     }
@@ -113,8 +113,8 @@ export default function AdminTenantDetail() {
       toast({ title: "Tenant updated" });
       setEditMode(false);
       fetchTenant();
-    } catch (e: any) {
-      toast({ title: "Error", description: e.message, variant: "destructive" });
+    } catch (e: unknown) {
+      toast({ title: "Error", description: e instanceof Error ? e.message : "Unknown error", variant: "destructive" });
     } finally {
       setSaving(false);
     }
@@ -130,8 +130,8 @@ export default function AdminTenantDetail() {
       });
       toast({ title: `Tenant ${newStatus === "active" ? "reactivated" : "suspended"}` });
       fetchTenant();
-    } catch (e: any) {
-      toast({ title: "Error", description: e.message, variant: "destructive" });
+    } catch (e: unknown) {
+      toast({ title: "Error", description: e instanceof Error ? e.message : "Unknown error", variant: "destructive" });
     }
   }
 
@@ -147,8 +147,8 @@ export default function AdminTenantDetail() {
       setShowAddUser(false);
       setUserForm({ email: "", name: "", role: "manager", password: "" });
       fetchTenant();
-    } catch (e: any) {
-      toast({ title: "Error", description: e.message, variant: "destructive" });
+    } catch (e: unknown) {
+      toast({ title: "Error", description: e instanceof Error ? e.message : "Unknown error", variant: "destructive" });
     } finally {
       setAddingUser(false);
     }
@@ -162,8 +162,8 @@ export default function AdminTenantDetail() {
       });
       toast({ title: user.isActive ? "User deactivated" : "User activated" });
       fetchTenant();
-    } catch (e: any) {
-      toast({ title: "Error", description: e.message, variant: "destructive" });
+    } catch (e: unknown) {
+      toast({ title: "Error", description: e instanceof Error ? e.message : "Unknown error", variant: "destructive" });
     }
   }
 
@@ -178,8 +178,8 @@ export default function AdminTenantDetail() {
       toast({ title: "Telephony updated" });
       setShowTelephony(false);
       fetchTenant();
-    } catch (e: any) {
-      toast({ title: "Error", description: e.message, variant: "destructive" });
+    } catch (e: unknown) {
+      toast({ title: "Error", description: e instanceof Error ? e.message : "Unknown error", variant: "destructive" });
     } finally {
       setSavingTelephony(false);
     }
@@ -427,7 +427,7 @@ export default function AdminTenantDetail() {
   );
 }
 
-function StatCard({ icon: Icon, label, value }: { icon: React.FC<any>; label: string; value: string | number }) {
+function StatCard({ icon: Icon, label, value }: { icon: React.ComponentType<{ className?: string }>; label: string; value: string | number }) {
   return (
     <div className="glass-panel rounded-xl p-5 border border-white/5">
       <div className="flex items-center gap-3">

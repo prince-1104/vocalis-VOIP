@@ -5,8 +5,21 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
-import { Bot, Phone, Settings2, AlertCircle, Copy, CheckCircle2, Webhook, Cpu } from "lucide-react";
+import { Bot, Phone, Settings2, AlertCircle, Copy, CheckCircle2, Webhook, Cpu, Lock } from "lucide-react";
 import { useForm } from "react-hook-form";
+import { useAuth } from "@/hooks/use-auth";
+
+interface AgentFormValues {
+  agentName: string;
+  voice: string;
+  personality: string;
+  aiModel: string;
+  greeting: string;
+  voicemailMessage: string;
+  phoneNumber: string;
+  twilioAccountSid: string;
+  twilioAuthToken: string;
+}
 
 function WebhookUrl({ label, path }: { label: string; path: string }) {
   const [copied, setCopied] = useState(false);
@@ -33,12 +46,32 @@ function WebhookUrl({ label, path }: { label: string; path: string }) {
   );
 }
 
+function TelephonyReadOnly({ configured }: { configured: boolean }) {
+  return (
+    <div className="rounded-lg border border-white/10 bg-white/5 p-4 flex items-center gap-3">
+      <Lock className="w-5 h-5 text-muted-foreground shrink-0" />
+      <div>
+        <p className="text-sm font-medium text-foreground">
+          {configured ? "Telephony configured by platform" : "Telephony not yet configured"}
+        </p>
+        <p className="text-xs text-muted-foreground mt-0.5">
+          Contact your platform administrator to update Twilio credentials.
+        </p>
+      </div>
+      {configured && <CheckCircle2 className="w-5 h-5 text-green-400 ml-auto shrink-0" />}
+    </div>
+  );
+}
+
 export default function AgentSettings() {
   const { data: agent, isLoading } = useAgentConfig();
   const updateAgent = useUpdateAgentMutation();
   const { toast } = useToast();
+  const { isSuperadmin } = useAuth();
 
-  const form = useForm({
+  const agentWithModel = agent as (typeof agent & { aiModel?: string }) | undefined;
+
+  const form = useForm<AgentFormValues>({
     defaultValues: {
       agentName: "",
       voice: "nova",
@@ -58,7 +91,7 @@ export default function AgentSettings() {
         agentName: agent.agentName || "",
         voice: agent.voice || "nova",
         personality: agent.personality || "professional",
-        aiModel: (agent as any).aiModel || "gpt-4o-mini",
+        aiModel: agentWithModel?.aiModel || "gpt-4o-mini",
         greeting: agent.greeting || "",
         voicemailMessage: agent.voicemailMessage || "",
         phoneNumber: agent.phoneNumber || "",
@@ -66,14 +99,28 @@ export default function AgentSettings() {
         twilioAuthToken: ""
       });
     }
-  }, [agent, form]);
+  }, [agent, form, agentWithModel?.aiModel]);
 
-  const onSubmit = async (data: any) => {
+  const onSubmit = async (data: AgentFormValues) => {
     try {
-      await updateAgent.mutateAsync(data);
+      const payload: Partial<AgentFormValues> = {
+        agentName: data.agentName,
+        voice: data.voice,
+        personality: data.personality,
+        aiModel: data.aiModel,
+        greeting: data.greeting,
+        voicemailMessage: data.voicemailMessage,
+      };
+      if (isSuperadmin) {
+        payload.phoneNumber = data.phoneNumber;
+        payload.twilioAccountSid = data.twilioAccountSid;
+        if (data.twilioAuthToken) payload.twilioAuthToken = data.twilioAuthToken;
+      }
+      await updateAgent.mutateAsync(payload as AgentFormValues);
       toast({ title: "Agent configuration updated" });
-    } catch (err: any) {
-      toast({ title: "Failed to update", description: err.message, variant: "destructive" });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      toast({ title: "Failed to update", description: message, variant: "destructive" });
     }
   };
 
@@ -100,7 +147,7 @@ export default function AgentSettings() {
         <Card className="glass-panel border-white/5">
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
-              <Bot className="w-5 h-5 text-primary" /> Persona & Voice
+              <Bot className="w-5 h-5 text-primary" /> Persona &amp; Voice
             </CardTitle>
             <CardDescription>How your agent presents itself to prospects.</CardDescription>
           </CardHeader>
@@ -112,7 +159,7 @@ export default function AgentSettings() {
               </div>
               <div className="space-y-2">
                 <label className="text-sm font-medium">AI Voice Model</label>
-                <select 
+                <select
                   {...form.register("voice")}
                   className="w-full flex h-10 items-center justify-between rounded-md border border-white/10 bg-background/50 px-3 py-2 text-sm ring-offset-background focus:outline-none focus:ring-2 focus:ring-primary"
                 >
@@ -126,32 +173,32 @@ export default function AgentSettings() {
               </div>
               <div className="space-y-2">
                 <label className="text-sm font-medium">Personality</label>
-                <select 
+                <select
                   {...form.register("personality")}
                   className="w-full flex h-10 items-center justify-between rounded-md border border-white/10 bg-background/50 px-3 py-2 text-sm ring-offset-background focus:outline-none focus:ring-2 focus:ring-primary"
                 >
-                  <option value="professional">Professional & Direct</option>
-                  <option value="friendly">Friendly & Conversational</option>
-                  <option value="energetic">Energetic & Enthusiastic</option>
-                  <option value="calm">Calm & Reassuring</option>
+                  <option value="professional">Professional &amp; Direct</option>
+                  <option value="friendly">Friendly &amp; Conversational</option>
+                  <option value="energetic">Energetic &amp; Enthusiastic</option>
+                  <option value="calm">Calm &amp; Reassuring</option>
                 </select>
               </div>
             </div>
 
             <div className="space-y-2">
               <label className="text-sm font-medium">Default Greeting (Inbound Calls)</label>
-              <Textarea 
-                {...form.register("greeting")} 
-                className="bg-background/50 border-white/10 min-h-[100px]" 
+              <Textarea
+                {...form.register("greeting")}
+                className="bg-background/50 border-white/10 min-h-[100px]"
                 placeholder="Hi, you've reached SalesSutra. I'm Alex, how can I help you today?"
               />
             </div>
-            
+
             <div className="space-y-2">
               <label className="text-sm font-medium">Voicemail Message</label>
-              <Textarea 
-                {...form.register("voicemailMessage")} 
-                className="bg-background/50 border-white/10" 
+              <Textarea
+                {...form.register("voicemailMessage")}
+                className="bg-background/50 border-white/10"
                 placeholder="Please leave a message and our team will get back to you."
               />
             </div>
@@ -163,7 +210,7 @@ export default function AgentSettings() {
             <CardTitle className="flex items-center gap-2">
               <Cpu className="w-5 h-5 text-primary" /> AI Model
             </CardTitle>
-            <CardDescription>Choose the AI model for your agent's responses. Faster and cheaper models are great for structured sales calls.</CardDescription>
+            <CardDescription>Choose the AI model for your agent's responses.</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="space-y-2">
@@ -172,9 +219,9 @@ export default function AgentSettings() {
                 {...form.register("aiModel")}
                 className="w-full flex h-10 items-center justify-between rounded-md border border-white/10 bg-background/50 px-3 py-2 text-sm ring-offset-background focus:outline-none focus:ring-2 focus:ring-primary"
               >
-                <option value="gpt-4o-mini">GPT-4o Mini — fastest &amp; cheapest (~$0.001/call), great for scripted sales</option>
-                <option value="gpt-4o">GPT-4o — balanced quality &amp; cost (~$0.01/call), handles complex objections</option>
-                <option value="gpt-5.2">GPT-5.2 — highest quality (~$0.05/call), best for nuanced enterprise sales</option>
+                <option value="gpt-4o-mini">GPT-4o Mini — fastest &amp; cheapest (~$0.001/call)</option>
+                <option value="gpt-4o">GPT-4o — balanced quality &amp; cost (~$0.01/call)</option>
+                <option value="gpt-5.2">GPT-5.2 — highest quality (~$0.05/call)</option>
               </select>
             </div>
             <div className="grid grid-cols-3 gap-3 text-xs text-center">
@@ -202,28 +249,36 @@ export default function AgentSettings() {
             <CardTitle className="flex items-center gap-2">
               <Phone className="w-5 h-5 text-primary" /> Telephony Integration
             </CardTitle>
-            <CardDescription>Connect your Twilio account to enable calling capabilities.</CardDescription>
+            <CardDescription>
+              {isSuperadmin
+                ? "Configure Twilio credentials for this tenant."
+                : "Telephony is managed by your platform administrator."}
+            </CardDescription>
           </CardHeader>
           <CardContent className="space-y-6">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              <div className="space-y-2">
-                <label className="text-sm font-medium">Twilio Phone Number</label>
-                <Input {...form.register("phoneNumber")} placeholder="+1234567890" className="bg-background/50 border-white/10" />
+            {isSuperadmin ? (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Twilio Phone Number</label>
+                  <Input {...form.register("phoneNumber")} placeholder="+1234567890" className="bg-background/50 border-white/10" />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Twilio Account SID</label>
+                  <Input {...form.register("twilioAccountSid")} className="bg-background/50 border-white/10" />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Twilio Auth Token</label>
+                  <Input
+                    {...form.register("twilioAuthToken")}
+                    type="password"
+                    placeholder={agent?.twilioConfigured ? "•••••••••••••••• (Configured)" : "Enter token"}
+                    className="bg-background/50 border-white/10"
+                  />
+                </div>
               </div>
-              <div className="space-y-2">
-                <label className="text-sm font-medium">Twilio Account SID</label>
-                <Input {...form.register("twilioAccountSid")} className="bg-background/50 border-white/10" />
-              </div>
-              <div className="space-y-2">
-                <label className="text-sm font-medium">Twilio Auth Token</label>
-                <Input 
-                  {...form.register("twilioAuthToken")} 
-                  type="password" 
-                  placeholder={agent?.twilioConfigured ? "•••••••••••••••• (Configured)" : "Enter token"} 
-                  className="bg-background/50 border-white/10" 
-                />
-              </div>
-            </div>
+            ) : (
+              <TelephonyReadOnly configured={!!agent?.twilioConfigured} />
+            )}
           </CardContent>
         </Card>
 
@@ -233,7 +288,7 @@ export default function AgentSettings() {
               <Webhook className="w-5 h-5 text-primary" /> Twilio Webhook URLs
             </CardTitle>
             <CardDescription>
-              Copy these URLs into your Twilio phone number configuration. For inbound calls, paste the Inbound URL as your "A call comes in" webhook. For status updates, paste the Status Callback URL.
+              Copy these URLs into your Twilio phone number configuration.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">

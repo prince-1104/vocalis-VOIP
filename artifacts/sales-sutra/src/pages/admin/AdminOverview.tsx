@@ -23,7 +23,7 @@ export default function AdminOverview() {
     (async () => {
       try {
         const token = localStorage.getItem("ss_auth_token");
-        const headers: HeadersInit = {};
+        const headers: Record<string, string> = {};
         if (token) headers["Authorization"] = `Bearer ${token}`;
         const res = await fetch("/api/admin/tenants", { headers });
         if (res.ok) setTenants(await res.json());
@@ -109,7 +109,7 @@ export default function AdminOverview() {
   );
 }
 
-function StatCard({ icon: Icon, label, value }: { icon: React.FC<any>; label: string; value: string | number }) {
+function StatCard({ icon: Icon, label, value }: { icon: React.ComponentType<{ className?: string }>; label: string; value: string | number }) {
   return (
     <div className="glass-panel rounded-xl p-4 border border-white/5">
       <div className="flex items-center gap-3">

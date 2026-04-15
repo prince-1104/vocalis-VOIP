@@ -18,6 +18,7 @@ import AdminOverview from "@/pages/admin/AdminOverview";
 import AdminTenants from "@/pages/admin/AdminTenants";
 import AdminTenantDetail from "@/pages/admin/AdminTenantDetail";
 import NotFound from "@/pages/not-found";
+import Forbidden from "@/pages/admin/Forbidden";
 import { useAuth } from "@/hooks/use-auth";
 
 const queryClient = new QueryClient({
@@ -33,7 +34,7 @@ function AdminGuard({ children }: { children: React.ReactNode }) {
   const { isSuperadmin, isLoading, isAuthenticated } = useAuth();
   if (isLoading) return null;
   if (!isAuthenticated) return <Redirect to="/login" />;
-  if (!isSuperadmin) return <Redirect to="/" />;
+  if (!isSuperadmin) return <Forbidden />;
   return <>{children}</>;
 }
 
