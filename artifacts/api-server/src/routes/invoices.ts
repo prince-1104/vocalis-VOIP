@@ -248,6 +248,8 @@ router.get("/invoices/:id", requireRole("admin", "manager"), async (req, res) =>
     });
     if (!invoice) { res.status(404).json({ error: "Invoice not found" }); return; }
 
+    const tenant = await db.query.tenantsTable.findFirst({ where: eq(tenantsTable.id, tenantId) });
+
     const lineItems = await db.select().from(invoiceLineItemsTable)
       .where(eq(invoiceLineItemsTable.invoiceId, id))
       .orderBy(desc(invoiceLineItemsTable.startedAt));
@@ -255,7 +257,13 @@ router.get("/invoices/:id", requireRole("admin", "manager"), async (req, res) =>
     const callCount = lineItems.length;
     const totalMinutes = lineItems.reduce((sum, li) => sum + (li.durationSeconds ?? 0), 0) / 60;
 
-    res.json({ invoice, lineItems, callCount, totalMinutes: parseFloat(totalMinutes.toFixed(2)) });
+    res.json({
+      invoice,
+      tenant: { id: tenant?.id, name: tenant?.name },
+      lineItems,
+      callCount,
+      totalMinutes: parseFloat(totalMinutes.toFixed(2)),
+    });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "Unknown error";
     res.status(500).json({ error: msg });

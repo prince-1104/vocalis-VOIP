@@ -49,6 +49,7 @@ interface LineItem {
 
 interface InvoiceDetail {
   invoice: Invoice;
+  tenant?: { id: number; name: string } | null;
   lineItems: LineItem[];
   callCount: number;
   totalMinutes: number;
@@ -104,6 +105,9 @@ function InvoiceModal({ invoiceId, onClose }: { invoiceId: number; onClose: () =
           <span>Invoice #{invoice.id} — {invoice.period}</span>
           <Badge variant="outline" className={sc.className}>{sc.label}</Badge>
         </DialogTitle>
+        {data.tenant?.name && (
+          <p className="text-sm text-muted-foreground">{data.tenant.name}</p>
+        )}
       </DialogHeader>
 
       <div className="space-y-6 py-2" id="invoice-print-area">

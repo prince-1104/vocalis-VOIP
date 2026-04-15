@@ -176,6 +176,13 @@ export default function AdminInvoices() {
   const [filterStatus, setFilterStatus] = React.useState("all");
   const [editingCommission, setEditingCommission] = React.useState<Record<number, string>>({});
   const [savingCommission, setSavingCommission] = React.useState<Record<number, boolean>>({});
+  const [sortKey, setSortKey] = React.useState<"createdAt" | "dueDate" | "status" | "totalBilledCostUsd">("createdAt");
+  const [sortDir, setSortDir] = React.useState<"asc" | "desc">("desc");
+
+  function toggleSort(key: typeof sortKey) {
+    if (sortKey === key) setSortDir((d) => d === "asc" ? "desc" : "asc");
+    else { setSortKey(key); setSortDir("desc"); }
+  }
 
   const { data: invoicesData, isLoading: loadingInvoices } = useQuery<{ invoices: Invoice[] }>({
     queryKey: ["admin-invoices"],
@@ -227,7 +234,14 @@ export default function AdminInvoices() {
     }
   }
 
-  const filtered = filterStatus === "all" ? invoices : invoices.filter((inv) => inv.status === filterStatus);
+  const filteredBase = filterStatus === "all" ? invoices : invoices.filter((inv) => inv.status === filterStatus);
+  const filtered = [...filteredBase].sort((a, b) => {
+    let av: string | number = a[sortKey as keyof Invoice] as string ?? "";
+    let bv: string | number = b[sortKey as keyof Invoice] as string ?? "";
+    if (sortKey === "totalBilledCostUsd") { av = parseFloat(av as string); bv = parseFloat(bv as string); }
+    const cmp = av < bv ? -1 : av > bv ? 1 : 0;
+    return sortDir === "asc" ? cmp : -cmp;
+  });
 
   const stats = {
     total: invoices.length,
@@ -354,9 +368,24 @@ export default function AdminInvoices() {
                 <TableHead className="text-muted-foreground">Tenant</TableHead>
                 <TableHead className="text-muted-foreground">Period</TableHead>
                 <TableHead className="text-muted-foreground">Commission</TableHead>
-                <TableHead className="text-muted-foreground text-right">Billed</TableHead>
-                <TableHead className="text-muted-foreground">Status</TableHead>
-                <TableHead className="text-muted-foreground">Due</TableHead>
+                <TableHead
+                  className="text-muted-foreground text-right cursor-pointer hover:text-foreground select-none"
+                  onClick={() => toggleSort("totalBilledCostUsd")}
+                >
+                  Billed {sortKey === "totalBilledCostUsd" ? (sortDir === "asc" ? "↑" : "↓") : ""}
+                </TableHead>
+                <TableHead
+                  className="text-muted-foreground cursor-pointer hover:text-foreground select-none"
+                  onClick={() => toggleSort("status")}
+                >
+                  Status {sortKey === "status" ? (sortDir === "asc" ? "↑" : "↓") : ""}
+                </TableHead>
+                <TableHead
+                  className="text-muted-foreground cursor-pointer hover:text-foreground select-none"
+                  onClick={() => toggleSort("dueDate")}
+                >
+                  Due {sortKey === "dueDate" ? (sortDir === "asc" ? "↑" : "↓") : ""}
+                </TableHead>
                 <TableHead className="text-muted-foreground">Actions</TableHead>
               </TableRow>
             </TableHeader>

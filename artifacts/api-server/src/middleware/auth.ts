@@ -207,10 +207,15 @@ export async function resolveUser(req: Request, res: Response, next: NextFunctio
     });
 
     if (tenant && tenant.status === "suspended" && !user.isSuperadmin) {
+      const overdueInvoice = await db.query.invoicesTable.findFirst({
+        where: and(eq(invoicesTable.tenantId, tenant.id), eq(invoicesTable.status, "overdue")),
+      });
       res.status(402).json({
         error: "Account suspended — outstanding invoice",
         suspended: true,
         tenantId: tenant.id,
+        invoiceId: overdueInvoice?.id ?? null,
+        amountDue: overdueInvoice?.totalBilledCostUsd ?? null,
       });
       return;
     }
