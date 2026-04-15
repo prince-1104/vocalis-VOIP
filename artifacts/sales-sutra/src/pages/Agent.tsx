@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
-import { Bot, Phone, Settings2, AlertCircle, Copy, CheckCircle2, Webhook } from "lucide-react";
+import { Bot, Phone, Settings2, AlertCircle, Copy, CheckCircle2, Webhook, Cpu } from "lucide-react";
 import { useForm } from "react-hook-form";
 
 function WebhookUrl({ label, path }: { label: string; path: string }) {
@@ -43,6 +43,7 @@ export default function AgentSettings() {
       agentName: "",
       voice: "nova",
       personality: "professional",
+      aiModel: "gpt-4o-mini",
       greeting: "",
       voicemailMessage: "",
       phoneNumber: "",
@@ -57,6 +58,7 @@ export default function AgentSettings() {
         agentName: agent.agentName || "",
         voice: agent.voice || "nova",
         personality: agent.personality || "professional",
+        aiModel: (agent as any).aiModel || "gpt-4o-mini",
         greeting: agent.greeting || "",
         voicemailMessage: agent.voicemailMessage || "",
         phoneNumber: agent.phoneNumber || "",
@@ -152,6 +154,45 @@ export default function AgentSettings() {
                 className="bg-background/50 border-white/10" 
                 placeholder="Please leave a message and our team will get back to you."
               />
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card className="glass-panel border-white/5">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Cpu className="w-5 h-5 text-primary" /> AI Model
+            </CardTitle>
+            <CardDescription>Choose the AI model for your agent's responses. Faster and cheaper models are great for structured sales calls.</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Conversation Model</label>
+              <select
+                {...form.register("aiModel")}
+                className="w-full flex h-10 items-center justify-between rounded-md border border-white/10 bg-background/50 px-3 py-2 text-sm ring-offset-background focus:outline-none focus:ring-2 focus:ring-primary"
+              >
+                <option value="gpt-4o-mini">GPT-4o Mini — fastest &amp; cheapest (~$0.001/call), great for scripted sales</option>
+                <option value="gpt-4o">GPT-4o — balanced quality &amp; cost (~$0.01/call), handles complex objections</option>
+                <option value="gpt-5.2">GPT-5.2 — highest quality (~$0.05/call), best for nuanced enterprise sales</option>
+              </select>
+            </div>
+            <div className="grid grid-cols-3 gap-3 text-xs text-center">
+              <div className="bg-green-500/10 border border-green-500/20 rounded-lg p-3">
+                <div className="font-semibold text-green-400">GPT-4o Mini</div>
+                <div className="text-muted-foreground mt-1">~$0.001 / call</div>
+                <div className="text-muted-foreground">Best for scripts</div>
+              </div>
+              <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg p-3">
+                <div className="font-semibold text-blue-400">GPT-4o</div>
+                <div className="text-muted-foreground mt-1">~$0.01 / call</div>
+                <div className="text-muted-foreground">Balanced</div>
+              </div>
+              <div className="bg-purple-500/10 border border-purple-500/20 rounded-lg p-3">
+                <div className="font-semibold text-purple-400">GPT-5.2</div>
+                <div className="text-muted-foreground mt-1">~$0.05 / call</div>
+                <div className="text-muted-foreground">Premium quality</div>
+              </div>
             </div>
           </CardContent>
         </Card>

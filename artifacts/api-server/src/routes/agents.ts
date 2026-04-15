@@ -31,8 +31,10 @@ router.put("/agents", async (req, res) => {
   const userId = req.userId!;
   const {
     agentName, voice, language, phoneNumber, twilioAccountSid, twilioAuthToken,
-    greeting, personality, maxCallDuration, voicemailMessage, businessHoursOnly
+    greeting, personality, maxCallDuration, voicemailMessage, businessHoursOnly, aiModel
   } = req.body;
+
+  const VALID_MODELS = ["gpt-4o-mini", "gpt-4o", "gpt-5.2"];
 
   const updateData: any = { updatedAt: new Date() };
   if (agentName !== undefined) updateData.agentName = agentName;
@@ -46,6 +48,7 @@ router.put("/agents", async (req, res) => {
   if (maxCallDuration !== undefined) updateData.maxCallDuration = maxCallDuration;
   if (voicemailMessage !== undefined) updateData.voicemailMessage = voicemailMessage;
   if (businessHoursOnly !== undefined) updateData.businessHoursOnly = businessHoursOnly;
+  if (aiModel !== undefined && VALID_MODELS.includes(aiModel)) updateData.aiModel = aiModel;
 
   const [config] = await db.update(agentConfigsTable)
     .set(updateData)

@@ -20,38 +20,46 @@ function getBaseUrl(req: any): string {
   return `https://${host}`;
 }
 
-async function buildSystemPrompt(userId: number, agentConfig: any): Promise<string> {
-  const trainingData = await db.select().from(trainingDataTable).where(eq(trainingDataTable.userId, userId));
-  const scripts = await db.select().from(callingScriptsTable).where(and(eq(callingScriptsTable.userId, userId), eq(callingScriptsTable.isDefault, true))).limit(1);
+const KB_ENTRY_MAX_CHARS = 300;
+const KB_MAX_ENTRIES = 6;
 
-  let system = `You are ${agentConfig.agentName || "SalesBot"}, an AI sales representative. `;
-  system += `Your personality is ${agentConfig.personality || "professional"}. `;
-  system += `You are on a phone call. Keep responses concise and conversational — maximum 2-3 sentences. `;
-  system += `Never say you are an AI unless directly asked. Focus on helping the prospect.\n\n`;
+async function buildSystemPrompt(userId: number, agentConfig: any): Promise<string> {
+  const [trainingData, scripts] = await Promise.all([
+    db.select().from(trainingDataTable).where(eq(trainingDataTable.userId, userId)).limit(KB_MAX_ENTRIES),
+    db.select().from(callingScriptsTable).where(and(eq(callingScriptsTable.userId, userId), eq(callingScriptsTable.isDefault, true))).limit(1),
+  ]);
+
+  let system = `You are ${agentConfig.agentName || "SalesBot"}, an AI sales representative`;
+  if (agentConfig.personality) system += ` with a ${agentConfig.personality} personality`;
+  system += `. You are on a live phone call. Keep ALL responses under 2 sentences — be direct and conversational. Never mention you are an AI unless directly asked.\n\n`;
 
   if (trainingData.length > 0) {
-    system += `KNOWLEDGE BASE:\n`;
+    system += `KNOWLEDGE BASE (use this to answer questions):\n`;
     for (const td of trainingData) {
-      system += `[${td.type.toUpperCase()}] ${td.title}: ${td.content}\n\n`;
+      const snippet = td.content.length > KB_ENTRY_MAX_CHARS
+        ? td.content.slice(0, KB_ENTRY_MAX_CHARS).trimEnd() + "…"
+        : td.content;
+      system += `• [${td.type.replace(/_/g, " ").toUpperCase()}] ${td.title}: ${snippet}\n`;
     }
+    system += "\n";
   }
 
   if (scripts.length > 0) {
     const script = scripts[0];
-    system += `CALLING SCRIPT:\nOpening: ${script.openingLine}\n`;
-    if (script.pitchPoints && Array.isArray(script.pitchPoints)) {
-      system += `Key points: ${(script.pitchPoints as string[]).join(", ")}\n`;
+    system += `CALL SCRIPT:\n`;
+    system += `Opening: "${script.openingLine}"\n`;
+    if (script.pitchPoints && Array.isArray(script.pitchPoints) && (script.pitchPoints as string[]).length > 0) {
+      system += `Key points: ${(script.pitchPoints as string[]).slice(0, 3).join(" | ")}\n`;
     }
-    if (script.closingLine) {
-      system += `Closing: ${script.closingLine}\n`;
-    }
+    if (script.closingLine) system += `Closing: "${script.closingLine}"\n`;
+    system += "\n";
   }
 
-  system += `\nAlways end your response naturally and, if appropriate, ask a follow-up question to keep the conversation going.`;
+  system += `After each response, ask one concise follow-up question to keep the conversation moving forward.`;
   return system;
 }
 
-async function generateAIResponse(systemPrompt: string, history: {role: string, content: string}[], userMessage: string): Promise<string> {
+async function generateAIResponse(systemPrompt: string, history: {role: string, content: string}[], userMessage: string, model = "gpt-4o-mini"): Promise<string> {
   const messages: any[] = [
     { role: "system", content: systemPrompt },
     ...history.map(h => ({ role: h.role, content: h.content })),
@@ -59,8 +67,8 @@ async function generateAIResponse(systemPrompt: string, history: {role: string, 
   ];
 
   const response = await openai.chat.completions.create({
-    model: "gpt-5.2",
-    max_completion_tokens: 200,
+    model,
+    max_completion_tokens: 150,
     messages,
   });
 
@@ -135,12 +143,14 @@ router.post("/twilio/voice", async (req, res) => {
 
   let aiResponse: string;
 
+  const aiModel = agentConfig?.aiModel || "gpt-4o-mini";
+
   if (isSilent || !speechResult.trim()) {
     aiResponse = "I didn't quite catch that. Are you still there? Please go ahead and speak.";
   } else {
     const systemPrompt = await buildSystemPrompt(userId, agentConfig || {});
     try {
-      aiResponse = await generateAIResponse(systemPrompt, history, speechResult);
+      aiResponse = await generateAIResponse(systemPrompt, history, speechResult, aiModel);
     } catch (err) {
       console.error("AI response error:", err);
       aiResponse = "I'm sorry, I had a technical issue. Could you please repeat that?";
@@ -150,7 +160,7 @@ router.post("/twilio/voice", async (req, res) => {
   const newHistory = isSilent
     ? history
     : [...history, { role: "user", content: speechResult }, { role: "assistant", content: aiResponse }];
-  const encodedHistory = encodeURIComponent(JSON.stringify(newHistory.slice(-10)));
+  const encodedHistory = encodeURIComponent(JSON.stringify(newHistory.slice(-4)));
 
   const gather = twiml.gather({
     input: ["speech"],

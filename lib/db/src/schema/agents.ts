@@ -16,6 +16,7 @@ export const agentConfigsTable = pgTable("agent_configs", {
   personality: text("personality").notNull().default("professional"),
   maxCallDuration: integer("max_call_duration").notNull().default(10),
   voicemailMessage: text("voicemail_message"),
+  aiModel: text("ai_model").notNull().default("gpt-4o-mini"),
   businessHoursOnly: boolean("business_hours_only").notNull().default(true),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
