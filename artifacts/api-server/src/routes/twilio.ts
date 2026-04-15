@@ -6,10 +6,6 @@ import { openai } from "@workspace/integrations-openai-ai-server";
 
 const router: IRouter = Router();
 
-function getTwilioClient(accountSid: string, authToken: string) {
-  return twilio(accountSid, authToken);
-}
-
 function getBaseUrl(req: any): string {
   const domains = process.env.REPLIT_DOMAINS;
   if (domains) {
@@ -101,24 +97,45 @@ function computeCallCost(durationSeconds: number, direction: string, model: stri
   };
 }
 
-async function resolveUserByPhone(toPhone: string, fallbackUserId?: number): Promise<number | null> {
+async function resolveUserByPhone(toPhone: string): Promise<number | null> {
   if (toPhone) {
     const config = await db.select().from(agentConfigsTable).where(eq(agentConfigsTable.phoneNumber, toPhone)).limit(1);
     if (config.length > 0) return config[0].userId;
   }
-  return fallbackUserId ?? null;
+  return null;
+}
+
+async function resolveUserFromCallLog(callLogId: string): Promise<number | null> {
+  if (!callLogId) return null;
+  const id = parseInt(callLogId, 10);
+  if (isNaN(id)) return null;
+  const log = await db.query.callLogsTable.findFirst({ where: eq(callLogsTable.id, id) });
+  return log?.userId ?? null;
+}
+
+function mapVoice(voice?: string | null): string {
+  const voiceMap: Record<string, string> = {
+    alloy: "Polly.Joanna",
+    echo: "Polly.Matthew",
+    fable: "Polly.Brian",
+    onyx: "Polly.Joey",
+    nova: "Polly.Salli",
+    shimmer: "Polly.Kimberly",
+  };
+  return voiceMap[voice || "nova"] || "Polly.Salli";
 }
 
 router.post("/twilio/inbound", async (req, res) => {
   const twiml = new twilio.twiml.VoiceResponse();
 
-  const userId = await resolveUserByPhone(req.body.To, req.userId);
+  const userId = await resolveUserByPhone(req.body.To);
   if (!userId) {
     twiml.say("We're sorry, this number is not configured. Goodbye.");
     res.type("text/xml");
     res.send(twiml.toString());
     return;
   }
+
   const agentConfig = await db.query.agentConfigsTable.findFirst({ where: eq(agentConfigsTable.userId, userId) });
 
   const greeting = agentConfig?.greeting || "Hi, thank you for calling. How can I help you today?";
@@ -135,7 +152,7 @@ router.post("/twilio/inbound", async (req, res) => {
 
   const gather = twiml.gather({
     input: ["speech"],
-    action: `${baseUrl}/api/twilio/voice?callLogId=${callLog.id}&userId=${userId}&history=`,
+    action: `${baseUrl}/api/twilio/voice?callLogId=${callLog.id}&history=`,
     method: "POST",
     speechTimeout: "auto",
     timeout: 10,
@@ -145,7 +162,7 @@ router.post("/twilio/inbound", async (req, res) => {
 
   gather.say({ voice: mapVoice(agentConfig?.voice), language: agentConfig?.language || "en-US" }, greeting);
 
-  twiml.redirect({ method: "POST" }, `${baseUrl}/api/twilio/voice?callLogId=${callLog.id}&userId=${userId}&history=&silent=1`);
+  twiml.redirect({ method: "POST" }, `${baseUrl}/api/twilio/voice?callLogId=${callLog.id}&history=&silent=1`);
 
   res.type("text/xml");
   res.send(twiml.toString());
@@ -153,10 +170,17 @@ router.post("/twilio/inbound", async (req, res) => {
 
 router.post("/twilio/voice", async (req, res) => {
   const twiml = new twilio.twiml.VoiceResponse();
-  const userId = req.query.userId ? parseInt(req.query.userId as string) : req.userId!;
+  const callLogId = req.query.callLogId as string;
+
+  const userId = await resolveUserFromCallLog(callLogId);
+  if (!userId) {
+    twiml.say("This call session is no longer active. Goodbye.");
+    res.type("text/xml");
+    res.send(twiml.toString());
+    return;
+  }
 
   const speechResult = req.body.SpeechResult || req.body.Digits || "";
-  const callLogId = req.query.callLogId as string;
   const rawHistory = req.query.history as string || "";
   const isSilent = req.query.silent === "1";
 
@@ -166,17 +190,16 @@ router.post("/twilio/voice", async (req, res) => {
       const decoded = decodeURIComponent(rawHistory);
       const parsed = JSON.parse(decoded);
       if (Array.isArray(parsed)) history.push(...parsed);
-    } catch { /* ignore */ }
+    } catch { }
   }
 
   const agentConfig = await db.query.agentConfigsTable.findFirst({ where: eq(agentConfigsTable.userId, userId) });
   const baseUrl = getBaseUrl(req);
   const voice = mapVoice(agentConfig?.voice);
   const lang = agentConfig?.language || "en-US";
+  const aiModel = agentConfig?.aiModel || "gpt-4o-mini";
 
   let aiResponse: string;
-
-  const aiModel = agentConfig?.aiModel || "gpt-4o-mini";
 
   if (isSilent || !speechResult.trim()) {
     aiResponse = "I didn't quite catch that. Are you still there? Please go ahead and speak.";
@@ -197,7 +220,7 @@ router.post("/twilio/voice", async (req, res) => {
 
   const gather = twiml.gather({
     input: ["speech"],
-    action: `${baseUrl}/api/twilio/voice?callLogId=${callLogId}&userId=${userId}&history=${encodedHistory}`,
+    action: `${baseUrl}/api/twilio/voice?callLogId=${callLogId}&history=${encodedHistory}`,
     method: "POST",
     speechTimeout: "auto",
     timeout: 10,
@@ -207,7 +230,7 @@ router.post("/twilio/voice", async (req, res) => {
 
   gather.say({ voice, language: lang }, aiResponse);
 
-  twiml.redirect({ method: "POST" }, `${baseUrl}/api/twilio/voice?callLogId=${callLogId}&userId=${userId}&history=${encodedHistory}&silent=1`);
+  twiml.redirect({ method: "POST" }, `${baseUrl}/api/twilio/voice?callLogId=${callLogId}&history=${encodedHistory}&silent=1`);
 
   res.type("text/xml");
   res.send(twiml.toString());
@@ -215,9 +238,16 @@ router.post("/twilio/voice", async (req, res) => {
 
 router.post("/twilio/outbound-voice", async (req, res) => {
   const twiml = new twilio.twiml.VoiceResponse();
-  const userId = req.query.userId ? parseInt(req.query.userId as string) : req.userId!;
-
   const callLogId = req.query.callLogId as string;
+
+  const userId = await resolveUserFromCallLog(callLogId);
+  if (!userId) {
+    twiml.say("This call session is no longer active. Goodbye.");
+    res.type("text/xml");
+    res.send(twiml.toString());
+    return;
+  }
+
   const agentConfig = await db.query.agentConfigsTable.findFirst({ where: eq(agentConfigsTable.userId, userId) });
 
   const scripts = await db.select().from(callingScriptsTable).where(and(eq(callingScriptsTable.userId, userId), eq(callingScriptsTable.isDefault, true))).limit(1);
@@ -227,13 +257,12 @@ router.post("/twilio/outbound-voice", async (req, res) => {
     : agentConfig?.greeting || "Hi, I'm calling on behalf of our company. Is this a good time to speak?";
 
   const baseUrl = getBaseUrl(req);
-
   const voice = mapVoice(agentConfig?.voice);
   const lang = agentConfig?.language || "en-US";
 
   const gather = twiml.gather({
     input: ["speech"],
-    action: `${baseUrl}/api/twilio/voice?callLogId=${callLogId}&userId=${userId}&history=`,
+    action: `${baseUrl}/api/twilio/voice?callLogId=${callLogId}&history=`,
     method: "POST",
     speechTimeout: "auto",
     timeout: 10,
@@ -243,7 +272,7 @@ router.post("/twilio/outbound-voice", async (req, res) => {
 
   gather.say({ voice, language: lang }, openingLine);
 
-  twiml.redirect({ method: "POST" }, `${baseUrl}/api/twilio/voice?callLogId=${callLogId}&userId=${userId}&history=&silent=1`);
+  twiml.redirect({ method: "POST" }, `${baseUrl}/api/twilio/voice?callLogId=${callLogId}&history=&silent=1`);
 
   res.type("text/xml");
   res.send(twiml.toString());
@@ -288,18 +317,5 @@ router.post("/twilio/status", async (req, res) => {
 
   res.status(200).send("OK");
 });
-
-
-function mapVoice(voice?: string | null): string {
-  const voiceMap: Record<string, string> = {
-    alloy: "Polly.Joanna",
-    echo: "Polly.Matthew",
-    fable: "Polly.Brian",
-    onyx: "Polly.Joey",
-    nova: "Polly.Salli",
-    shimmer: "Polly.Kimberly",
-  };
-  return voiceMap[voice || "nova"] || "Polly.Salli";
-}
 
 export default router;

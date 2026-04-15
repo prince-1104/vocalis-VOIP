@@ -7,13 +7,13 @@ import { generateSessionId, getSessionExpiry, signToken } from "../middleware/au
 const router: IRouter = Router();
 
 router.get("/auth/me", async (req, res) => {
-  const userId = req.userId!;
+  const tenantOwnerId = req.tenantOwnerId!;
 
-  const user = await db.query.usersTable.findFirst({
-    where: eq(usersTable.id, userId),
+  const ownerUser = await db.query.usersTable.findFirst({
+    where: eq(usersTable.id, tenantOwnerId),
   });
 
-  if (!user) {
+  if (!ownerUser) {
     res.status(404).json({ error: "User not found" });
     return;
   }
@@ -25,18 +25,22 @@ router.get("/auth/me", async (req, res) => {
     : null;
 
   res.json({
-    id: user.id,
-    email: user.email,
-    name: user.name,
-    businessName: user.businessName,
-    plan: user.plan,
+    id: req.tenantUserId,
+    email: req.authenticatedEmail,
+    name: req.authenticatedName,
     isSuperadmin: req.isSuperadmin ?? false,
     role: req.userRole,
     tenantId: req.tenantId,
     tenantOwnerId: req.tenantOwnerId,
     tenantName: tenant?.name,
     tenantStatus: tenant?.status,
-    createdAt: user.createdAt,
+    ownerProfile: {
+      id: ownerUser.id,
+      email: ownerUser.email,
+      name: ownerUser.name,
+      businessName: ownerUser.businessName,
+      plan: ownerUser.plan,
+    },
   });
 });
 

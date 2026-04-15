@@ -20,6 +20,9 @@ declare global {
       userId?: number;
       tenantId?: number;
       tenantOwnerId?: number;
+      tenantUserId?: number;
+      authenticatedEmail?: string;
+      authenticatedName?: string | null;
       userRole?: "admin" | "manager" | "superadmin";
       isSuperadmin?: boolean;
       sessionToken?: string;
@@ -86,15 +89,8 @@ async function ensureTenantForUser(user: {
   return tenantUser;
 }
 
-const TWILIO_WEBHOOK_PATHS = ["/twilio/inbound", "/twilio/voice", "/twilio/outbound-voice", "/twilio/status"];
-
-function isTwilioWebhook(req: Request): boolean {
-  return TWILIO_WEBHOOK_PATHS.some(p => req.path === p || req.path.startsWith(p + "?"));
-}
-
 export async function resolveUser(req: Request, res: Response, next: NextFunction) {
   try {
-    const skipSuspensionCheck = isTwilioWebhook(req);
     const authHeader = req.headers["authorization"] as string | undefined;
 
     if (authHeader && authHeader.startsWith("Bearer ")) {
@@ -134,7 +130,7 @@ export async function resolveUser(req: Request, res: Response, next: NextFunctio
         where: eq(tenantsTable.id, tenantUser.tenantId),
       });
 
-      if (!skipSuspensionCheck && (!tenant || tenant.status === "suspended")) {
+      if (!tenant || tenant.status === "suspended") {
         res.status(402).json({
           error: "Account suspended — outstanding invoice",
           suspended: true,
@@ -143,7 +139,7 @@ export async function resolveUser(req: Request, res: Response, next: NextFunctio
         return;
       }
 
-      const tenantOwnerId = tenant?.ownerId;
+      const tenantOwnerId = tenant.ownerId;
       if (!tenantOwnerId) {
         res.status(500).json({ error: "Tenant configuration error: no owner found" });
         return;
@@ -152,6 +148,9 @@ export async function resolveUser(req: Request, res: Response, next: NextFunctio
       req.userId = tenantOwnerId;
       req.tenantOwnerId = tenantOwnerId;
       req.tenantId = tenantUser.tenantId;
+      req.tenantUserId = tenantUser.id;
+      req.authenticatedEmail = tenantUser.email;
+      req.authenticatedName = tenantUser.name;
       req.userRole = tenantUser.role as "admin" | "manager";
       req.isSuperadmin = false;
       req.sessionToken = payload.jti;
@@ -200,7 +199,7 @@ export async function resolveUser(req: Request, res: Response, next: NextFunctio
       where: eq(tenantsTable.id, tenantUser.tenantId),
     });
 
-    if (!skipSuspensionCheck && tenant && tenant.status === "suspended" && !user.isSuperadmin) {
+    if (tenant && tenant.status === "suspended" && !user.isSuperadmin) {
       res.status(402).json({
         error: "Account suspended — outstanding invoice",
         suspended: true,
@@ -212,6 +211,9 @@ export async function resolveUser(req: Request, res: Response, next: NextFunctio
     req.userId = user.id;
     req.tenantOwnerId = user.id;
     req.tenantId = tenantUser.tenantId;
+    req.tenantUserId = tenantUser.id;
+    req.authenticatedEmail = tenantUser.email || user.email || undefined;
+    req.authenticatedName = tenantUser.name || user.name;
     req.userRole = user.isSuperadmin ? "superadmin" : "admin";
     req.isSuperadmin = user.isSuperadmin;
     next();
