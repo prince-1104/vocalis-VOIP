@@ -1,9 +1,20 @@
 import express, { type Express } from "express";
 import cors from "cors";
 import pinoHttp from "pino-http";
-import router from "./routes";
 import { logger } from "./lib/logger";
-import { resolveUser } from "./middleware/auth";
+import { resolveUser, requireRole } from "./middleware/auth";
+import healthRouter from "./routes/health";
+import authPublicRouter from "./routes/auth-public";
+import authRouter from "./routes/auth";
+import contactsRouter from "./routes/contacts";
+import campaignsRouter from "./routes/campaigns";
+import callsRouter from "./routes/calls";
+import agentsRouter from "./routes/agents";
+import trainingRouter from "./routes/training";
+import scriptsRouter from "./routes/scripts";
+import analyticsRouter from "./routes/analytics";
+import twilioRouter from "./routes/twilio";
+import dialRouter from "./routes/dial";
 
 const app: Express = express();
 
@@ -30,6 +41,23 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-app.use("/api", resolveUser, router);
+app.use("/api", healthRouter);
+app.use("/api", authPublicRouter);
+app.use("/api", twilioRouter);
+
+app.use("/api", resolveUser);
+
+app.use("/api", authRouter);
+
+app.use("/api", requireRole("manager", "admin"), contactsRouter);
+app.use("/api", requireRole("manager", "admin"), campaignsRouter);
+app.use("/api", requireRole("manager", "admin"), callsRouter);
+app.use("/api", requireRole("manager", "admin"), analyticsRouter);
+
+app.use("/api", requireRole("admin"), agentsRouter);
+app.use("/api", requireRole("admin"), trainingRouter);
+app.use("/api", requireRole("admin"), scriptsRouter);
+
+app.use("/api", requireRole("admin"), dialRouter);
 
 export default app;

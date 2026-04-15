@@ -1,9 +1,8 @@
 import { Router, type IRouter } from "express";
 import twilio from "twilio";
-import { db, agentConfigsTable, callLogsTable, trainingDataTable, callingScriptsTable, contactsTable, campaignsTable, campaignContactsTable } from "@workspace/db";
+import { db, agentConfigsTable, callLogsTable, trainingDataTable, callingScriptsTable } from "@workspace/db";
 import { eq, and } from "drizzle-orm";
 import { openai } from "@workspace/integrations-openai-ai-server";
-import { requireRole } from "../middleware/auth";
 
 const router: IRouter = Router();
 
@@ -102,18 +101,24 @@ function computeCallCost(durationSeconds: number, direction: string, model: stri
   };
 }
 
-async function resolveUserByPhone(toPhone: string, fallbackUserId: number): Promise<number> {
+async function resolveUserByPhone(toPhone: string, fallbackUserId?: number): Promise<number | null> {
   if (toPhone) {
     const config = await db.select().from(agentConfigsTable).where(eq(agentConfigsTable.phoneNumber, toPhone)).limit(1);
     if (config.length > 0) return config[0].userId;
   }
-  return fallbackUserId;
+  return fallbackUserId ?? null;
 }
 
 router.post("/twilio/inbound", async (req, res) => {
   const twiml = new twilio.twiml.VoiceResponse();
 
-  const userId = await resolveUserByPhone(req.body.To, req.userId!);
+  const userId = await resolveUserByPhone(req.body.To, req.userId);
+  if (!userId) {
+    twiml.say("We're sorry, this number is not configured. Goodbye.");
+    res.type("text/xml");
+    res.send(twiml.toString());
+    return;
+  }
   const agentConfig = await db.query.agentConfigsTable.findFirst({ where: eq(agentConfigsTable.userId, userId) });
 
   const greeting = agentConfig?.greeting || "Hi, thank you for calling. How can I help you today?";
@@ -210,7 +215,7 @@ router.post("/twilio/voice", async (req, res) => {
 
 router.post("/twilio/outbound-voice", async (req, res) => {
   const twiml = new twilio.twiml.VoiceResponse();
-  const userId = req.userId!;
+  const userId = req.query.userId ? parseInt(req.query.userId as string) : req.userId!;
 
   const callLogId = req.query.callLogId as string;
   const agentConfig = await db.query.agentConfigsTable.findFirst({ where: eq(agentConfigsTable.userId, userId) });
@@ -284,147 +289,6 @@ router.post("/twilio/status", async (req, res) => {
   res.status(200).send("OK");
 });
 
-router.post("/contacts/:id/dial", requireRole("superadmin", "admin"), async (req, res) => {
-  const userId = req.userId!;
-
-  const contact = await db.query.contactsTable.findFirst({
-    where: and(eq(contactsTable.id, parseInt(req.params.id)), eq(contactsTable.userId, userId)),
-  });
-
-  if (!contact) {
-    res.status(404).json({ error: "Contact not found" });
-    return;
-  }
-
-  const agentConfig = await db.query.agentConfigsTable.findFirst({ where: eq(agentConfigsTable.userId, userId) });
-
-  if (!agentConfig?.twilioAccountSid || !agentConfig?.twilioAuthToken) {
-    res.status(400).json({ error: "Twilio credentials not configured. Please set them in AI Agent settings." });
-    return;
-  }
-
-  if (!agentConfig.phoneNumber) {
-    res.status(400).json({ error: "Twilio phone number not configured. Please set it in AI Agent settings." });
-    return;
-  }
-
-  const baseUrl = getBaseUrl(req);
-  const client = getTwilioClient(agentConfig.twilioAccountSid, agentConfig.twilioAuthToken);
-
-  const [callLog] = await db.insert(callLogsTable).values({
-    userId,
-    contactId: contact.id,
-    campaignId: req.body.campaignId || null,
-    direction: "outbound",
-    phone: contact.phone,
-    outcome: "no_answer",
-    aiModel: agentConfig.aiModel || "gpt-4o-mini",
-    startedAt: new Date(),
-  }).returning();
-
-  await db.update(contactsTable)
-    .set({ status: "called", lastCalledAt: new Date(), updatedAt: new Date() })
-    .where(eq(contactsTable.id, contact.id));
-
-  const call = await client.calls.create({
-    to: contact.phone,
-    from: agentConfig.phoneNumber,
-    url: `${baseUrl}/api/twilio/outbound-voice?callLogId=${callLog.id}`,
-    statusCallback: `${baseUrl}/api/twilio/status?callLogId=${callLog.id}`,
-    statusCallbackMethod: "POST",
-    statusCallbackEvent: ["completed", "no-answer", "busy", "failed"],
-    machineDetection: "Enable",
-    asyncAmd: "true",
-  });
-
-  res.json({ callSid: call.sid, callLogId: callLog.id, status: "dialing" });
-});
-
-router.post("/campaigns/:id/dial-next", requireRole("superadmin", "admin"), async (req, res) => {
-  const userId = req.userId!;
-
-  const campaign = await db.query.campaignsTable.findFirst({
-    where: and(eq(campaignsTable.id, parseInt(req.params.id)), eq(campaignsTable.userId, userId)),
-  });
-
-  if (!campaign) {
-    res.status(404).json({ error: "Campaign not found" });
-    return;
-  }
-
-  if (campaign.status !== "active") {
-    res.status(400).json({ error: "Campaign is not active" });
-    return;
-  }
-
-  const contactLinks = await db.select().from(campaignContactsTable)
-    .where(eq(campaignContactsTable.campaignId, campaign.id));
-
-  const pendingContacts = await Promise.all(
-    contactLinks.map(async (link) => {
-      return db.query.contactsTable.findFirst({
-        where: and(eq(contactsTable.id, link.contactId), eq(contactsTable.status, "pending")),
-      });
-    })
-  );
-
-  const nextContact = pendingContacts.find(c => c != null);
-
-  if (!nextContact) {
-    await db.update(campaignsTable)
-      .set({ status: "completed", updatedAt: new Date() })
-      .where(eq(campaignsTable.id, campaign.id));
-    res.json({ done: true, message: "All contacts have been called. Campaign marked as completed." });
-    return;
-  }
-
-  const agentConfig = await db.query.agentConfigsTable.findFirst({ where: eq(agentConfigsTable.userId, userId) });
-
-  if (!agentConfig?.twilioAccountSid || !agentConfig?.twilioAuthToken || !agentConfig?.phoneNumber) {
-    res.status(400).json({ error: "Twilio not fully configured. Check AI Agent settings." });
-    return;
-  }
-
-  const baseUrl = getBaseUrl(req);
-  const client = getTwilioClient(agentConfig.twilioAccountSid, agentConfig.twilioAuthToken);
-
-  const [callLog] = await db.insert(callLogsTable).values({
-    userId,
-    contactId: nextContact.id,
-    campaignId: campaign.id,
-    direction: "outbound",
-    phone: nextContact.phone,
-    outcome: "no_answer",
-    aiModel: agentConfig.aiModel || "gpt-4o-mini",
-    startedAt: new Date(),
-  }).returning();
-
-  await db.update(contactsTable)
-    .set({ status: "called", lastCalledAt: new Date(), updatedAt: new Date() })
-    .where(eq(contactsTable.id, nextContact.id));
-
-  await db.update(campaignsTable)
-    .set({ calledCount: campaign.calledCount + 1, updatedAt: new Date() })
-    .where(eq(campaignsTable.id, campaign.id));
-
-  const call = await client.calls.create({
-    to: nextContact.phone,
-    from: agentConfig.phoneNumber,
-    url: `${baseUrl}/api/twilio/outbound-voice?callLogId=${callLog.id}`,
-    statusCallback: `${baseUrl}/api/twilio/status?callLogId=${callLog.id}`,
-    statusCallbackMethod: "POST",
-    statusCallbackEvent: ["completed", "no-answer", "busy", "failed"],
-    machineDetection: "Enable",
-    asyncAmd: "true",
-  });
-
-  res.json({
-    callSid: call.sid,
-    callLogId: callLog.id,
-    contact: { id: nextContact.id, phone: nextContact.phone, firstName: nextContact.firstName, lastName: nextContact.lastName },
-    remaining: pendingContacts.filter(c => c != null).length - 1,
-  });
-});
 
 function mapVoice(voice?: string | null): string {
   const voiceMap: Record<string, string> = {

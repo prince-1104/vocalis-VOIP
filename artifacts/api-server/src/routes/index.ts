@@ -1,30 +1,11 @@
-import { Router, type IRouter } from "express";
-import { requireRole } from "../middleware/auth";
-import healthRouter from "./health";
-import authRouter from "./auth";
-import contactsRouter from "./contacts";
-import campaignsRouter from "./campaigns";
-import callsRouter from "./calls";
-import agentsRouter from "./agents";
-import trainingRouter from "./training";
-import scriptsRouter from "./scripts";
-import analyticsRouter from "./analytics";
-import twilioRouter from "./twilio";
-
-const router: IRouter = Router();
-
-router.use(healthRouter);
-router.use(authRouter);
-
-router.use(requireRole("manager", "admin"), contactsRouter);
-router.use(requireRole("manager", "admin"), campaignsRouter);
-router.use(requireRole("manager", "admin"), callsRouter);
-router.use(requireRole("manager", "admin"), analyticsRouter);
-
-router.use(requireRole("admin"), agentsRouter);
-router.use(requireRole("admin"), trainingRouter);
-router.use(requireRole("admin"), scriptsRouter);
-
-router.use(twilioRouter);
-
-export default router;
+export { default as healthRouter } from "./health";
+export { default as authPublicRouter } from "./auth-public";
+export { default as authRouter } from "./auth";
+export { default as contactsRouter } from "./contacts";
+export { default as campaignsRouter } from "./campaigns";
+export { default as callsRouter } from "./calls";
+export { default as agentsRouter } from "./agents";
+export { default as trainingRouter } from "./training";
+export { default as scriptsRouter } from "./scripts";
+export { default as analyticsRouter } from "./analytics";
+export { default as twilioRouter } from "./twilio";

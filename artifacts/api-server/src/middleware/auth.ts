@@ -4,7 +4,7 @@ import { eq, and, gt } from "drizzle-orm";
 import jwt from "jsonwebtoken";
 import crypto from "crypto";
 
-const DEMO_USER_ID = "demo-user";
+const IS_DEVELOPMENT = process.env.NODE_ENV !== "production";
 
 function getJwtSecret(): string {
   const secret = process.env.JWT_SECRET;
@@ -158,8 +158,19 @@ export async function resolveUser(req: Request, res: Response, next: NextFunctio
       return next();
     }
 
-    const replitUserId = (req.headers["x-replit-user-id"] as string) || DEMO_USER_ID;
-    const replitUserName = (req.headers["x-replit-user-name"] as string) || "Demo User";
+    const replitUserId = req.headers["x-replit-user-id"] as string | undefined;
+    const replitUserName = req.headers["x-replit-user-name"] as string | undefined;
+
+    if (!replitUserId) {
+      if (IS_DEVELOPMENT) {
+        res.status(401).json({
+          error: "Not authenticated. Provide a Bearer token or Replit identity header.",
+        });
+      } else {
+        res.status(401).json({ error: "Not authenticated" });
+      }
+      return;
+    }
 
     let user = await db.query.usersTable.findFirst({
       where: eq(usersTable.replitUserId, replitUserId),
@@ -168,7 +179,7 @@ export async function resolveUser(req: Request, res: Response, next: NextFunctio
     if (!user) {
       const [newUser] = await db.insert(usersTable).values({
         replitUserId,
-        name: replitUserName,
+        name: replitUserName || null,
         plan: "free",
       }).returning();
       user = newUser;
