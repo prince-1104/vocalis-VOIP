@@ -17,6 +17,7 @@ export const callLogsTable = pgTable("call_logs", {
   aiSummary: text("ai_summary"),
   aiModel: text("ai_model"),
   estimatedCostUsd: numeric("estimated_cost_usd", { precision: 10, scale: 6 }),
+  billedCostUsd: numeric("billed_cost_usd", { precision: 10, scale: 6 }),
   twilioCostUsd: numeric("twilio_cost_usd", { precision: 10, scale: 6 }),
   openaiCostUsd: numeric("openai_cost_usd", { precision: 10, scale: 6 }),
   twilioMinutes: real("twilio_minutes"),

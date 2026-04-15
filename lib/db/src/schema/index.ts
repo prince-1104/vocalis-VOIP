@@ -7,3 +7,4 @@ export * from "./agents";
 export * from "./training";
 export * from "./scripts";
 export * from "./settings";
+export * from "./invoices";

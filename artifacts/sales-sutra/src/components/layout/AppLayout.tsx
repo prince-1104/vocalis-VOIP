@@ -14,6 +14,7 @@ import {
   Menu,
   LogOut,
   Shield,
+  Receipt,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -28,6 +29,7 @@ const ALL_NAV_ITEMS = [
   { href: "/training", label: "Training", icon: GraduationCap, roles: ["admin", "superadmin"] },
   { href: "/scripts", label: "Scripts", icon: ScrollText, roles: ["admin", "superadmin"] },
   { href: "/analytics", label: "Analytics", icon: BarChart3, roles: ["admin", "manager", "superadmin"] },
+  { href: "/billing", label: "Billing", icon: Receipt, roles: ["admin", "manager", "superadmin"] },
 ];
 
 const ROLE_BADGE: Record<string, { label: string; className: string }> = {

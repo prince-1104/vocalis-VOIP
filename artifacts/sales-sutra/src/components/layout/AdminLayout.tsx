@@ -1,6 +1,6 @@
 import React from "react";
 import { Link, useLocation } from "wouter";
-import { Bot, Building2, LayoutDashboard, ChevronLeft, LogOut } from "lucide-react";
+import { Bot, Building2, LayoutDashboard, ChevronLeft, LogOut, Receipt } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { clearStoredToken } from "@/hooks/use-auth";
@@ -9,6 +9,7 @@ import { useQueryClient } from "@tanstack/react-query";
 const ADMIN_NAV = [
   { href: "/admin", label: "Overview", icon: LayoutDashboard, exact: true },
   { href: "/admin/tenants", label: "Tenants", icon: Building2, exact: false },
+  { href: "/admin/invoices", label: "Invoices", icon: Receipt, exact: false },
 ];
 
 export function AdminLayout({ children }: { children: React.ReactNode }) {

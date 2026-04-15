@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from "express";
-import { db, usersTable, tenantsTable, tenantUsersTable, agentConfigsTable, tenantSessionsTable } from "@workspace/db";
+import { db, usersTable, tenantsTable, tenantUsersTable, agentConfigsTable, tenantSessionsTable, invoicesTable } from "@workspace/db";
 import { eq, and, gt } from "drizzle-orm";
 import jwt from "jsonwebtoken";
 import crypto from "crypto";
@@ -131,10 +131,17 @@ export async function resolveUser(req: Request, res: Response, next: NextFunctio
       });
 
       if (!tenant || tenant.status === "suspended") {
+        const overdueInvoice = tenant
+          ? await db.query.invoicesTable.findFirst({
+              where: and(eq(invoicesTable.tenantId, tenant.id), eq(invoicesTable.status, "overdue")),
+            })
+          : null;
         res.status(402).json({
           error: "Account suspended — outstanding invoice",
           suspended: true,
           tenantId: tenant?.id,
+          invoiceId: overdueInvoice?.id ?? null,
+          amountDue: overdueInvoice?.totalBilledCostUsd ?? null,
         });
         return;
       }

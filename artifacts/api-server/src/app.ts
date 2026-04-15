@@ -16,6 +16,7 @@ import analyticsRouter from "./routes/analytics";
 import twilioRouter from "./routes/twilio";
 import dialRouter from "./routes/dial";
 import adminRouter from "./routes/admin";
+import invoicesRouter, { checkAndMarkOverdueInvoices } from "./routes/invoices";
 
 const app: Express = express();
 
@@ -62,5 +63,21 @@ app.use("/api", requireRole("admin"), scriptsRouter);
 app.use("/api", requireRole("admin"), dialRouter);
 
 app.use("/api", requireSuperadmin, adminRouter);
+
+app.use("/api", invoicesRouter);
+
+const OVERDUE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+async function runOverdueCheck() {
+  try {
+    await checkAndMarkOverdueInvoices();
+    logger.info("Overdue invoice check complete");
+  } catch (err) {
+    logger.error({ err }, "Overdue invoice check failed");
+  }
+}
+
+runOverdueCheck();
+setInterval(runOverdueCheck, OVERDUE_CHECK_INTERVAL_MS);
 
 export default app;

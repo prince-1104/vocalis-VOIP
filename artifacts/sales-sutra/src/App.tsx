@@ -14,9 +14,12 @@ import Training from "@/pages/Training";
 import Scripts from "@/pages/Scripts";
 import Analytics from "@/pages/Analytics";
 import Login from "@/pages/Login";
+import SuspensionNotice from "@/pages/SuspensionNotice";
 import AdminOverview from "@/pages/admin/AdminOverview";
 import AdminTenants from "@/pages/admin/AdminTenants";
 import AdminTenantDetail from "@/pages/admin/AdminTenantDetail";
+import AdminInvoices from "@/pages/admin/AdminInvoices";
+import Billing from "@/pages/Billing";
 import NotFound from "@/pages/not-found";
 import Forbidden from "@/pages/admin/Forbidden";
 import { useAuth } from "@/hooks/use-auth";
@@ -39,8 +42,9 @@ function AdminGuard({ children }: { children: React.ReactNode }) {
 }
 
 function AuthGuard({ children }: { children: React.ReactNode }) {
-  const { isLoading, isAuthenticated } = useAuth();
+  const { isLoading, isAuthenticated, isSuspended, suspensionInvoiceId, suspensionAmountDue } = useAuth();
   if (isLoading) return null;
+  if (isSuspended) return <SuspensionNotice invoiceId={suspensionInvoiceId} amountDue={suspensionAmountDue} />;
   if (!isAuthenticated) return <Redirect to="/login" />;
   return <>{children}</>;
 }
@@ -65,13 +69,20 @@ function Router() {
         </AdminGuard>
       </Route>
       <Route path="/admin/tenants/:id">
-        {(params) => (
+        {() => (
           <AdminGuard>
             <AdminLayout>
               <AdminTenantDetail />
             </AdminLayout>
           </AdminGuard>
         )}
+      </Route>
+      <Route path="/admin/invoices">
+        <AdminGuard>
+          <AdminLayout>
+            <AdminInvoices />
+          </AdminLayout>
+        </AdminGuard>
       </Route>
 
       <Route>
@@ -86,6 +97,7 @@ function Router() {
               <Route path="/training" component={Training} />
               <Route path="/scripts" component={Scripts} />
               <Route path="/analytics" component={Analytics} />
+              <Route path="/billing" component={Billing} />
               <Route component={NotFound} />
             </Switch>
           </AppLayout>

@@ -1,6 +1,6 @@
 import { Router, type IRouter } from "express";
 import twilio from "twilio";
-import { db, agentConfigsTable, callLogsTable, trainingDataTable, callingScriptsTable } from "@workspace/db";
+import { db, agentConfigsTable, callLogsTable, trainingDataTable, callingScriptsTable, tenantsTable } from "@workspace/db";
 import { eq, and } from "drizzle-orm";
 import { openai } from "@workspace/integrations-openai-ai-server";
 
@@ -300,6 +300,20 @@ router.post("/twilio/status", async (req, res) => {
     const model = existingLog?.aiModel || "gpt-4o-mini";
     const costData = callDuration > 0 ? computeCallCost(callDuration, direction, model) : null;
 
+    let commissionPct = 0;
+    if (existingLog) {
+      const tenant = await db.query.tenantsTable.findFirst({
+        where: eq(tenantsTable.ownerId, existingLog.userId),
+      });
+      if (tenant) {
+        commissionPct = parseFloat(tenant.commissionPct ?? "0");
+      }
+    }
+
+    const billedCost = costData
+      ? parseFloat((costData.totalCost * (1 + commissionPct / 100)).toFixed(6))
+      : null;
+
     await db.update(callLogsTable)
       .set({
         outcome: outcomeMap[callStatus] || "no_answer",
@@ -307,6 +321,7 @@ router.post("/twilio/status", async (req, res) => {
         endedAt: new Date(),
         ...(costData ? {
           estimatedCostUsd: costData.totalCost.toString(),
+          billedCostUsd: billedCost !== null ? billedCost.toString() : undefined,
           twilioCostUsd: costData.twilioCost.toString(),
           openaiCostUsd: costData.openaiCost.toString(),
           twilioMinutes: costData.twilioMinutes,
