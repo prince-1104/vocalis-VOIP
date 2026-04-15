@@ -174,13 +174,15 @@ export default function AdminInvoices() {
   const qc = useQueryClient();
   const [showGenerate, setShowGenerate] = React.useState(false);
   const [filterStatus, setFilterStatus] = React.useState("all");
+  const [editingCommission, setEditingCommission] = React.useState<Record<number, string>>({});
+  const [savingCommission, setSavingCommission] = React.useState<Record<number, boolean>>({});
 
   const { data: invoicesData, isLoading: loadingInvoices } = useQuery<{ invoices: Invoice[] }>({
     queryKey: ["admin-invoices"],
     queryFn: () => adminFetch(`${BASE}/api/admin/invoices`),
   });
 
-  const { data: tenantsData } = useQuery<{ tenants: Tenant[] }>({
+  const { data: tenantsRaw } = useQuery<Tenant[]>({
     queryKey: ["admin-tenants-list"],
     queryFn: () => adminFetch(`${BASE}/api/admin/tenants`),
   });
@@ -203,7 +205,27 @@ export default function AdminInvoices() {
   });
 
   const invoices = invoicesData?.invoices ?? [];
-  const tenants = tenantsData?.tenants ?? [];
+  const tenants: Tenant[] = Array.isArray(tenantsRaw) ? tenantsRaw : [];
+
+  async function saveCommission(tenantId: number) {
+    const val = editingCommission[tenantId];
+    if (val === undefined) return;
+    setSavingCommission((s) => ({ ...s, [tenantId]: true }));
+    try {
+      await adminFetch(`${BASE}/api/admin/tenants/${tenantId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ commissionPct: val }),
+      });
+      toast({ title: "Commission updated", description: `Commission set to ${val}% for this tenant.` });
+      qc.invalidateQueries({ queryKey: ["admin-tenants-list"] });
+      setEditingCommission((s) => { const n = { ...s }; delete n[tenantId]; return n; });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Failed";
+      toast({ title: "Error", description: msg, variant: "destructive" });
+    } finally {
+      setSavingCommission((s) => ({ ...s, [tenantId]: false }));
+    }
+  }
 
   const filtered = filterStatus === "all" ? invoices : invoices.filter((inv) => inv.status === filterStatus);
 
@@ -239,6 +261,60 @@ export default function AdminInvoices() {
           </div>
         ))}
       </div>
+
+      {tenants.length > 0 && (
+        <div className="border border-white/10 rounded-2xl overflow-hidden bg-card/50">
+          <div className="px-4 py-3 border-b border-white/10">
+            <h2 className="text-sm font-semibold text-white">Tenant Commission Rates</h2>
+            <p className="text-xs text-muted-foreground mt-0.5">Edit commission % per tenant — applies to future invoice generation</p>
+          </div>
+          <div className="divide-y divide-white/5">
+            {tenants.map((t) => {
+              const isEditing = editingCommission[t.id] !== undefined;
+              const currentVal = isEditing ? editingCommission[t.id] : parseFloat(t.commissionPct).toFixed(2);
+              return (
+                <div key={t.id} className="flex items-center gap-4 px-4 py-3">
+                  <span className="flex-1 text-sm font-medium text-white">{t.name}</span>
+                  <div className="flex items-center gap-2">
+                    <div className="relative">
+                      <Input
+                        type="number"
+                        min="0"
+                        max="100"
+                        step="0.01"
+                        value={currentVal}
+                        onChange={(e) => setEditingCommission((s) => ({ ...s, [t.id]: e.target.value }))}
+                        className="w-24 bg-background border-white/10 text-right font-mono text-sm pr-6"
+                      />
+                      <span className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground text-xs">%</span>
+                    </div>
+                    {isEditing && (
+                      <Button
+                        size="sm"
+                        className="text-xs"
+                        disabled={savingCommission[t.id]}
+                        onClick={() => saveCommission(t.id)}
+                      >
+                        {savingCommission[t.id] ? <Loader2 className="w-3 h-3 animate-spin" /> : "Save"}
+                      </Button>
+                    )}
+                    {isEditing && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="text-xs text-muted-foreground"
+                        onClick={() => setEditingCommission((s) => { const n = { ...s }; delete n[t.id]; return n; })}
+                      >
+                        Cancel
+                      </Button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       <div className="flex items-center gap-3">
         <Label className="text-muted-foreground text-sm shrink-0">Filter by status:</Label>

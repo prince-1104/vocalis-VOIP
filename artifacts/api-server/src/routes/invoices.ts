@@ -103,10 +103,15 @@ router.post("/admin/invoices/generate", requireSuperadmin, async (req, res) => {
       ));
 
     const totalRawCost = calls.reduce((sum, c) => sum + parseFloat(c.estimatedCostUsd ?? "0"), 0);
+
     const totalBilledCost = calls.reduce((sum, c) => {
-      const raw = parseFloat(c.estimatedCostUsd ?? "0");
-      return sum + raw * (1 + commissionPct / 100);
+      const rawCost = parseFloat(c.estimatedCostUsd ?? "0");
+      if (c.billedCostUsd !== null && c.billedCostUsd !== undefined) {
+        return sum + parseFloat(c.billedCostUsd);
+      }
+      return sum + rawCost * (1 + commissionPct / 100);
     }, 0);
+
     const commissionUsd = totalBilledCost - totalRawCost;
 
     const paymentTermsDays = tenant.paymentTermsDays ?? 30;
@@ -129,7 +134,9 @@ router.post("/admin/invoices/generate", requireSuperadmin, async (req, res) => {
       await db.insert(invoiceLineItemsTable).values(
         calls.map((c) => {
           const raw = parseFloat(c.estimatedCostUsd ?? "0");
-          const billed = raw * (1 + commissionPct / 100);
+          const billed = c.billedCostUsd !== null && c.billedCostUsd !== undefined
+            ? parseFloat(c.billedCostUsd)
+            : raw * (1 + commissionPct / 100);
           return {
             invoiceId: invoice.id,
             callLogId: c.id,
