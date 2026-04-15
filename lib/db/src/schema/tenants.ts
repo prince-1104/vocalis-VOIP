@@ -29,6 +29,16 @@ export const tenantUsersTable = pgTable("tenant_users", {
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 });
 
+export const tenantSessionsTable = pgTable("tenant_sessions", {
+  id: serial("id").primaryKey(),
+  tenantUserId: integer("tenant_user_id").notNull().references(() => tenantUsersTable.id, { onDelete: "cascade" }),
+  tenantId: integer("tenant_id").notNull().references(() => tenantsTable.id, { onDelete: "cascade" }),
+  token: text("token").notNull().unique(),
+  expiresAt: timestamp("expires_at").notNull(),
+  revokedAt: timestamp("revoked_at"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+});
+
 export const insertTenantSchema = createInsertSchema(tenantsTable).omit({ id: true, createdAt: true, updatedAt: true });
 export type InsertTenant = z.infer<typeof insertTenantSchema>;
 export type Tenant = typeof tenantsTable.$inferSelect;
@@ -36,3 +46,7 @@ export type Tenant = typeof tenantsTable.$inferSelect;
 export const insertTenantUserSchema = createInsertSchema(tenantUsersTable).omit({ id: true, createdAt: true, updatedAt: true });
 export type InsertTenantUser = z.infer<typeof insertTenantUserSchema>;
 export type TenantUser = typeof tenantUsersTable.$inferSelect;
+
+export const insertTenantSessionSchema = createInsertSchema(tenantSessionsTable).omit({ id: true, createdAt: true });
+export type InsertTenantSession = z.infer<typeof insertTenantSessionSchema>;
+export type TenantSession = typeof tenantSessionsTable.$inferSelect;
