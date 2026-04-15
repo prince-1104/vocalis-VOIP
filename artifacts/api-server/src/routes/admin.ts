@@ -1,5 +1,5 @@
 import { Router, type IRouter } from "express";
-import { db, tenantsTable, tenantUsersTable, callLogsTable, agentConfigsTable } from "@workspace/db";
+import { db, tenantsTable, tenantUsersTable, callLogsTable, agentConfigsTable, usersTable } from "@workspace/db";
 import { eq, and, gte, sql } from "drizzle-orm";
 import bcrypt from "bcryptjs";
 
@@ -73,12 +73,30 @@ router.post("/admin/tenants", async (req, res) => {
     return;
   }
 
+  // Create an isolated system user as the data owner for this tenant.
+  // This provides full data isolation: contacts, calls, and configs are
+  // scoped to this user's id — independent of the superadmin's account.
+  const [ownerUser] = await db.insert(usersTable).values({
+    name,
+    plan: "free",
+  }).returning();
+
+  // Seed default agent config for the new tenant owner
+  await db.insert(agentConfigsTable).values({
+    userId: ownerUser.id,
+    agentName: "SalesBot",
+    voice: "nova",
+    personality: "professional",
+    greeting: "Hi, this is SalesBot calling. Is this a good time to speak?",
+    voicemailMessage: "Hi, please call us back at your earliest convenience. Thank you!",
+  }).onConflictDoNothing();
+
   const [tenant] = await db.insert(tenantsTable).values({
     name,
     slug,
     commissionPct: commissionPct ?? "0",
     paymentTermsDays: paymentTermsDays ?? 30,
-    ownerId: req.userId!,
+    ownerId: ownerUser.id,
   }).returning();
 
   res.json(tenant);

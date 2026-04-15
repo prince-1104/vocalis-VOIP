@@ -46,19 +46,30 @@ function WebhookUrl({ label, path }: { label: string; path: string }) {
   );
 }
 
-function TelephonyReadOnly({ configured }: { configured: boolean }) {
+function TelephonyReadOnly({ configured, phoneNumber }: { configured: boolean; phoneNumber?: string | null }) {
   return (
-    <div className="rounded-lg border border-white/10 bg-white/5 p-4 flex items-center gap-3">
-      <Lock className="w-5 h-5 text-muted-foreground shrink-0" />
-      <div>
-        <p className="text-sm font-medium text-foreground">
-          {configured ? "Telephony configured by platform" : "Telephony not yet configured"}
-        </p>
-        <p className="text-xs text-muted-foreground mt-0.5">
-          Contact your platform administrator to update Twilio credentials.
-        </p>
+    <div className="space-y-3">
+      {phoneNumber && (
+        <div className="space-y-1.5">
+          <label className="text-sm font-medium text-foreground/80">Phone Number</label>
+          <div className="flex items-center gap-2 h-10 rounded-md border border-white/10 bg-background/50 px-3">
+            <span className="text-sm text-foreground flex-1">{phoneNumber}</span>
+          </div>
+          <p className="text-xs text-muted-foreground">Use this number in your Twilio webhook configuration.</p>
+        </div>
+      )}
+      <div className="rounded-lg border border-white/10 bg-white/5 p-4 flex items-center gap-3">
+        <Lock className="w-5 h-5 text-muted-foreground shrink-0" />
+        <div>
+          <p className="text-sm font-medium text-foreground">
+            {configured ? "Twilio credentials configured by platform" : "Twilio credentials not yet configured"}
+          </p>
+          <p className="text-xs text-muted-foreground mt-0.5">
+            Contact your platform administrator to update Account SID and Auth Token.
+          </p>
+        </div>
+        {configured && <CheckCircle2 className="w-5 h-5 text-green-400 ml-auto shrink-0" />}
       </div>
-      {configured && <CheckCircle2 className="w-5 h-5 text-green-400 ml-auto shrink-0" />}
     </div>
   );
 }
@@ -277,7 +288,7 @@ export default function AgentSettings() {
                 </div>
               </div>
             ) : (
-              <TelephonyReadOnly configured={!!agent?.twilioConfigured} />
+              <TelephonyReadOnly configured={!!agent?.twilioConfigured} phoneNumber={agent?.phoneNumber} />
             )}
           </CardContent>
         </Card>

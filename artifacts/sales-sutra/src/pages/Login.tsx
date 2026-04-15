@@ -1,46 +1,51 @@
 import React, { useState } from "react";
-import { useLocation } from "wouter";
+import { useLocation, Redirect } from "wouter";
 import { Bot, Eye, EyeOff, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
-import { setStoredToken } from "@/hooks/use-auth";
+import { setStoredToken, useAuth } from "@/hooks/use-auth";
 import { useQueryClient } from "@tanstack/react-query";
 
 export default function Login() {
   const [, navigate] = useLocation();
+  const { isAuthenticated, isLoading: authLoading } = useAuth();
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [slug, setSlug] = useState("");
   const [showPassword, setShowPassword] = useState(false);
-  const [isLoading, setIsLoading] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+
+  if (!authLoading && isAuthenticated) {
+    return <Redirect to="/" />;
+  }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    setIsLoading(true);
+    setSubmitting(true);
     try {
       const res = await fetch("/api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email, password, tenantSlug: slug || undefined }),
       });
-      const data = await res.json();
+      const data = await res.json() as { token?: string; error?: string };
 
       if (!res.ok) {
         toast({ title: "Login failed", description: data.error || "Invalid credentials", variant: "destructive" });
         return;
       }
 
-      setStoredToken(data.token);
+      setStoredToken(data.token!);
       await queryClient.invalidateQueries();
       navigate("/");
     } catch {
       toast({ title: "Network error", description: "Please try again", variant: "destructive" });
     } finally {
-      setIsLoading(false);
+      setSubmitting(false);
     }
   }
 
@@ -114,8 +119,8 @@ export default function Login() {
               />
             </div>
 
-            <Button type="submit" className="w-full h-11 font-semibold" disabled={isLoading}>
-              {isLoading ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Signing in…</> : "Sign in"}
+            <Button type="submit" className="w-full h-11 font-semibold" disabled={submitting || authLoading}>
+              {submitting ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Signing in…</> : "Sign in"}
             </Button>
           </form>
         </div>
