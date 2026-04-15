@@ -75,6 +75,32 @@ async function generateAIResponse(systemPrompt: string, history: {role: string, 
   return response.choices[0]?.message?.content || "I'm sorry, I didn't catch that. Could you repeat that?";
 }
 
+const MODEL_PRICING: Record<string, { input: number; output: number }> = {
+  "gpt-4o-mini": { input: 0.15, output: 0.60 },
+  "gpt-4o":      { input: 2.50, output: 10.00 },
+  "gpt-5.2":     { input: 15.00, output: 60.00 },
+};
+
+function computeCallCost(durationSeconds: number, direction: string, model: string) {
+  const minutes = Math.max(1, Math.ceil(durationSeconds / 60));
+  const twilioBaseRate = direction === "outbound" ? 0.013 : 0.022;
+  const twilioSpeechRate = 0.04;
+  const twilioCost = minutes * (twilioBaseRate + twilioSpeechRate);
+
+  const estimatedTurns = Math.max(1, Math.round(durationSeconds / 25));
+  const inputTokens = estimatedTurns * 400;
+  const outputTokens = estimatedTurns * 50;
+  const pricing = MODEL_PRICING[model] || MODEL_PRICING["gpt-4o-mini"];
+  const openaiCost = (inputTokens * pricing.input + outputTokens * pricing.output) / 1_000_000;
+
+  return {
+    twilioCost: parseFloat(twilioCost.toFixed(6)),
+    openaiCost: parseFloat(openaiCost.toFixed(6)),
+    totalCost: parseFloat((twilioCost + openaiCost).toFixed(6)),
+    twilioMinutes: minutes,
+  };
+}
+
 async function resolveUserByPhone(toPhone: string, fallbackUserId: number): Promise<number> {
   if (toPhone) {
     const config = await db.select().from(agentConfigsTable).where(eq(agentConfigsTable.phoneNumber, toPhone)).limit(1);
@@ -97,6 +123,7 @@ router.post("/twilio/inbound", async (req, res) => {
     direction: "inbound",
     phone: req.body.From || "unknown",
     outcome: "answered",
+    aiModel: agentConfig?.aiModel || "gpt-4o-mini",
     startedAt: new Date(),
   }).returning();
 
@@ -230,11 +257,25 @@ router.post("/twilio/status", async (req, res) => {
   };
 
   if (callLogId) {
+    const existingLog = await db.query.callLogsTable.findFirst({
+      where: eq(callLogsTable.id, parseInt(callLogId)),
+    });
+
+    const direction = existingLog?.direction || "outbound";
+    const model = existingLog?.aiModel || "gpt-4o-mini";
+    const costData = callDuration > 0 ? computeCallCost(callDuration, direction, model) : null;
+
     await db.update(callLogsTable)
       .set({
         outcome: outcomeMap[callStatus] || "no_answer",
         duration: callDuration,
         endedAt: new Date(),
+        ...(costData ? {
+          estimatedCostUsd: costData.totalCost.toString(),
+          twilioCostUsd: costData.twilioCost.toString(),
+          openaiCostUsd: costData.openaiCost.toString(),
+          twilioMinutes: costData.twilioMinutes,
+        } : {}),
       })
       .where(eq(callLogsTable.id, parseInt(callLogId)));
   }
@@ -276,6 +317,7 @@ router.post("/contacts/:id/dial", async (req, res) => {
     direction: "outbound",
     phone: contact.phone,
     outcome: "no_answer",
+    aiModel: agentConfig.aiModel || "gpt-4o-mini",
     startedAt: new Date(),
   }).returning();
 
@@ -352,6 +394,7 @@ router.post("/campaigns/:id/dial-next", async (req, res) => {
     direction: "outbound",
     phone: nextContact.phone,
     outcome: "no_answer",
+    aiModel: agentConfig.aiModel || "gpt-4o-mini",
     startedAt: new Date(),
   }).returning();
 

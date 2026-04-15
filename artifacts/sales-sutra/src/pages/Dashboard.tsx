@@ -3,7 +3,8 @@ import { useAnalytics } from "@/hooks/use-analytics";
 import { useCallsList } from "@/hooks/use-calls";
 import { StatCard } from "@/components/ui-custom/StatCard";
 import { StatusBadge } from "@/components/ui-custom/StatusBadge";
-import { PhoneCall, Users, CheckCircle2, Clock, ArrowRight, Megaphone, Bot } from "lucide-react";
+import { PhoneCall, Users, CheckCircle2, Clock, ArrowRight, Megaphone, Bot, DollarSign, TrendingDown, Zap, Phone } from "lucide-react";
+import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Link } from "wouter";
@@ -54,6 +55,68 @@ export default function Dashboard() {
           icon={Clock} 
         />
       </div>
+
+      <Card className="glass-panel border-white/5">
+        <CardHeader className="flex flex-row items-center justify-between pb-2 border-b border-white/5">
+          <CardTitle className="text-lg font-display flex items-center gap-2">
+            <DollarSign className="w-5 h-5 text-emerald-400" /> Cost Analysis — This Week
+          </CardTitle>
+          <span className="text-xs text-muted-foreground">Estimates based on call duration &amp; AI model</span>
+        </CardHeader>
+        <CardContent className="pt-6">
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+            <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-xl p-4 text-center">
+              <DollarSign className="w-5 h-5 text-emerald-400 mx-auto mb-1" />
+              <p className="text-2xl font-bold font-mono text-emerald-400">
+                ${((analytics as any)?.totalCostUsd || 0).toFixed(4)}
+              </p>
+              <p className="text-xs text-muted-foreground mt-1">Total Spend</p>
+            </div>
+            <div className="bg-white/5 border border-white/5 rounded-xl p-4 text-center">
+              <TrendingDown className="w-5 h-5 text-blue-400 mx-auto mb-1" />
+              <p className="text-2xl font-bold font-mono text-blue-400">
+                ${((analytics as any)?.avgCostPerCall || 0).toFixed(4)}
+              </p>
+              <p className="text-xs text-muted-foreground mt-1">Avg per Call</p>
+            </div>
+            <div className="bg-amber-500/10 border border-amber-500/20 rounded-xl p-4 text-center">
+              <Phone className="w-5 h-5 text-amber-400 mx-auto mb-1" />
+              <p className="text-2xl font-bold font-mono text-amber-400">
+                ${((analytics as any)?.totalTwilioCostUsd || 0).toFixed(4)}
+              </p>
+              <p className="text-xs text-muted-foreground mt-1">Twilio (voice + STT)</p>
+            </div>
+            <div className="bg-purple-500/10 border border-purple-500/20 rounded-xl p-4 text-center">
+              <Zap className="w-5 h-5 text-purple-400 mx-auto mb-1" />
+              <p className="text-2xl font-bold font-mono text-purple-400">
+                ${((analytics as any)?.totalOpenaiCostUsd || 0).toFixed(4)}
+              </p>
+              <p className="text-xs text-muted-foreground mt-1">OpenAI (AI responses)</p>
+            </div>
+          </div>
+          {(analytics as any)?.costByDay && (analytics as any).costByDay.some((d: any) => d.cost > 0) ? (
+            <div>
+              <p className="text-xs text-muted-foreground mb-3 font-medium uppercase tracking-wider">Daily Spend</p>
+              <ResponsiveContainer width="100%" height={120}>
+                <BarChart data={(analytics as any).costByDay} margin={{ top: 0, right: 0, left: 0, bottom: 0 }}>
+                  <XAxis dataKey="date" tickFormatter={(d) => format(new Date(d + 'T00:00:00'), 'MMM d')} tick={{ fontSize: 11, fill: '#6b7280' }} axisLine={false} tickLine={false} />
+                  <YAxis tick={{ fontSize: 11, fill: '#6b7280' }} axisLine={false} tickLine={false} tickFormatter={(v) => `$${v.toFixed(3)}`} width={55} />
+                  <Tooltip
+                    contentStyle={{ background: 'rgba(0,0,0,0.8)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '8px', fontSize: 12 }}
+                    formatter={(v: any) => [`$${Number(v).toFixed(4)}`, 'Cost']}
+                    labelFormatter={(d) => format(new Date(d + 'T00:00:00'), 'MMMM d, yyyy')}
+                  />
+                  <Bar dataKey="cost" fill="#10b981" radius={[4, 4, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          ) : (
+            <div className="text-center text-muted-foreground text-sm py-4">
+              Cost data will appear here after completed calls with Twilio webhooks configured.
+            </div>
+          )}
+        </CardContent>
+      </Card>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
         <Card className="col-span-1 lg:col-span-2 glass-panel border-white/5">

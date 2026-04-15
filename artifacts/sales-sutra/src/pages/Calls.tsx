@@ -4,7 +4,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { StatusBadge } from "@/components/ui-custom/StatusBadge";
 import { format } from "date-fns";
-import { Phone, PhoneIncoming, PhoneOutgoing, Clock, Mic } from "lucide-react";
+import { Phone, PhoneIncoming, PhoneOutgoing, Clock, Mic, DollarSign, Bot } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 
@@ -31,6 +31,7 @@ export default function Calls() {
                   <TableHead className="text-muted-foreground">Date & Time</TableHead>
                   <TableHead className="text-muted-foreground">Duration</TableHead>
                   <TableHead className="text-muted-foreground">Outcome</TableHead>
+                  <TableHead className="text-muted-foreground">Est. Cost</TableHead>
                   <TableHead className="text-right text-muted-foreground">Details</TableHead>
                 </TableRow>
               </TableHeader>
@@ -62,6 +63,15 @@ export default function Calls() {
                       </div>
                     </TableCell>
                     <TableCell><StatusBadge status={call.outcome || 'unknown'} /></TableCell>
+                    <TableCell className="text-muted-foreground">
+                      {(call as any).estimatedCostUsd && parseFloat((call as any).estimatedCostUsd) > 0 ? (
+                        <span className="text-emerald-400 font-mono text-sm">
+                          ${parseFloat((call as any).estimatedCostUsd).toFixed(4)}
+                        </span>
+                      ) : (
+                        <span className="text-muted-foreground/40 text-xs">—</span>
+                      )}
+                    </TableCell>
                     <TableCell className="text-right">
                       <Dialog>
                         <DialogTrigger asChild>
@@ -93,6 +103,37 @@ export default function Calls() {
                                 <p className="font-medium">{format(new Date(call.startedAt), 'PPp')}</p>
                               </div>
                             </div>
+
+                            {(call as any).estimatedCostUsd && parseFloat((call as any).estimatedCostUsd) > 0 && (
+                              <div className="space-y-2">
+                                <h4 className="font-semibold flex items-center gap-2">
+                                  <DollarSign className="w-4 h-4 text-emerald-400" /> Call Cost Breakdown
+                                </h4>
+                                <div className="grid grid-cols-3 gap-3 text-center text-sm">
+                                  <div className="bg-white/5 border border-white/5 rounded-lg p-3">
+                                    <p className="text-xs text-muted-foreground mb-1">Twilio (voice + STT)</p>
+                                    <p className="font-mono font-semibold text-amber-400">
+                                      ${parseFloat((call as any).twilioCostUsd || "0").toFixed(4)}
+                                    </p>
+                                  </div>
+                                  <div className="bg-white/5 border border-white/5 rounded-lg p-3">
+                                    <p className="text-xs text-muted-foreground mb-1">OpenAI ({(call as any).aiModel || 'gpt-4o-mini'})</p>
+                                    <p className="font-mono font-semibold text-blue-400">
+                                      ${parseFloat((call as any).openaiCostUsd || "0").toFixed(4)}
+                                    </p>
+                                  </div>
+                                  <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-lg p-3">
+                                    <p className="text-xs text-muted-foreground mb-1">Total</p>
+                                    <p className="font-mono font-bold text-emerald-400">
+                                      ${parseFloat((call as any).estimatedCostUsd).toFixed(4)}
+                                    </p>
+                                  </div>
+                                </div>
+                                <p className="text-xs text-muted-foreground">
+                                  {(call as any).twilioMinutes} billed minute{(call as any).twilioMinutes !== 1 ? 's' : ''} · estimates based on call duration
+                                </p>
+                              </div>
+                            )}
                             
                             {call.aiSummary && (
                               <div className="space-y-2">

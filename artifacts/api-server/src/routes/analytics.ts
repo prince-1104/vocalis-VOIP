@@ -65,7 +65,27 @@ router.get("/analytics/summary", async (req, res) => {
     percentage: totalCalls > 0 ? (count / totalCalls) * 100 : 0,
   }));
 
-  res.json({ totalCalls, answeredCalls, interestedLeads, callbackRequests, avgCallDuration, answerRate, conversionRate, callsByDay, outcomeBreakdown });
+  const totalCostUsd = allCalls.reduce((sum, c) => sum + parseFloat(c.estimatedCostUsd || "0"), 0);
+  const totalTwilioCostUsd = allCalls.reduce((sum, c) => sum + parseFloat(c.twilioCostUsd || "0"), 0);
+  const totalOpenaiCostUsd = allCalls.reduce((sum, c) => sum + parseFloat(c.openaiCostUsd || "0"), 0);
+  const callsWithCost = allCalls.filter(c => parseFloat(c.estimatedCostUsd || "0") > 0);
+  const avgCostPerCall = callsWithCost.length > 0 ? totalCostUsd / callsWithCost.length : 0;
+
+  const costByDay = Array.from(callsByDayMap.entries()).map(([date]) => {
+    const dayCalls = allCalls.filter(c => c.startedAt.toISOString().split("T")[0] === date);
+    const dayCost = dayCalls.reduce((sum, c) => sum + parseFloat(c.estimatedCostUsd || "0"), 0);
+    return { date, cost: parseFloat(dayCost.toFixed(4)) };
+  });
+
+  res.json({
+    totalCalls, answeredCalls, interestedLeads, callbackRequests,
+    avgCallDuration, answerRate, conversionRate, callsByDay, outcomeBreakdown,
+    totalCostUsd: parseFloat(totalCostUsd.toFixed(4)),
+    totalTwilioCostUsd: parseFloat(totalTwilioCostUsd.toFixed(4)),
+    totalOpenaiCostUsd: parseFloat(totalOpenaiCostUsd.toFixed(4)),
+    avgCostPerCall: parseFloat(avgCostPerCall.toFixed(4)),
+    costByDay,
+  });
 });
 
 export default router;
