@@ -149,22 +149,11 @@ export async function resolveUser(req: Request, res: Response, next: NextFunctio
         return;
       }
 
-      const ownerUser = await db.query.usersTable.findFirst({
-        where: eq(usersTable.id, tenantOwnerId),
-      });
-
-      if (!ownerUser) {
-        res.status(500).json({ error: "Tenant owner account not found" });
-        return;
-      }
-
-      const isSuperadmin = ownerUser.isSuperadmin;
-
       req.userId = tenantOwnerId;
       req.tenantOwnerId = tenantOwnerId;
       req.tenantId = tenantUser.tenantId;
-      req.userRole = isSuperadmin ? "superadmin" : (tenantUser.role as "admin" | "manager");
-      req.isSuperadmin = isSuperadmin;
+      req.userRole = tenantUser.role as "admin" | "manager";
+      req.isSuperadmin = false;
       req.sessionToken = payload.jti;
       return next();
     }

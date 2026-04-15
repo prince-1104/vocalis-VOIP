@@ -30,7 +30,7 @@ router.get("/auth/me", async (req, res) => {
     name: user.name,
     businessName: user.businessName,
     plan: user.plan,
-    isSuperadmin: user.isSuperadmin,
+    isSuperadmin: req.isSuperadmin ?? false,
     role: req.userRole,
     tenantId: req.tenantId,
     tenantOwnerId: req.tenantOwnerId,

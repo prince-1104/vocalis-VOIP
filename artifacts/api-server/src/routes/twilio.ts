@@ -284,7 +284,7 @@ router.post("/twilio/status", async (req, res) => {
   res.status(200).send("OK");
 });
 
-router.post("/contacts/:id/dial", requireRole("admin"), async (req, res) => {
+router.post("/contacts/:id/dial", requireRole("superadmin", "admin"), async (req, res) => {
   const userId = req.userId!;
 
   const contact = await db.query.contactsTable.findFirst({
@@ -340,7 +340,7 @@ router.post("/contacts/:id/dial", requireRole("admin"), async (req, res) => {
   res.json({ callSid: call.sid, callLogId: callLog.id, status: "dialing" });
 });
 
-router.post("/campaigns/:id/dial-next", requireRole("admin"), async (req, res) => {
+router.post("/campaigns/:id/dial-next", requireRole("superadmin", "admin"), async (req, res) => {
   const userId = req.userId!;
 
   const campaign = await db.query.campaignsTable.findFirst({
