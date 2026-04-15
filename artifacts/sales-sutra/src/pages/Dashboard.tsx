@@ -3,7 +3,7 @@ import { useAnalytics } from "@/hooks/use-analytics";
 import { useCallsList } from "@/hooks/use-calls";
 import { StatCard } from "@/components/ui-custom/StatCard";
 import { StatusBadge } from "@/components/ui-custom/StatusBadge";
-import { PhoneCall, Users, CheckCircle2, Clock, ArrowRight, Megaphone, Bot, DollarSign, TrendingDown, Zap, Phone } from "lucide-react";
+import { PhoneCall, Users, CheckCircle2, Clock, ArrowRight, Megaphone, Bot, DollarSign, TrendingDown, Zap, Phone, PhoneIncoming, PhoneOutgoing } from "lucide-react";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -129,23 +129,59 @@ export default function Dashboard() {
           <CardContent className="p-0">
             {recentCalls?.calls && recentCalls.calls.length > 0 ? (
               <div className="divide-y divide-white/5">
-                {recentCalls.calls.map((call) => (
-                  <div key={call.id} className="p-4 hover:bg-white/5 transition-colors flex items-center justify-between">
-                    <div className="flex items-center gap-4">
-                      <div className="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center border border-primary/20">
-                        <PhoneCall className="w-4 h-4 text-primary" />
+                {recentCalls.calls.map((call: any) => {
+                  const dur = call.duration;
+                  const durStr = dur > 0
+                    ? dur >= 60
+                      ? `${Math.floor(dur / 60)}m ${dur % 60}s`
+                      : `${dur}s`
+                    : null;
+                  const cost = call.estimatedCostUsd ? parseFloat(call.estimatedCostUsd) : null;
+                  const twilioCost = call.twilioCostUsd ? parseFloat(call.twilioCostUsd) : null;
+                  const openaiCost = call.openaiCostUsd ? parseFloat(call.openaiCostUsd) : null;
+                  return (
+                    <div key={call.id} className="p-4 hover:bg-white/5 transition-colors">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-3">
+                          <div className={`w-9 h-9 rounded-full flex items-center justify-center border ${call.direction === 'inbound' ? 'bg-emerald-500/10 border-emerald-500/20' : 'bg-primary/10 border-primary/20'}`}>
+                            {call.direction === 'inbound'
+                              ? <PhoneIncoming className="w-4 h-4 text-emerald-400" />
+                              : <PhoneOutgoing className="w-4 h-4 text-primary" />}
+                          </div>
+                          <div>
+                            <p className="font-medium text-foreground text-sm">{call.displayName || call.phone}</p>
+                            <p className="text-xs text-muted-foreground">{format(new Date(call.startedAt), 'MMM d, h:mm a')} · {call.direction}</p>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-3">
+                          {durStr && (
+                            <span className="text-xs text-muted-foreground flex items-center gap-1">
+                              <Clock className="w-3 h-3" />{durStr}
+                            </span>
+                          )}
+                          <StatusBadge status={call.outcome || 'unknown'} />
+                        </div>
                       </div>
-                      <div>
-                        <p className="font-medium text-foreground">{call.contact?.firstName} {call.contact?.lastName || call.phone}</p>
-                        <p className="text-sm text-muted-foreground">{format(new Date(call.startedAt), 'MMM d, h:mm a')}</p>
-                      </div>
+                      {cost !== null && (
+                        <div className="mt-2 ml-12 flex items-center gap-3 text-xs">
+                          <span className="text-emerald-400 font-mono font-semibold">
+                            ${cost.toFixed(4)} total{call.costIsEstimated ? ' (est.)' : ''}
+                          </span>
+                          {twilioCost !== null && (
+                            <span className="text-amber-400/70">
+                              Twilio ${twilioCost.toFixed(4)}
+                            </span>
+                          )}
+                          {openaiCost !== null && (
+                            <span className="text-purple-400/70">
+                              OpenAI ${openaiCost.toFixed(4)}
+                            </span>
+                          )}
+                        </div>
+                      )}
                     </div>
-                    <div className="flex items-center gap-4">
-                      <span className="text-sm text-muted-foreground">{call.duration}s</span>
-                      <StatusBadge status={call.outcome || 'unknown'} />
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             ) : (
               <div className="p-8 text-center text-muted-foreground">

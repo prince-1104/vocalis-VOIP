@@ -46,28 +46,35 @@ export default function Calls() {
                       )}
                     </TableCell>
                     <TableCell className="font-medium text-foreground">
-                      <div>
-                        {call.contact?.firstName || call.contact?.lastName 
-                          ? `${call.contact?.firstName || ''} ${call.contact?.lastName || ''}` 
-                          : 'Unknown'}
-                      </div>
+                      <div>{(call as any).displayName || call.phone}</div>
                       <div className="text-xs text-muted-foreground font-normal">{call.phone}</div>
                     </TableCell>
                     <TableCell className="text-muted-foreground">
                       {format(new Date(call.startedAt), 'MMM d, yyyy h:mm a')}
                     </TableCell>
                     <TableCell className="text-muted-foreground">
-                      <div className="flex items-center">
-                        <Clock className="w-3 h-3 mr-1" />
-                        {call.duration}s
-                      </div>
+                      {call.duration && call.duration > 0 ? (
+                        <div className="flex items-center">
+                          <Clock className="w-3 h-3 mr-1" />
+                          {call.duration >= 60
+                            ? `${Math.floor(call.duration / 60)}m ${call.duration % 60}s`
+                            : `${call.duration}s`}
+                        </div>
+                      ) : (
+                        <span className="text-muted-foreground/40">—</span>
+                      )}
                     </TableCell>
                     <TableCell><StatusBadge status={call.outcome || 'unknown'} /></TableCell>
                     <TableCell className="text-muted-foreground">
                       {(call as any).estimatedCostUsd && parseFloat((call as any).estimatedCostUsd) > 0 ? (
-                        <span className="text-emerald-400 font-mono text-sm">
-                          ${parseFloat((call as any).estimatedCostUsd).toFixed(4)}
-                        </span>
+                        <div>
+                          <span className="text-emerald-400 font-mono text-sm">
+                            ${parseFloat((call as any).estimatedCostUsd).toFixed(4)}
+                          </span>
+                          {(call as any).costIsEstimated && (
+                            <span className="text-xs text-muted-foreground/60 ml-1">est.</span>
+                          )}
+                        </div>
                       ) : (
                         <span className="text-muted-foreground/40 text-xs">—</span>
                       )}
