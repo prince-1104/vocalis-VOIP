@@ -152,14 +152,20 @@ export async function resolveUser(req: Request, res: Response, next: NextFunctio
         return;
       }
 
+      const ownerUser = await db.query.usersTable.findFirst({
+        where: eq(usersTable.id, tenantOwnerId),
+      });
+
+      const isSuperadmin = ownerUser?.isSuperadmin ?? false;
+
       req.userId = tenantOwnerId;
       req.tenantOwnerId = tenantOwnerId;
       req.tenantId = tenantUser.tenantId;
       req.tenantUserId = tenantUser.id;
       req.authenticatedEmail = tenantUser.email;
       req.authenticatedName = tenantUser.name;
-      req.userRole = tenantUser.role as "admin" | "manager";
-      req.isSuperadmin = false;
+      req.userRole = isSuperadmin ? "superadmin" : (tenantUser.role as "admin" | "manager");
+      req.isSuperadmin = isSuperadmin;
       req.sessionToken = payload.jti;
       return next();
     }
