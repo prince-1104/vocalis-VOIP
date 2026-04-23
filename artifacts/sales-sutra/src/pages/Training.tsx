@@ -54,7 +54,12 @@ function UploadZone({ onUploaded }: { onUploaded: () => void }) {
       form.append("file", pendingFile);
       form.append("type", uploadType);
 
-      const res = await fetch("/api/training/upload", { method: "POST", body: form });
+      const token = localStorage.getItem("ss_auth_token");
+      const res = await fetch("/api/training/upload", {
+        method: "POST",
+        body: form,
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
       const result = await res.json();
       if (!res.ok) throw new Error(result.error || "Upload failed");
 
