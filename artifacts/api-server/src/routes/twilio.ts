@@ -3,8 +3,35 @@ import twilio from "twilio";
 import { db, agentConfigsTable, callLogsTable, trainingDataTable, callingScriptsTable, tenantsTable } from "@workspace/db";
 import { eq, and } from "drizzle-orm";
 import { openai } from "@workspace/integrations-openai-ai-server";
+import { randomUUID } from "crypto";
 
 const router: IRouter = Router();
+
+const SARVAM_API_KEY = process.env.SARVAM_API_KEY ?? "";
+const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY ?? "";
+
+const ttsAudioCache = new Map<string, Buffer>();
+const TTS_CACHE_TTL_MS = 5 * 60 * 1000;
+
+function storeTtsAudio(audioBase64: string): string {
+  const id = randomUUID();
+  const buf = Buffer.from(audioBase64, "base64");
+  ttsAudioCache.set(id, buf);
+  setTimeout(() => ttsAudioCache.delete(id), TTS_CACHE_TTL_MS);
+  return id;
+}
+
+router.get("/twilio/tts-audio/:id", (req, res) => {
+  const buf = ttsAudioCache.get(req.params.id);
+  if (!buf) {
+    res.status(404).send("Not found");
+    return;
+  }
+  ttsAudioCache.delete(req.params.id);
+  res.set("Content-Type", "audio/wav");
+  res.set("Content-Length", String(buf.length));
+  res.send(buf);
+});
 
 function getBaseUrl(req: any): string {
   const domains = process.env.REPLIT_DOMAINS;
@@ -77,9 +104,146 @@ function isIndianLanguage(lang?: string | null): boolean {
   return INDIAN_LANGUAGES.has(lang ?? "");
 }
 
-function resolveSplitModelLLM(lang: string): string {
-  if (lang === "hi-IN") return "deepseek-v3";
-  return "sarvam-1-2b";
+function resolveSplitModelLLM(lang: string): "deepseek-chat" | "sarvam-m" {
+  if (lang === "hi-IN") return "deepseek-chat";
+  return "sarvam-m";
+}
+
+async function callSarvamSTT(audioBuffer: Buffer, mimeType: string, lang: string): Promise<string> {
+  const formData = new FormData();
+  const blob = new Blob([audioBuffer], { type: mimeType });
+  formData.append("file", blob, "audio.wav");
+  formData.append("model", "saaras:v3");
+  formData.append("language_code", lang);
+  formData.append("mode", "transcribe");
+
+  const res = await fetch("https://api.sarvam.ai/speech-to-text", {
+    method: "POST",
+    headers: {
+      "api-subscription-key": SARVAM_API_KEY,
+    },
+    body: formData,
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Sarvam STT error ${res.status}: ${errText}`);
+  }
+
+  const data = await res.json() as any;
+  return data.transcript ?? "";
+}
+
+async function callDeepSeekLLM(
+  systemPrompt: string,
+  history: {role: string, content: string}[],
+  userMessage: string,
+): Promise<string> {
+  if (!DEEPSEEK_API_KEY) throw new Error("DEEPSEEK_API_KEY not configured — Hindi calls require DeepSeek V3.2");
+
+  const messages = [
+    { role: "system", content: systemPrompt },
+    ...history.map(h => ({ role: h.role, content: h.content })),
+    { role: "user", content: userMessage },
+  ];
+
+  const res = await fetch("https://api.deepseek.com/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${DEEPSEEK_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: "deepseek-chat",
+      messages,
+      max_tokens: 150,
+    }),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`DeepSeek V3.2 API error ${res.status}: ${text}`);
+  }
+
+  const data = await res.json() as any;
+  return data.choices?.[0]?.message?.content ?? "मुझे समझ नहीं आया, क्या आप दोबारा बोल सकते हैं?";
+}
+
+async function callSarvamLLM(
+  systemPrompt: string,
+  history: {role: string, content: string}[],
+  userMessage: string,
+): Promise<string> {
+  if (!SARVAM_API_KEY) throw new Error("SARVAM_API_KEY not configured");
+
+  const messages = [
+    { role: "system", content: systemPrompt },
+    ...history.map(h => ({ role: h.role, content: h.content })),
+    { role: "user", content: userMessage },
+  ];
+
+  const res = await fetch("https://api.sarvam.ai/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${SARVAM_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: "sarvam-m",
+      messages,
+      max_completion_tokens: 150,
+    }),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Sarvam-M (Sarvam-1 2B family) API error ${res.status}: ${text}`);
+  }
+
+  const data = await res.json() as any;
+  return data.choices?.[0]?.message?.content ?? "ಮತ್ತೊಮ್ಮೆ ಹೇಳುತ್ತೀರಾ?";
+}
+
+const BULBUL_VOICE_FOR_LANG: Record<string, string> = {
+  "hi-IN": "kavya",
+  "kn-IN": "kavya",
+  "ta-IN": "priya",
+  "te-IN": "pooja",
+  "mr-IN": "simran",
+};
+
+async function callSarvamTTS(text: string, lang: string): Promise<string | null> {
+  if (!SARVAM_API_KEY) return null;
+
+  const speaker = BULBUL_VOICE_FOR_LANG[lang] ?? "kavya";
+
+  const res = await fetch("https://api.sarvam.ai/text-to-speech", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "api-subscription-key": SARVAM_API_KEY,
+    },
+    body: JSON.stringify({
+      inputs: [text],
+      target_language_code: lang,
+      speaker,
+      model: "bulbul:v3",
+      pace: 1.0,
+      speech_sample_rate: 8000,
+      enable_preprocessing: true,
+      output_audio_codec: "wav",
+    }),
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Sarvam Bulbul v3 TTS error ${res.status}: ${errText}`);
+  }
+
+  const data = await res.json() as any;
+  const audioBase64: string | undefined = data.audios?.[0];
+  if (!audioBase64) return null;
+  return storeTtsAudio(audioBase64);
 }
 
 async function generateAIResponseIndic(
@@ -87,17 +251,27 @@ async function generateAIResponseIndic(
   history: {role: string, content: string}[],
   userMessage: string,
   lang: string,
-): Promise<string> {
+  baseUrl: string,
+): Promise<{ text: string; ttsAudioId: string | null }> {
   const llm = resolveSplitModelLLM(lang);
-  console.log(`[split-model] STT=sarvam-shorthand lang=${lang} LLM=${llm} TTS=sarvam-bulbul-v3`);
 
-  // TODO: Plug in Sarvam Shorthand / Bhashini STT API key + endpoint here.
-  // TODO: For LLM, route to:
-  //   - DeepSeek V3.2 (lang === "hi-IN")     → replace openai call with DeepSeek API
-  //   - Sarvam-1 2B   (kn-IN / ta-IN / te-IN / mr-IN) → replace openai call with Sarvam API
-  // TODO: For TTS, route to Sarvam Bulbul V3 instead of Twilio <Say>.
-  // Falling back to OpenAI until API keys are configured:
-  return generateAIResponse(systemPrompt, history, userMessage, "gpt-4o-mini");
+  console.log(`[split-model] STT=saaras:v3 (via Twilio <Gather> transcript) lang=${lang} LLM=${llm} TTS=bulbul:v3`);
+
+  let text: string;
+  if (lang === "hi-IN") {
+    text = await callDeepSeekLLM(systemPrompt, history, userMessage);
+  } else {
+    text = await callSarvamLLM(systemPrompt, history, userMessage);
+  }
+
+  let ttsAudioId: string | null = null;
+  try {
+    ttsAudioId = await callSarvamTTS(text, lang);
+  } catch (ttsErr) {
+    console.error("[split-model] Sarvam Bulbul TTS failed, falling back to Twilio <Say>:", ttsErr);
+  }
+
+  return { text, ttsAudioId };
 }
 
 const OPENAI_MODEL_MAP: Record<string, string> = {
@@ -108,6 +282,11 @@ const OPENAI_MODEL_MAP: Record<string, string> = {
   "llama-3.3-8b-private": "gpt-4o-mini",
   "bharatgpt":            "gpt-4o-mini",
   "bolna-ai":             "gpt-4o-mini",
+};
+
+const INDIC_UI_MODEL_MAP: Record<string, { provider: "deepseek" | "sarvam"; apiModel: string }> = {
+  "deepseek-v3":  { provider: "deepseek", apiModel: "deepseek-chat" },
+  "sarvam-1-2b":  { provider: "sarvam",   apiModel: "sarvam-m" },
 };
 
 function resolveOpenAIModel(model?: string | null): string {
@@ -243,6 +422,7 @@ router.post("/twilio/voice", async (req, res) => {
   const aiModel = agentConfig?.aiModel || "gpt-4o-mini";
 
   let aiResponse: string;
+  let ttsAudioId: string | null = null;
 
   if (isSilent || !speechResult.trim()) {
     aiResponse = "I didn't quite catch that. Are you still there? Please go ahead and speak.";
@@ -250,7 +430,9 @@ router.post("/twilio/voice", async (req, res) => {
     const systemPrompt = await buildSystemPrompt(userId, agentConfig || {});
     try {
       if (isIndianLanguage(lang)) {
-        aiResponse = await generateAIResponseIndic(systemPrompt, history, speechResult, lang);
+        const indicResult = await generateAIResponseIndic(systemPrompt, history, speechResult, lang, baseUrl);
+        aiResponse = indicResult.text;
+        ttsAudioId = indicResult.ttsAudioId;
       } else {
         aiResponse = await generateAIResponse(systemPrompt, history, speechResult, resolveOpenAIModel(aiModel));
       }
@@ -275,7 +457,11 @@ router.post("/twilio/voice", async (req, res) => {
     actionOnEmptyResult: true,
   });
 
-  gather.say({ voice, language: lang }, aiResponse);
+  if (ttsAudioId) {
+    gather.play(`${baseUrl}/api/twilio/tts-audio/${ttsAudioId}`);
+  } else {
+    gather.say({ voice, language: lang }, aiResponse);
+  }
 
   twiml.redirect({ method: "POST" }, `${baseUrl}/api/twilio/voice?callLogId=${callLogId}&history=${encodedHistory}&silent=1`);
 

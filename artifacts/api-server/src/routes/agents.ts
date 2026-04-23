@@ -41,6 +41,8 @@ router.put("/agents", async (req, res) => {
     "llama-3.3-8b-private",
     "bharatgpt",
     "bolna-ai",
+    "deepseek-v3",
+    "sarvam-1-2b",
   ];
 
   const updateData: any = { updatedAt: new Date() };
