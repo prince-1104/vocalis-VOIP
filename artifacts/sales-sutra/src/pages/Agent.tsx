@@ -11,6 +11,13 @@ import { useAuth } from "@/hooks/use-auth";
 
 const INDIAN_LANGUAGES = ["kn-IN", "hi-IN", "ta-IN", "te-IN", "mr-IN"];
 
+const CURRENT_MODELS = [
+  "gemini-1.5-pro",
+  "llama-3.3-8b-private",
+  "bharatgpt",
+  "bolna-ai",
+];
+
 function isIndian(lang: string) {
   return INDIAN_LANGUAGES.includes(lang);
 }
@@ -311,11 +318,22 @@ export default function AgentSettings() {
                 {...form.register("aiModel")}
                 className="w-full flex h-10 items-center justify-between rounded-md border border-white/10 bg-background/50 px-3 py-2 text-sm ring-offset-background focus:outline-none focus:ring-2 focus:ring-primary"
               >
+                {!CURRENT_MODELS.includes(form.watch("aiModel")) && (
+                  <option value={form.watch("aiModel")} disabled>
+                    Legacy model ({form.watch("aiModel")}) — please select a new model
+                  </option>
+                )}
                 <option value="gemini-1.5-pro">Gemini 1.5 Pro — Google's multimodal flagship</option>
                 <option value="llama-3.3-8b-private">Llama 3.3 (8B) — Private Hosting</option>
                 <option value="bharatgpt">BharatGPT — India-first multilingual LLM</option>
                 <option value="bolna-ai">Bolna AI — Voice-native conversational agent</option>
               </select>
+              {!CURRENT_MODELS.includes(form.watch("aiModel")) && (
+                <p className="text-xs text-amber-400 flex items-center gap-1">
+                  <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                  Legacy model — please select a supported model above and save.
+                </p>
+              )}
             </div>
 
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs text-center">

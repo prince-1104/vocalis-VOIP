@@ -36,7 +36,6 @@ router.put("/agents", async (req, res) => {
   } = req.body;
 
   const VALID_MODELS = [
-    "gpt-4o-mini", "gpt-4o", "gpt-5.2",
     "gemini-1.5-pro",
     "llama-3.3-8b-private",
     "bharatgpt",
