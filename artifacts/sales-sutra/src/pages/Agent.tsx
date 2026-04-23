@@ -5,13 +5,20 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
-import { Bot, Phone, Settings2, AlertCircle, Copy, CheckCircle2, Webhook, Cpu, Lock } from "lucide-react";
+import { Bot, Phone, Settings2, AlertCircle, Copy, CheckCircle2, Webhook, Cpu, Lock, Ear, Brain, Volume2, Zap } from "lucide-react";
 import { useForm } from "react-hook-form";
 import { useAuth } from "@/hooks/use-auth";
+
+const INDIAN_LANGUAGES = ["kn-IN", "hi-IN", "ta-IN", "te-IN", "mr-IN"];
+
+function isIndian(lang: string) {
+  return INDIAN_LANGUAGES.includes(lang);
+}
 
 interface AgentFormValues {
   agentName: string;
   voice: string;
+  language: string;
   personality: string;
   aiModel: string;
   greeting: string;
@@ -74,20 +81,68 @@ function TelephonyReadOnly({ configured, phoneNumber }: { configured: boolean; p
   );
 }
 
+function SplitModelPanel({ language }: { language: string }) {
+  const isHindi = language === "hi-IN";
+  const llmName = isHindi ? "DeepSeek V3.2" : "Sarvam-1 (2B)";
+  const llmDesc = isHindi
+    ? "Optimised for Hindi & English code-switching"
+    : "Lightweight, Indic-native model (Kannada / Tamil / Telugu / Marathi)";
+
+  return (
+    <div className="rounded-xl border border-indigo-500/30 bg-indigo-500/5 p-4 space-y-3">
+      <div className="flex items-center gap-2 mb-1">
+        <Zap className="w-4 h-4 text-indigo-400" />
+        <span className="text-sm font-semibold text-indigo-300">Split-Model Pipeline Active</span>
+        <span className="ml-auto text-[10px] uppercase tracking-wider text-indigo-400/70 font-medium bg-indigo-500/10 border border-indigo-500/20 rounded-full px-2 py-0.5">
+          Indian Language Mode
+        </span>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        Calls in this language route through a three-stage Indic-optimised pipeline instead of the standard engine.
+        API keys are configured by your platform administrator.
+      </p>
+      <div className="grid grid-cols-3 gap-2 text-xs">
+        <div className="bg-background/40 border border-white/10 rounded-lg p-3 space-y-1.5">
+          <div className="flex items-center gap-1.5 text-cyan-400 font-semibold">
+            <Ear className="w-3.5 h-3.5" /> Ear (STT)
+          </div>
+          <div className="text-foreground font-medium">Sarvam Shorthand</div>
+          <div className="text-muted-foreground leading-snug">+ Bhashini fallback — handles heavy regional accents</div>
+        </div>
+        <div className="bg-background/40 border border-white/10 rounded-lg p-3 space-y-1.5">
+          <div className="flex items-center gap-1.5 text-violet-400 font-semibold">
+            <Brain className="w-3.5 h-3.5" /> Brain (LLM)
+          </div>
+          <div className="text-foreground font-medium">{llmName}</div>
+          <div className="text-muted-foreground leading-snug">{llmDesc}</div>
+        </div>
+        <div className="bg-background/40 border border-white/10 rounded-lg p-3 space-y-1.5">
+          <div className="flex items-center gap-1.5 text-emerald-400 font-semibold">
+            <Volume2 className="w-3.5 h-3.5" /> Mouth (TTS)
+          </div>
+          <div className="text-foreground font-medium">Sarvam Bulbul V3</div>
+          <div className="text-muted-foreground leading-snug">Natural-sounding Indic TTS synthesis</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function AgentSettings() {
   const { data: agent, isLoading } = useAgentConfig();
   const updateAgent = useUpdateAgentMutation();
   const { toast } = useToast();
   const { isSuperadmin } = useAuth();
 
-  const agentWithModel = agent as (typeof agent & { aiModel?: string }) | undefined;
+  const agentWithModel = agent as (typeof agent & { aiModel?: string; language?: string }) | undefined;
 
   const form = useForm<AgentFormValues>({
     defaultValues: {
       agentName: "",
       voice: "nova",
+      language: "en-US",
       personality: "professional",
-      aiModel: "gpt-4o-mini",
+      aiModel: "gemini-1.5-pro",
       greeting: "",
       voicemailMessage: "",
       phoneNumber: "",
@@ -96,13 +151,16 @@ export default function AgentSettings() {
     }
   });
 
+  const watchedLanguage = form.watch("language");
+
   useEffect(() => {
     if (agent) {
       form.reset({
         agentName: agent.agentName || "",
         voice: agent.voice || "nova",
+        language: agentWithModel?.language || "en-US",
         personality: agent.personality || "professional",
-        aiModel: agentWithModel?.aiModel || "gpt-4o-mini",
+        aiModel: agentWithModel?.aiModel || "gemini-1.5-pro",
         greeting: agent.greeting || "",
         voicemailMessage: agent.voicemailMessage || "",
         phoneNumber: agent.phoneNumber || "",
@@ -110,13 +168,14 @@ export default function AgentSettings() {
         twilioAuthToken: ""
       });
     }
-  }, [agent, form, agentWithModel?.aiModel]);
+  }, [agent, form, agentWithModel?.aiModel, agentWithModel?.language]);
 
   const onSubmit = async (data: AgentFormValues) => {
     try {
       const payload: Partial<AgentFormValues> = {
         agentName: data.agentName,
         voice: data.voice,
+        language: data.language,
         personality: data.personality,
         aiModel: data.aiModel,
         greeting: data.greeting,
@@ -168,8 +227,24 @@ export default function AgentSettings() {
                 <label className="text-sm font-medium">Agent Name</label>
                 <Input {...form.register("agentName")} className="bg-background/50 border-white/10" />
               </div>
+
               <div className="space-y-2">
-                <label className="text-sm font-medium">AI Voice Model</label>
+                <label className="text-sm font-medium">Language</label>
+                <select
+                  {...form.register("language")}
+                  className="w-full flex h-10 items-center justify-between rounded-md border border-white/10 bg-background/50 px-3 py-2 text-sm ring-offset-background focus:outline-none focus:ring-2 focus:ring-primary"
+                >
+                  <option value="en-US">English (US)</option>
+                  <option value="hi-IN">Hindi — हिन्दी</option>
+                  <option value="kn-IN">Kannada — ಕನ್ನಡ</option>
+                  <option value="ta-IN">Tamil — தமிழ்</option>
+                  <option value="te-IN">Telugu — తెలుగు</option>
+                  <option value="mr-IN">Marathi — मराठी</option>
+                </select>
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-sm font-medium">AI Voice</label>
                 <select
                   {...form.register("voice")}
                   className="w-full flex h-10 items-center justify-between rounded-md border border-white/10 bg-background/50 px-3 py-2 text-sm ring-offset-background focus:outline-none focus:ring-2 focus:ring-primary"
@@ -181,7 +256,13 @@ export default function AgentSettings() {
                   <option value="nova">Nova (Energetic, bright)</option>
                   <option value="shimmer">Shimmer (Clear, articulate)</option>
                 </select>
+                {isIndian(watchedLanguage) && (
+                  <p className="text-xs text-indigo-400">
+                    Voice overridden by <strong>Sarvam Bulbul V3</strong> when an Indian language is active.
+                  </p>
+                )}
               </div>
+
               <div className="space-y-2">
                 <label className="text-sm font-medium">Personality</label>
                 <select
@@ -201,7 +282,7 @@ export default function AgentSettings() {
               <Textarea
                 {...form.register("greeting")}
                 className="bg-background/50 border-white/10 min-h-[100px]"
-                placeholder="Hi, you've reached SalesSutra. I'm Alex, how can I help you today?"
+                placeholder="Hi, you've reached Dialog. I'm Alex, how can I help you today?"
               />
             </div>
 
@@ -221,7 +302,7 @@ export default function AgentSettings() {
             <CardTitle className="flex items-center gap-2">
               <Cpu className="w-5 h-5 text-primary" /> AI Model
             </CardTitle>
-            <CardDescription>Choose the AI model for your agent's responses.</CardDescription>
+            <CardDescription>Choose the AI model powering your agent's responses.</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="space-y-2">
@@ -230,28 +311,39 @@ export default function AgentSettings() {
                 {...form.register("aiModel")}
                 className="w-full flex h-10 items-center justify-between rounded-md border border-white/10 bg-background/50 px-3 py-2 text-sm ring-offset-background focus:outline-none focus:ring-2 focus:ring-primary"
               >
-                <option value="gpt-4o-mini">GPT-4o Mini — fastest &amp; cheapest (~$0.001/call)</option>
-                <option value="gpt-4o">GPT-4o — balanced quality &amp; cost (~$0.01/call)</option>
-                <option value="gpt-5.2">GPT-5.2 — highest quality (~$0.05/call)</option>
+                <option value="gemini-1.5-pro">Gemini 1.5 Pro — Google's multimodal flagship</option>
+                <option value="llama-3.3-8b-private">Llama 3.3 (8B) — Private Hosting</option>
+                <option value="bharatgpt">BharatGPT — India-first multilingual LLM</option>
+                <option value="bolna-ai">Bolna AI — Voice-native conversational agent</option>
               </select>
             </div>
-            <div className="grid grid-cols-3 gap-3 text-xs text-center">
-              <div className="bg-green-500/10 border border-green-500/20 rounded-lg p-3">
-                <div className="font-semibold text-green-400">GPT-4o Mini</div>
-                <div className="text-muted-foreground mt-1">~$0.001 / call</div>
-                <div className="text-muted-foreground">Best for scripts</div>
-              </div>
+
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs text-center">
               <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg p-3">
-                <div className="font-semibold text-blue-400">GPT-4o</div>
-                <div className="text-muted-foreground mt-1">~$0.01 / call</div>
-                <div className="text-muted-foreground">Balanced</div>
+                <div className="font-semibold text-blue-400">Gemini 1.5 Pro</div>
+                <div className="text-muted-foreground mt-1">Google Cloud</div>
+                <div className="text-muted-foreground">Multilingual</div>
+              </div>
+              <div className="bg-orange-500/10 border border-orange-500/20 rounded-lg p-3">
+                <div className="font-semibold text-orange-400">Llama 3.3 8B</div>
+                <div className="text-muted-foreground mt-1">Private Hosting</div>
+                <div className="text-muted-foreground">Data stays on-prem</div>
+              </div>
+              <div className="bg-green-500/10 border border-green-500/20 rounded-lg p-3">
+                <div className="font-semibold text-green-400">BharatGPT</div>
+                <div className="text-muted-foreground mt-1">India-native</div>
+                <div className="text-muted-foreground">22 Indian languages</div>
               </div>
               <div className="bg-purple-500/10 border border-purple-500/20 rounded-lg p-3">
-                <div className="font-semibold text-purple-400">GPT-5.2</div>
-                <div className="text-muted-foreground mt-1">~$0.05 / call</div>
-                <div className="text-muted-foreground">Premium quality</div>
+                <div className="font-semibold text-purple-400">Bolna AI</div>
+                <div className="text-muted-foreground mt-1">Voice-native</div>
+                <div className="text-muted-foreground">Low-latency calls</div>
               </div>
             </div>
+
+            {isIndian(watchedLanguage) && (
+              <SplitModelPanel language={watchedLanguage} />
+            )}
           </CardContent>
         </Card>
 

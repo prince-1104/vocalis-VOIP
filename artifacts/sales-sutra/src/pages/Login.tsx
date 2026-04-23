@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { useLocation, Redirect } from "wouter";
-import { Bot, Eye, EyeOff, Loader2 } from "lucide-react";
+import { Eye, EyeOff, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -58,12 +58,13 @@ export default function Login() {
       />
       <div className="relative w-full max-w-md">
         <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-gradient-to-br from-primary to-accent shadow-lg shadow-primary/30 mb-4">
-            <Bot className="w-9 h-9 text-white" />
+          <div className="inline-flex items-center justify-center mb-5">
+            <img
+              src={`${import.meta.env.BASE_URL}dialog-by-nmc-logo.png`}
+              alt="Dialog by NMC"
+              className="h-14 w-auto object-contain"
+            />
           </div>
-          <h1 className="font-display font-bold text-3xl tracking-tight bg-gradient-to-r from-white to-white/70 bg-clip-text text-transparent">
-            SalesSutra
-          </h1>
           <p className="text-muted-foreground mt-2">Sign in to your workspace</p>
         </div>
 

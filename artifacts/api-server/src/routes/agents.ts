@@ -35,7 +35,13 @@ router.put("/agents", async (req, res) => {
     greeting, personality, maxCallDuration, voicemailMessage, businessHoursOnly, aiModel
   } = req.body;
 
-  const VALID_MODELS = ["gpt-4o-mini", "gpt-4o", "gpt-5.2"];
+  const VALID_MODELS = [
+    "gpt-4o-mini", "gpt-4o", "gpt-5.2",
+    "gemini-1.5-pro",
+    "llama-3.3-8b-private",
+    "bharatgpt",
+    "bolna-ai",
+  ];
 
   const updateData: any = { updatedAt: new Date() };
   if (agentName !== undefined) updateData.agentName = agentName;

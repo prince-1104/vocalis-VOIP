@@ -71,6 +71,35 @@ async function generateAIResponse(systemPrompt: string, history: {role: string, 
   return response.choices[0]?.message?.content || "I'm sorry, I didn't catch that. Could you repeat that?";
 }
 
+const INDIAN_LANGUAGES = new Set(["kn-IN", "hi-IN", "ta-IN", "te-IN", "mr-IN"]);
+
+function isIndianLanguage(lang?: string | null): boolean {
+  return INDIAN_LANGUAGES.has(lang ?? "");
+}
+
+function resolveSplitModelLLM(lang: string): string {
+  if (lang === "hi-IN") return "deepseek-v3";
+  return "sarvam-1-2b";
+}
+
+async function generateAIResponseIndic(
+  systemPrompt: string,
+  history: {role: string, content: string}[],
+  userMessage: string,
+  lang: string,
+): Promise<string> {
+  const llm = resolveSplitModelLLM(lang);
+  console.log(`[split-model] STT=sarvam-shorthand lang=${lang} LLM=${llm} TTS=sarvam-bulbul-v3`);
+
+  // TODO: Plug in Sarvam Shorthand / Bhashini STT API key + endpoint here.
+  // TODO: For LLM, route to:
+  //   - DeepSeek V3.2 (lang === "hi-IN")     → replace openai call with DeepSeek API
+  //   - Sarvam-1 2B   (kn-IN / ta-IN / te-IN / mr-IN) → replace openai call with Sarvam API
+  // TODO: For TTS, route to Sarvam Bulbul V3 instead of Twilio <Say>.
+  // Falling back to OpenAI until API keys are configured:
+  return generateAIResponse(systemPrompt, history, userMessage, "gpt-4o-mini");
+}
+
 const MODEL_PRICING: Record<string, { input: number; output: number }> = {
   "gpt-4o-mini": { input: 0.15, output: 0.60 },
   "gpt-4o":      { input: 2.50, output: 10.00 },
@@ -206,7 +235,11 @@ router.post("/twilio/voice", async (req, res) => {
   } else {
     const systemPrompt = await buildSystemPrompt(userId, agentConfig || {});
     try {
-      aiResponse = await generateAIResponse(systemPrompt, history, speechResult, aiModel);
+      if (isIndianLanguage(lang)) {
+        aiResponse = await generateAIResponseIndic(systemPrompt, history, speechResult, lang);
+      } else {
+        aiResponse = await generateAIResponse(systemPrompt, history, speechResult, aiModel);
+      }
     } catch (err) {
       console.error("AI response error:", err);
       aiResponse = "I'm sorry, I had a technical issue. Could you please repeat that?";

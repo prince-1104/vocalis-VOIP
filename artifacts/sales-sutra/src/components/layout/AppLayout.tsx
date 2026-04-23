@@ -69,15 +69,14 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
       )}>
         <div className="flex items-center h-20 px-6 border-b border-white/5">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-primary to-accent flex items-center justify-center shadow-lg shadow-primary/20">
-              <Bot className="w-6 h-6 text-white" />
-            </div>
-            <div>
-              <h1 className="font-display font-bold text-xl tracking-tight bg-gradient-to-r from-white to-white/70 bg-clip-text text-transparent">
-                SalesSutra
-              </h1>
+            <div className="flex flex-col">
+              <img
+                src={`${import.meta.env.BASE_URL}dialog-by-nmc-logo.png`}
+                alt="Dialog by NMC"
+                className="h-9 w-auto object-contain"
+              />
               {user?.tenantName && (
-                <p className="text-xs text-muted-foreground truncate max-w-[140px]">{user.tenantName}</p>
+                <p className="text-xs text-muted-foreground truncate max-w-[180px] mt-0.5">{user.tenantName}</p>
               )}
             </div>
           </div>
@@ -114,7 +113,7 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
               className="flex items-center gap-3 px-4 py-3 rounded-xl text-amber-400 hover:bg-amber-500/10 transition-all duration-200 mt-4 border border-amber-500/20"
             >
               <Shield className="w-5 h-5" />
-              Admin Portal
+              Tenant Mgmt
             </Link>
           )}
         </nav>

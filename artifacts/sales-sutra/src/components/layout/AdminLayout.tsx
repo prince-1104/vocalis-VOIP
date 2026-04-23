@@ -1,6 +1,6 @@
 import React from "react";
 import { Link, useLocation } from "wouter";
-import { Bot, Building2, LayoutDashboard, ChevronLeft, LogOut, Receipt } from "lucide-react";
+import { Building2, LayoutDashboard, ChevronLeft, LogOut, Receipt } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { clearStoredToken } from "@/hooks/use-auth";
@@ -27,13 +27,12 @@ export function AdminLayout({ children }: { children: React.ReactNode }) {
       <aside className="w-64 flex flex-col bg-card/80 backdrop-blur-xl border-r border-white/5">
         <div className="flex items-center h-20 px-6 border-b border-white/5">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-primary to-accent flex items-center justify-center shadow-lg shadow-primary/20">
-              <Bot className="w-6 h-6 text-white" />
-            </div>
-            <div>
-              <h1 className="font-display font-bold text-lg bg-gradient-to-r from-white to-white/70 bg-clip-text text-transparent">
-                SalesSutra
-              </h1>
+            <div className="flex flex-col gap-0.5">
+              <img
+                src={`${import.meta.env.BASE_URL}dialog-by-nmc-logo.png`}
+                alt="Dialog by NMC"
+                className="h-9 w-auto object-contain"
+              />
               <p className="text-[11px] text-primary font-semibold uppercase tracking-wider">Superadmin</p>
             </div>
           </div>
