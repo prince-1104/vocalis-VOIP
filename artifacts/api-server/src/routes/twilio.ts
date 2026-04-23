@@ -100,6 +100,20 @@ async function generateAIResponseIndic(
   return generateAIResponse(systemPrompt, history, userMessage, "gpt-4o-mini");
 }
 
+const OPENAI_MODEL_MAP: Record<string, string> = {
+  "gpt-4o-mini":          "gpt-4o-mini",
+  "gpt-4o":               "gpt-4o",
+  "gpt-5.2":              "gpt-4o",
+  "gemini-1.5-pro":       "gpt-4o-mini",
+  "llama-3.3-8b-private": "gpt-4o-mini",
+  "bharatgpt":            "gpt-4o-mini",
+  "bolna-ai":             "gpt-4o-mini",
+};
+
+function resolveOpenAIModel(model?: string | null): string {
+  return OPENAI_MODEL_MAP[model ?? ""] ?? "gpt-4o-mini";
+}
+
 const MODEL_PRICING: Record<string, { input: number; output: number }> = {
   "gpt-4o-mini": { input: 0.15, output: 0.60 },
   "gpt-4o":      { input: 2.50, output: 10.00 },
@@ -238,7 +252,7 @@ router.post("/twilio/voice", async (req, res) => {
       if (isIndianLanguage(lang)) {
         aiResponse = await generateAIResponseIndic(systemPrompt, history, speechResult, lang);
       } else {
-        aiResponse = await generateAIResponse(systemPrompt, history, speechResult, aiModel);
+        aiResponse = await generateAIResponse(systemPrompt, history, speechResult, resolveOpenAIModel(aiModel));
       }
     } catch (err) {
       console.error("AI response error:", err);

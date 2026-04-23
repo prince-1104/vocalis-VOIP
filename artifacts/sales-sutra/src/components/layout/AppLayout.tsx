@@ -153,12 +153,11 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
         />
 
         <header className="h-20 flex items-center justify-between px-6 border-b border-white/5 bg-background/50 backdrop-blur-md relative z-10 lg:hidden">
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-primary to-accent flex items-center justify-center">
-              <Bot className="w-5 h-5 text-white" />
-            </div>
-            <h1 className="font-display font-bold text-lg">SalesSutra</h1>
-          </div>
+          <img
+            src={`${import.meta.env.BASE_URL}dialog-by-nmc-logo.png`}
+            alt="Dialog by NMC"
+            className="h-8 w-auto object-contain"
+          />
           <Button variant="ghost" size="icon" onClick={() => setMobileMenuOpen(true)}>
             <Menu className="w-6 h-6" />
           </Button>
