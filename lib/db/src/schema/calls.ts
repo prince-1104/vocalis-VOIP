@@ -19,7 +19,7 @@ export const callLogsTable = pgTable("call_logs", {
   estimatedCostUsd: numeric("estimated_cost_usd", { precision: 10, scale: 6 }),
   billedCostUsd: numeric("billed_cost_usd", { precision: 10, scale: 6 }),
   twilioCostUsd: numeric("twilio_cost_usd", { precision: 10, scale: 6 }),
-  openaiCostUsd: numeric("openai_cost_usd", { precision: 10, scale: 6 }),
+  openaiCostUsd: numeric("openai_cost_usd", { precision: 10, scale: 6 }), // repurposed: stores LLM+TTS cost for any provider (OpenAI, DeepSeek, Sarvam)
   twilioMinutes: real("twilio_minutes"),
   startedAt: timestamp("started_at").notNull().defaultNow(),
   endedAt: timestamp("ended_at"),

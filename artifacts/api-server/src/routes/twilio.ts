@@ -294,12 +294,17 @@ function resolveOpenAIModel(model?: string | null): string {
 }
 
 const MODEL_PRICING: Record<string, { input: number; output: number }> = {
-  "gpt-4o-mini": { input: 0.15, output: 0.60 },
-  "gpt-4o":      { input: 2.50, output: 10.00 },
-  "gpt-5.2":     { input: 15.00, output: 60.00 },
+  "gpt-4o-mini":   { input: 0.15,  output: 0.60 },
+  "gpt-4o":        { input: 2.50,  output: 10.00 },
+  "gpt-5.2":       { input: 15.00, output: 60.00 },
+  "deepseek-chat": { input: 0.27,  output: 1.10 },
+  "sarvam-m":      { input: 0.10,  output: 0.30 },
 };
 
-function computeCallCost(durationSeconds: number, direction: string, model: string) {
+const SARVAM_TTS_COST_PER_1K_CHARS = 0.006;
+const SARVAM_TTS_ESTIMATED_CHARS_PER_TURN = 200;
+
+function computeCallCost(durationSeconds: number, direction: string, model: string, language?: string | null) {
   const minutes = Math.max(1, Math.ceil(durationSeconds / 60));
   const twilioBaseRate = direction === "outbound" ? 0.013 : 0.022;
   const twilioSpeechRate = 0.04;
@@ -308,13 +313,31 @@ function computeCallCost(durationSeconds: number, direction: string, model: stri
   const estimatedTurns = Math.max(1, Math.round(durationSeconds / 25));
   const inputTokens = estimatedTurns * 400;
   const outputTokens = estimatedTurns * 50;
-  const pricing = MODEL_PRICING[model] || MODEL_PRICING["gpt-4o-mini"];
-  const openaiCost = (inputTokens * pricing.input + outputTokens * pricing.output) / 1_000_000;
+
+  let llmCost: number;
+  const isIndic = isIndianLanguage(language);
+
+  if (isIndic && language === "hi-IN") {
+    // Hindi: DeepSeek LLM + Sarvam Bulbul TTS (both are invoked at runtime)
+    const pricing = MODEL_PRICING["deepseek-chat"];
+    const deepseekCost = (inputTokens * pricing.input + outputTokens * pricing.output) / 1_000_000;
+    const ttsCost = (estimatedTurns * SARVAM_TTS_ESTIMATED_CHARS_PER_TURN * SARVAM_TTS_COST_PER_1K_CHARS) / 1_000;
+    llmCost = deepseekCost + ttsCost;
+  } else if (isIndic) {
+    // Other Indian languages: Sarvam LLM + Sarvam Bulbul TTS
+    const pricing = MODEL_PRICING["sarvam-m"];
+    const llmOnlyCost = (inputTokens * pricing.input + outputTokens * pricing.output) / 1_000_000;
+    const ttsCost = (estimatedTurns * SARVAM_TTS_ESTIMATED_CHARS_PER_TURN * SARVAM_TTS_COST_PER_1K_CHARS) / 1_000;
+    llmCost = llmOnlyCost + ttsCost;
+  } else {
+    const pricing = MODEL_PRICING[model] || MODEL_PRICING["gpt-4o-mini"];
+    llmCost = (inputTokens * pricing.input + outputTokens * pricing.output) / 1_000_000;
+  }
 
   return {
     twilioCost: parseFloat(twilioCost.toFixed(6)),
-    openaiCost: parseFloat(openaiCost.toFixed(6)),
-    totalCost: parseFloat((twilioCost + openaiCost).toFixed(6)),
+    llmCost: parseFloat(llmCost.toFixed(6)),
+    totalCost: parseFloat((twilioCost + llmCost).toFixed(6)),
     twilioMinutes: minutes,
   };
 }
@@ -604,17 +627,21 @@ router.post("/twilio/status", async (req, res) => {
 
     const direction = existingLog?.direction || "outbound";
     const model = existingLog?.aiModel || "gpt-4o-mini";
-    const costData = callDuration > 0 ? computeCallCost(callDuration, direction, model) : null;
 
+    let language: string | null = null;
     let commissionPct = 0;
     if (existingLog) {
-      const tenant = await db.query.tenantsTable.findFirst({
-        where: eq(tenantsTable.ownerId, existingLog.userId),
-      });
+      const [agentConf, tenant] = await Promise.all([
+        db.query.agentConfigsTable.findFirst({ where: eq(agentConfigsTable.userId, existingLog.userId) }),
+        db.query.tenantsTable.findFirst({ where: eq(tenantsTable.ownerId, existingLog.userId) }),
+      ]);
+      language = agentConf?.language ?? null;
       if (tenant) {
         commissionPct = parseFloat(tenant.commissionPct ?? "0");
       }
     }
+
+    const costData = callDuration > 0 ? computeCallCost(callDuration, direction, model, language) : null;
 
     const billedCost = costData
       ? parseFloat((costData.totalCost * (1 + commissionPct / 100)).toFixed(6))
@@ -629,7 +656,7 @@ router.post("/twilio/status", async (req, res) => {
           estimatedCostUsd: costData.totalCost.toString(),
           billedCostUsd: billedCost !== null ? billedCost.toString() : undefined,
           twilioCostUsd: costData.twilioCost.toString(),
-          openaiCostUsd: costData.openaiCost.toString(),
+          openaiCostUsd: costData.llmCost.toString(),
           twilioMinutes: costData.twilioMinutes,
         } : {}),
       })
