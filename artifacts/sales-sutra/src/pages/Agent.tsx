@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
-import { Bot, Phone, Settings2, AlertCircle, Copy, CheckCircle2, Webhook, Cpu, Lock, Ear, Brain, Volume2, Zap } from "lucide-react";
+import { Bot, Phone, Settings2, AlertCircle, Copy, CheckCircle2, Webhook, Cpu, Lock, Ear, Brain, Volume2, Zap, ChevronDown } from "lucide-react";
 import { useForm } from "react-hook-form";
 import { useAuth } from "@/hooks/use-auth";
 
@@ -16,6 +16,14 @@ const CURRENT_MODELS = [
   "llama-3.3-8b-private",
   "bharatgpt",
   "bolna-ai",
+];
+
+const TELEPHONY_PROVIDERS = [
+  { value: "twilio", label: "Twilio" },
+  { value: "gupshup", label: "Gupshup" },
+  { value: "exotel", label: "Exotel" },
+  { value: "plivo", label: "Plivo" },
+  { value: "custom", label: "Custom Provider" },
 ];
 
 function isIndian(lang: string) {
@@ -33,20 +41,23 @@ interface AgentFormValues {
   phoneNumber: string;
   twilioAccountSid: string;
   twilioAuthToken: string;
+  telephonyProvider: string;
+  telephonyProviderName: string;
+  telephonyApiKey: string;
+  telephonyApiSecret: string;
+  telephonyAppId: string;
 }
 
 function WebhookUrl({ label, path }: { label: string; path: string }) {
   const [copied, setCopied] = useState(false);
   const baseUrl = window.location.origin;
   const fullUrl = `${baseUrl}${path}`;
-
   const copy = () => {
     navigator.clipboard.writeText(fullUrl).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     });
   };
-
   return (
     <div className="space-y-1">
       <p className="text-xs text-muted-foreground font-medium uppercase tracking-wider">{label}</p>
@@ -60,7 +71,8 @@ function WebhookUrl({ label, path }: { label: string; path: string }) {
   );
 }
 
-function TelephonyReadOnly({ configured, phoneNumber }: { configured: boolean; phoneNumber?: string | null }) {
+function TelephonyReadOnly({ configured, phoneNumber, provider }: { configured: boolean; phoneNumber?: string | null; provider?: string }) {
+  const providerLabel = TELEPHONY_PROVIDERS.find(p => p.value === (provider || "twilio"))?.label || "Telephony";
   return (
     <div className="space-y-3">
       {phoneNumber && (
@@ -69,17 +81,16 @@ function TelephonyReadOnly({ configured, phoneNumber }: { configured: boolean; p
           <div className="flex items-center gap-2 h-10 rounded-md border border-white/10 bg-background/50 px-3">
             <span className="text-sm text-foreground flex-1">{phoneNumber}</span>
           </div>
-          <p className="text-xs text-muted-foreground">Use this number in your Twilio webhook configuration.</p>
         </div>
       )}
       <div className="rounded-lg border border-white/10 bg-white/5 p-4 flex items-center gap-3">
         <Lock className="w-5 h-5 text-muted-foreground shrink-0" />
         <div>
           <p className="text-sm font-medium text-foreground">
-            {configured ? "Twilio credentials configured by platform" : "Twilio credentials not yet configured"}
+            {configured ? `${providerLabel} credentials configured by platform` : "Telephony credentials not yet configured"}
           </p>
           <p className="text-xs text-muted-foreground mt-0.5">
-            Contact your platform administrator to update Account SID and Auth Token.
+            Contact your platform administrator to update carrier credentials.
           </p>
         </div>
         {configured && <CheckCircle2 className="w-5 h-5 text-green-400 ml-auto shrink-0" />}
@@ -94,7 +105,6 @@ function SplitModelPanel({ language }: { language: string }) {
   const llmDesc = isHindi
     ? "Optimised for Hindi & English code-switching"
     : "Lightweight, Indic-native model (Kannada / Tamil / Telugu / Marathi)";
-
   return (
     <div className="rounded-xl border border-indigo-500/30 bg-indigo-500/5 p-4 space-y-3">
       <div className="flex items-center gap-2 mb-1">
@@ -105,35 +115,30 @@ function SplitModelPanel({ language }: { language: string }) {
         </span>
       </div>
       <p className="text-xs text-muted-foreground">
-        Calls in this language route through a three-stage Indic-optimised pipeline instead of the standard engine.
-        API keys are configured by your platform administrator.
+        Calls route through a three-stage Indic-optimised pipeline. API keys are configured by your platform administrator.
       </p>
       <div className="grid grid-cols-3 gap-2 text-xs">
         <div className="bg-background/40 border border-white/10 rounded-lg p-3 space-y-1.5">
-          <div className="flex items-center gap-1.5 text-cyan-400 font-semibold">
-            <Ear className="w-3.5 h-3.5" /> Ear (STT)
-          </div>
+          <div className="flex items-center gap-1.5 text-cyan-400 font-semibold"><Ear className="w-3.5 h-3.5" /> Ear (STT)</div>
           <div className="text-foreground font-medium">Sarvam Shorthand</div>
           <div className="text-muted-foreground leading-snug">+ Bhashini fallback — handles heavy regional accents</div>
         </div>
         <div className="bg-background/40 border border-white/10 rounded-lg p-3 space-y-1.5">
-          <div className="flex items-center gap-1.5 text-violet-400 font-semibold">
-            <Brain className="w-3.5 h-3.5" /> Brain (LLM)
-          </div>
+          <div className="flex items-center gap-1.5 text-violet-400 font-semibold"><Brain className="w-3.5 h-3.5" /> Brain (LLM)</div>
           <div className="text-foreground font-medium">{llmName}</div>
           <div className="text-muted-foreground leading-snug">{llmDesc}</div>
         </div>
         <div className="bg-background/40 border border-white/10 rounded-lg p-3 space-y-1.5">
-          <div className="flex items-center gap-1.5 text-emerald-400 font-semibold">
-            <Volume2 className="w-3.5 h-3.5" /> Mouth (TTS)
-          </div>
+          <div className="flex items-center gap-1.5 text-emerald-400 font-semibold"><Volume2 className="w-3.5 h-3.5" /> Mouth (TTS)</div>
           <div className="text-foreground font-medium">Sarvam Bulbul V3</div>
-          <div className="text-muted-foreground leading-snug">Natural-sounding Indic TTS synthesis</div>
+          <div className="text-muted-foreground leading-snug">Natural-sounding Indic TTS</div>
         </div>
       </div>
     </div>
   );
 }
+
+const selectCls = "w-full flex h-10 items-center justify-between rounded-md border border-white/10 bg-background/50 px-3 py-2 text-sm ring-offset-background focus:outline-none focus:ring-2 focus:ring-primary";
 
 export default function AgentSettings() {
   const { data: agent, isLoading } = useAgentConfig();
@@ -141,91 +146,83 @@ export default function AgentSettings() {
   const { toast } = useToast();
   const { isSuperadmin } = useAuth();
 
-  const agentWithModel = agent as (typeof agent & { aiModel?: string; language?: string }) | undefined;
+  const agentAny = agent as any;
 
   const form = useForm<AgentFormValues>({
     defaultValues: {
-      agentName: "",
-      voice: "nova",
-      language: "en-US",
-      personality: "professional",
-      aiModel: "gemini-1.5-pro",
-      greeting: "",
-      voicemailMessage: "",
-      phoneNumber: "",
-      twilioAccountSid: "",
-      twilioAuthToken: ""
+      agentName: "", voice: "nova", language: "en-US", personality: "professional",
+      aiModel: "gemini-1.5-pro", greeting: "", voicemailMessage: "",
+      phoneNumber: "", twilioAccountSid: "", twilioAuthToken: "",
+      telephonyProvider: "twilio", telephonyProviderName: "",
+      telephonyApiKey: "", telephonyApiSecret: "", telephonyAppId: "",
     }
   });
 
   const watchedLanguage = form.watch("language");
+  const watchedProvider = form.watch("telephonyProvider");
 
   useEffect(() => {
     if (agent) {
       form.reset({
         agentName: agent.agentName || "",
         voice: agent.voice || "nova",
-        language: agentWithModel?.language || "en-US",
+        language: agentAny?.language || "en-US",
         personality: agent.personality || "professional",
-        aiModel: agentWithModel?.aiModel || "gemini-1.5-pro",
+        aiModel: agentAny?.aiModel || "gemini-1.5-pro",
         greeting: agent.greeting || "",
         voicemailMessage: agent.voicemailMessage || "",
         phoneNumber: agent.phoneNumber || "",
         twilioAccountSid: agent.twilioAccountSid || "",
-        twilioAuthToken: ""
+        twilioAuthToken: "",
+        telephonyProvider: agentAny?.telephonyProvider || "twilio",
+        telephonyProviderName: agentAny?.telephonyProviderName || "",
+        telephonyApiKey: "",
+        telephonyApiSecret: "",
+        telephonyAppId: agentAny?.telephonyAppId || "",
       });
     }
-  }, [agent, form, agentWithModel?.aiModel, agentWithModel?.language]);
+  }, [agent]);
 
   const onSubmit = async (data: AgentFormValues) => {
     try {
-      const payload: Partial<AgentFormValues> = {
-        agentName: data.agentName,
-        voice: data.voice,
-        language: data.language,
-        personality: data.personality,
-        aiModel: data.aiModel,
-        greeting: data.greeting,
-        voicemailMessage: data.voicemailMessage,
+      const payload: any = {
+        agentName: data.agentName, voice: data.voice, language: data.language,
+        personality: data.personality, aiModel: data.aiModel,
+        greeting: data.greeting, voicemailMessage: data.voicemailMessage,
       };
       if (isSuperadmin) {
         payload.phoneNumber = data.phoneNumber;
         payload.twilioAccountSid = data.twilioAccountSid;
         if (data.twilioAuthToken) payload.twilioAuthToken = data.twilioAuthToken;
+        payload.telephonyProvider = data.telephonyProvider;
+        payload.telephonyProviderName = data.telephonyProviderName;
+        if (data.telephonyApiKey) payload.telephonyApiKey = data.telephonyApiKey;
+        if (data.telephonyApiSecret) payload.telephonyApiSecret = data.telephonyApiSecret;
+        payload.telephonyAppId = data.telephonyAppId;
       }
-      await updateAgent.mutateAsync(payload as AgentFormValues);
+      await updateAgent.mutateAsync(payload);
       toast({ title: "Agent configuration updated" });
     } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : "Unknown error";
-      toast({ title: "Failed to update", description: message, variant: "destructive" });
+      const msg = err instanceof Error ? err.message : "Unknown error";
+      toast({ title: "Failed to update", description: msg, variant: "destructive" });
     }
   };
 
-  if (isLoading) return <div className="animate-pulse h-96 bg-white/5 rounded-xl"></div>;
+  if (isLoading) return <div className="animate-pulse h-96 bg-white/5 rounded-xl" />;
+
+  const providerConfigured = agentAny?.byocConfigured || agentAny?.twilioConfigured;
 
   return (
     <div className="space-y-6 max-w-5xl mx-auto">
       <div>
         <h1 className="text-3xl font-display font-bold">AI Agent Settings</h1>
-        <p className="text-muted-foreground mt-1">Configure your AI sales representative's personality and voice.</p>
-      </div>
-
-      <div className="bg-primary/10 border border-primary/20 rounded-xl p-4 flex items-start gap-4">
-        <AlertCircle className="w-5 h-5 text-primary mt-0.5 shrink-0" />
-        <div>
-          <h4 className="font-semibold text-primary">Google Voice Integration</h4>
-          <p className="text-sm text-primary/80 mt-1">
-            Google Voice does not permit direct API programmatic calling. To use your Google Voice number, set up Twilio below, then configure your Google Voice account to forward calls to your Twilio number.
-          </p>
-        </div>
+        <p className="text-muted-foreground mt-1">Configure your AI sales representative's persona, voice, and telephony.</p>
       </div>
 
       <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-8">
         <Card className="glass-panel border-white/5">
           <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Bot className="w-5 h-5 text-primary" /> Persona &amp; Voice
-            </CardTitle>
+            <CardTitle className="flex items-center gap-2"><Bot className="w-5 h-5 text-primary" /> Persona &amp; Voice</CardTitle>
             <CardDescription>How your agent presents itself to prospects.</CardDescription>
           </CardHeader>
           <CardContent className="space-y-6">
@@ -234,13 +231,9 @@ export default function AgentSettings() {
                 <label className="text-sm font-medium">Agent Name</label>
                 <Input {...form.register("agentName")} className="bg-background/50 border-white/10" />
               </div>
-
               <div className="space-y-2">
                 <label className="text-sm font-medium">Language</label>
-                <select
-                  {...form.register("language")}
-                  className="w-full flex h-10 items-center justify-between rounded-md border border-white/10 bg-background/50 px-3 py-2 text-sm ring-offset-background focus:outline-none focus:ring-2 focus:ring-primary"
-                >
+                <select {...form.register("language")} className={selectCls}>
                   <option value="en-US">English (US)</option>
                   <option value="hi-IN">Hindi — हिन्दी</option>
                   <option value="kn-IN">Kannada — ಕನ್ನಡ</option>
@@ -249,13 +242,9 @@ export default function AgentSettings() {
                   <option value="mr-IN">Marathi — मराठी</option>
                 </select>
               </div>
-
               <div className="space-y-2">
                 <label className="text-sm font-medium">AI Voice</label>
-                <select
-                  {...form.register("voice")}
-                  className="w-full flex h-10 items-center justify-between rounded-md border border-white/10 bg-background/50 px-3 py-2 text-sm ring-offset-background focus:outline-none focus:ring-2 focus:ring-primary"
-                >
+                <select {...form.register("voice")} className={selectCls}>
                   <option value="alloy">Alloy (Neutral, balanced)</option>
                   <option value="echo">Echo (Warm, approachable)</option>
                   <option value="fable">Fable (Expressive, animated)</option>
@@ -264,18 +253,12 @@ export default function AgentSettings() {
                   <option value="shimmer">Shimmer (Clear, articulate)</option>
                 </select>
                 {isIndian(watchedLanguage) && (
-                  <p className="text-xs text-indigo-400">
-                    Voice overridden by <strong>Sarvam Bulbul V3</strong> when an Indian language is active.
-                  </p>
+                  <p className="text-xs text-indigo-400">Voice overridden by <strong>Sarvam Bulbul V3</strong> when an Indian language is active.</p>
                 )}
               </div>
-
               <div className="space-y-2">
                 <label className="text-sm font-medium">Personality</label>
-                <select
-                  {...form.register("personality")}
-                  className="w-full flex h-10 items-center justify-between rounded-md border border-white/10 bg-background/50 px-3 py-2 text-sm ring-offset-background focus:outline-none focus:ring-2 focus:ring-primary"
-                >
+                <select {...form.register("personality")} className={selectCls}>
                   <option value="professional">Professional &amp; Direct</option>
                   <option value="friendly">Friendly &amp; Conversational</option>
                   <option value="energetic">Energetic &amp; Enthusiastic</option>
@@ -283,122 +266,214 @@ export default function AgentSettings() {
                 </select>
               </div>
             </div>
-
             <div className="space-y-2">
-              <label className="text-sm font-medium">Default Greeting (Inbound Calls)</label>
-              <Textarea
-                {...form.register("greeting")}
-                className="bg-background/50 border-white/10 min-h-[100px]"
-                placeholder="Hi, you've reached Dialog. I'm Alex, how can I help you today?"
-              />
+              <label className="text-sm font-medium">Default Greeting</label>
+              <Textarea {...form.register("greeting")} className="bg-background/50 border-white/10 min-h-[100px]" placeholder="Hi, you've reached Dialog. I'm Alex, how can I help you today?" />
             </div>
-
             <div className="space-y-2">
               <label className="text-sm font-medium">Voicemail Message</label>
-              <Textarea
-                {...form.register("voicemailMessage")}
-                className="bg-background/50 border-white/10"
-                placeholder="Please leave a message and our team will get back to you."
-              />
+              <Textarea {...form.register("voicemailMessage")} className="bg-background/50 border-white/10" placeholder="Please leave a message and our team will get back to you." />
             </div>
           </CardContent>
         </Card>
 
         <Card className="glass-panel border-white/5">
           <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Cpu className="w-5 h-5 text-primary" /> AI Model
-            </CardTitle>
-            <CardDescription>Choose the AI model powering your agent's responses.</CardDescription>
+            <CardTitle className="flex items-center gap-2"><Cpu className="w-5 h-5 text-primary" /> AI Model</CardTitle>
+            <CardDescription>Choose the model powering your agent's responses.</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="space-y-2">
               <label className="text-sm font-medium">Conversation Model</label>
-              <select
-                {...form.register("aiModel")}
-                className="w-full flex h-10 items-center justify-between rounded-md border border-white/10 bg-background/50 px-3 py-2 text-sm ring-offset-background focus:outline-none focus:ring-2 focus:ring-primary"
-              >
+              <select {...form.register("aiModel")} className={selectCls}>
                 {!CURRENT_MODELS.includes(form.watch("aiModel")) && (
-                  <option value={form.watch("aiModel")} disabled>
-                    Legacy model ({form.watch("aiModel")}) — please select a new model
-                  </option>
+                  <option value={form.watch("aiModel")} disabled>Legacy model — please select a new model</option>
                 )}
                 <option value="gemini-1.5-pro">Gemini 1.5 Pro — Google's multimodal flagship</option>
                 <option value="llama-3.3-8b-private">Llama 3.3 (8B) — Private Hosting</option>
                 <option value="bharatgpt">BharatGPT — India-first multilingual LLM</option>
                 <option value="bolna-ai">Bolna AI — Voice-native conversational agent</option>
               </select>
-              {!CURRENT_MODELS.includes(form.watch("aiModel")) && (
-                <p className="text-xs text-amber-400 flex items-center gap-1">
-                  <AlertCircle className="w-3.5 h-3.5 shrink-0" />
-                  Legacy model — please select a supported model above and save.
-                </p>
-              )}
             </div>
-
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs text-center">
               <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg p-3">
                 <div className="font-semibold text-blue-400">Gemini 1.5 Pro</div>
-                <div className="text-muted-foreground mt-1">Google Cloud</div>
-                <div className="text-muted-foreground">Multilingual</div>
+                <div className="text-muted-foreground mt-1">Google Cloud · Multilingual</div>
               </div>
               <div className="bg-orange-500/10 border border-orange-500/20 rounded-lg p-3">
                 <div className="font-semibold text-orange-400">Llama 3.3 8B</div>
-                <div className="text-muted-foreground mt-1">Private Hosting</div>
-                <div className="text-muted-foreground">Data stays on-prem</div>
+                <div className="text-muted-foreground mt-1">Private Hosting · On-prem</div>
               </div>
               <div className="bg-green-500/10 border border-green-500/20 rounded-lg p-3">
                 <div className="font-semibold text-green-400">BharatGPT</div>
-                <div className="text-muted-foreground mt-1">India-native</div>
-                <div className="text-muted-foreground">22 Indian languages</div>
+                <div className="text-muted-foreground mt-1">India-native · 22 languages</div>
               </div>
               <div className="bg-purple-500/10 border border-purple-500/20 rounded-lg p-3">
                 <div className="font-semibold text-purple-400">Bolna AI</div>
-                <div className="text-muted-foreground mt-1">Voice-native</div>
-                <div className="text-muted-foreground">Low-latency calls</div>
+                <div className="text-muted-foreground mt-1">Voice-native · Low latency</div>
               </div>
             </div>
-
-            {isIndian(watchedLanguage) && (
-              <SplitModelPanel language={watchedLanguage} />
-            )}
+            {isIndian(watchedLanguage) && <SplitModelPanel language={watchedLanguage} />}
           </CardContent>
         </Card>
 
         <Card className="glass-panel border-white/5">
           <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Phone className="w-5 h-5 text-primary" /> Telephony Integration
-            </CardTitle>
+            <CardTitle className="flex items-center gap-2"><Phone className="w-5 h-5 text-primary" /> Telephony Integration (BYOC)</CardTitle>
             <CardDescription>
               {isSuperadmin
-                ? "Configure Twilio credentials for this tenant."
+                ? "Bring Your Own Carrier — configure the telephony provider for this tenant."
                 : "Telephony is managed by your platform administrator."}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-6">
             {isSuperadmin ? (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <>
                 <div className="space-y-2">
-                  <label className="text-sm font-medium">Twilio Phone Number</label>
-                  <Input {...form.register("phoneNumber")} placeholder="+1234567890" className="bg-background/50 border-white/10" />
+                  <label className="text-sm font-medium">Telephony Provider</label>
+                  <select {...form.register("telephonyProvider")} className={selectCls}>
+                    {TELEPHONY_PROVIDERS.map(p => (
+                      <option key={p.value} value={p.value}>{p.label}</option>
+                    ))}
+                  </select>
                 </div>
-                <div className="space-y-2">
-                  <label className="text-sm font-medium">Twilio Account SID</label>
-                  <Input {...form.register("twilioAccountSid")} className="bg-background/50 border-white/10" />
-                </div>
-                <div className="space-y-2">
-                  <label className="text-sm font-medium">Twilio Auth Token</label>
-                  <Input
-                    {...form.register("twilioAuthToken")}
-                    type="password"
-                    placeholder={agent?.twilioConfigured ? "•••••••••••••••• (Configured)" : "Enter token"}
-                    className="bg-background/50 border-white/10"
-                  />
-                </div>
-              </div>
+
+                {watchedProvider === "twilio" && (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium">Phone Number</label>
+                      <Input {...form.register("phoneNumber")} placeholder="+1234567890" className="bg-background/50 border-white/10" />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium">Account SID</label>
+                      <Input {...form.register("twilioAccountSid")} placeholder="ACxxxxxxxxxxxx" className="bg-background/50 border-white/10" />
+                    </div>
+                    <div className="space-y-2 md:col-span-2">
+                      <label className="text-sm font-medium">Auth Token</label>
+                      <Input
+                        {...form.register("twilioAuthToken")}
+                        type="password"
+                        placeholder={agentAny?.twilioConfigured ? "•••••••••••••••• (Configured)" : "Enter auth token"}
+                        className="bg-background/50 border-white/10"
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {watchedProvider === "gupshup" && (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium">Phone Number</label>
+                      <Input {...form.register("phoneNumber")} placeholder="+91XXXXXXXXXX" className="bg-background/50 border-white/10" />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium">App ID</label>
+                      <Input {...form.register("telephonyAppId")} placeholder="Gupshup App ID" className="bg-background/50 border-white/10" />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium">API Key</label>
+                      <Input
+                        {...form.register("telephonyApiKey")}
+                        type="password"
+                        placeholder={agentAny?.byocConfigured ? "•••••••••• (Configured)" : "Gupshup API Key"}
+                        className="bg-background/50 border-white/10"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium">API Secret</label>
+                      <Input {...form.register("telephonyApiSecret")} type="password" placeholder="Gupshup API Secret" className="bg-background/50 border-white/10" />
+                    </div>
+                  </div>
+                )}
+
+                {watchedProvider === "exotel" && (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium">Exotel SID (Phone)</label>
+                      <Input {...form.register("telephonyAppId")} placeholder="Exotel Virtual Number" className="bg-background/50 border-white/10" />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium">Account SID</label>
+                      <Input {...form.register("twilioAccountSid")} placeholder="Exotel Account SID" className="bg-background/50 border-white/10" />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium">API Key</label>
+                      <Input
+                        {...form.register("telephonyApiKey")}
+                        type="password"
+                        placeholder={agentAny?.byocConfigured ? "•••••••••• (Configured)" : "Exotel API Key"}
+                        className="bg-background/50 border-white/10"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium">API Token</label>
+                      <Input {...form.register("telephonyApiSecret")} type="password" placeholder="Exotel API Token" className="bg-background/50 border-white/10" />
+                    </div>
+                  </div>
+                )}
+
+                {watchedProvider === "plivo" && (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium">Plivo Number</label>
+                      <Input {...form.register("phoneNumber")} placeholder="+91XXXXXXXXXX" className="bg-background/50 border-white/10" />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium">Auth ID</label>
+                      <Input {...form.register("twilioAccountSid")} placeholder="Plivo Auth ID" className="bg-background/50 border-white/10" />
+                    </div>
+                    <div className="space-y-2 md:col-span-2">
+                      <label className="text-sm font-medium">Auth Token</label>
+                      <Input
+                        {...form.register("telephonyApiKey")}
+                        type="password"
+                        placeholder={agentAny?.byocConfigured ? "•••••••••• (Configured)" : "Plivo Auth Token"}
+                        className="bg-background/50 border-white/10"
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {watchedProvider === "custom" && (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div className="space-y-2 md:col-span-2">
+                      <label className="text-sm font-medium">Provider Name</label>
+                      <Input {...form.register("telephonyProviderName")} placeholder="e.g. MyCarrier, Voximplant, TATA Tele..." className="bg-background/50 border-white/10" />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium">Phone Number</label>
+                      <Input {...form.register("phoneNumber")} placeholder="+91XXXXXXXXXX" className="bg-background/50 border-white/10" />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium">Application / SID</label>
+                      <Input {...form.register("telephonyAppId")} placeholder="App/SID identifier" className="bg-background/50 border-white/10" />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium">API Key</label>
+                      <Input {...form.register("telephonyApiKey")} type="password" placeholder="API Key / Auth ID" className="bg-background/50 border-white/10" />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium">API Secret / Token</label>
+                      <Input {...form.register("telephonyApiSecret")} type="password" placeholder="API Secret / Token" className="bg-background/50 border-white/10" />
+                    </div>
+                    <div className="md:col-span-2 bg-amber-500/10 border border-amber-500/20 rounded-lg p-3 text-sm text-amber-200">
+                      <strong>Custom provider:</strong> Point your carrier's inbound webhook to <code className="text-xs bg-black/30 px-1 rounded">/api/twilio/inbound</code> and configure its credentials above. Our team will integrate the outbound dialling SDK for your carrier.
+                    </div>
+                  </div>
+                )}
+
+                {watchedProvider !== "twilio" && watchedProvider !== "custom" && (
+                  <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg p-3 text-sm text-blue-200">
+                    <strong>Note:</strong> Outbound dialling for this provider is in beta. Inbound voice will work via the webhook URLs below. Contact support to enable outbound campaigns.
+                  </div>
+                )}
+              </>
             ) : (
-              <TelephonyReadOnly configured={!!agent?.twilioConfigured} phoneNumber={agent?.phoneNumber} />
+              <TelephonyReadOnly
+                configured={!!providerConfigured}
+                phoneNumber={agent?.phoneNumber}
+                provider={agentAny?.telephonyProvider}
+              />
             )}
           </CardContent>
         </Card>
@@ -406,15 +481,14 @@ export default function AgentSettings() {
         <Card className="glass-panel border-white/5">
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
-              <Webhook className="w-5 h-5 text-primary" /> Twilio Webhook URLs
+              <Webhook className="w-5 h-5 text-primary" />
+              {watchedProvider === "twilio" || !isSuperadmin ? "Twilio Webhook URLs" : `${TELEPHONY_PROVIDERS.find(p => p.value === watchedProvider)?.label || "Provider"} Webhook URLs`}
             </CardTitle>
-            <CardDescription>
-              Copy these URLs into your Twilio phone number configuration.
-            </CardDescription>
+            <CardDescription>Copy these URLs into your telephony provider's webhook configuration.</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg p-3 text-sm text-amber-200">
-              <strong>Setup:</strong> Go to your Twilio Console → Phone Numbers → Active Numbers → select your number → configure Voice webhooks with the URLs below (HTTP POST).
+              <strong>Setup:</strong> In your provider console, point the inbound call webhook (HTTP POST) to the Voice URL below. The status callback URL receives call events.
             </div>
             <WebhookUrl label="Inbound Call Webhook (Voice URL)" path="/api/twilio/inbound" />
             <WebhookUrl label="Call Status Callback" path="/api/twilio/status" />

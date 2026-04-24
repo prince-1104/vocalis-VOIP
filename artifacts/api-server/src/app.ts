@@ -17,6 +17,7 @@ import twilioRouter from "./routes/twilio";
 import dialRouter from "./routes/dial";
 import adminRouter from "./routes/admin";
 import invoicesRouter, { checkAndMarkOverdueInvoices } from "./routes/invoices";
+import widgetRouter from "./routes/widget";
 
 const app: Express = express();
 
@@ -46,6 +47,7 @@ app.use(express.urlencoded({ extended: true }));
 app.use("/api", healthRouter);
 app.use("/api", authPublicRouter);
 app.use("/api", twilioRouter);
+app.use("/api", widgetRouter);
 
 app.use("/api", resolveUser);
 

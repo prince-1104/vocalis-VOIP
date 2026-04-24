@@ -10,6 +10,7 @@ import Contacts from "@/pages/Contacts";
 import Campaigns from "@/pages/Campaigns";
 import Calls from "@/pages/Calls";
 import AgentSettings from "@/pages/Agent";
+import WidgetSettings from "@/pages/Widget";
 import Training from "@/pages/Training";
 import Scripts from "@/pages/Scripts";
 import Analytics from "@/pages/Analytics";
@@ -94,6 +95,7 @@ function Router() {
               <Route path="/campaigns" component={Campaigns} />
               <Route path="/calls" component={Calls} />
               <Route path="/agent" component={AgentSettings} />
+              <Route path="/widget" component={WidgetSettings} />
               <Route path="/training" component={Training} />
               <Route path="/scripts" component={Scripts} />
               <Route path="/analytics" component={Analytics} />

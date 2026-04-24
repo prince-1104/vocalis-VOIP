@@ -15,6 +15,7 @@ import {
   LogOut,
   Shield,
   Receipt,
+  Globe,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -26,6 +27,7 @@ const ALL_NAV_ITEMS = [
   { href: "/campaigns", label: "Campaigns", icon: Megaphone, roles: ["admin", "manager", "superadmin"] },
   { href: "/calls", label: "Call Logs", icon: Phone, roles: ["admin", "manager", "superadmin"] },
   { href: "/agent", label: "AI Agent", icon: Bot, roles: ["admin", "superadmin"] },
+  { href: "/widget", label: "Web Widget", icon: Globe, roles: ["admin", "superadmin"] },
   { href: "/training", label: "Training", icon: GraduationCap, roles: ["admin", "superadmin"] },
   { href: "/scripts", label: "Scripts", icon: ScrollText, roles: ["admin", "superadmin"] },
   { href: "/analytics", label: "Analytics", icon: BarChart3, roles: ["admin", "manager", "superadmin"] },
