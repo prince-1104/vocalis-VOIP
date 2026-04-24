@@ -123,12 +123,21 @@ router.get("/widget/loader.js", async (req, res) => {
     return;
   }
 
-  const origin = `${req.protocol}://${req.get("host")}`;
-
   const js = `
 (function() {
   var API_KEY = ${JSON.stringify(key)};
-  var BASE_URL = ${JSON.stringify(origin)};
+  // Determine BASE_URL from the script's own src so it works regardless of
+  // how the reverse proxy forwards the Host header.
+  var BASE_URL = (function() {
+    var s = document.currentScript;
+    if (s && s.src) { try { var u = new URL(s.src); return u.protocol + '//' + u.host; } catch(e) {} }
+    // fallback: find script tag by src pattern
+    var tags = document.querySelectorAll('script[src*="loader.js"]');
+    for (var i = tags.length - 1; i >= 0; i--) {
+      try { var u2 = new URL(tags[i].src); return u2.protocol + '//' + u2.host; } catch(e) {}
+    }
+    return window.location.origin;
+  })();
   var history = [];
   var agentName = "Assistant";
   var agentLang = "en-US";
@@ -136,6 +145,7 @@ router.get("/widget/loader.js", async (req, res) => {
   var listening = false;
   var speaking = false;
   var recognition = null;
+  var micBlocked = false;
   var SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   var hasSpeechAPI = !!SpeechRecognition;
 
@@ -258,14 +268,23 @@ router.get("/widget/loader.js", async (req, res) => {
       method: "POST",
       headers: {"Content-Type":"application/json"},
       body: JSON.stringify({apiKey:API_KEY, message:msg, history:history.slice(-6)})
-    }).then(function(r){ return r.json(); }).then(function(data){
+    }).then(function(r){
+      return r.json().then(function(data) { return { ok: r.ok, status: r.status, data: data }; });
+    }).then(function(res){
       setTyping(false);
-      addMsg(data.reply, "bot", false);
-      history.push({role:"assistant", content:data.reply});
-      if (isVoice) speakReply(data.reply);
-    }).catch(function(){
+      if (!res.ok) {
+        var errMsg = (res.data && res.data.error) || "Something went wrong. Please try again.";
+        if (res.status === 404) errMsg = "This widget is not active. Please contact the site owner.";
+        addMsg(errMsg, "bot", false);
+      } else {
+        var reply = res.data.reply || "I\u2019m sorry, I didn\u2019t understand that.";
+        addMsg(reply, "bot", false);
+        history.push({role:"assistant", content:reply});
+        if (isVoice) speakReply(reply);
+      }
+    }).catch(function(err){
       setTyping(false);
-      addMsg("Sorry, something went wrong. Please try again.", "bot", false);
+      addMsg("Could not reach the server. Please check your connection and try again.", "bot", false);
     }).finally(function(){
       if (mic) mic.disabled = false;
     });
@@ -300,9 +319,16 @@ router.get("/widget/loader.js", async (req, res) => {
     recognition.onerror = function(event) {
       stopListening();
       if (event.error === "not-allowed") {
-        addMsg("Microphone access denied. Please allow microphone in your browser settings.", "bot", false);
-      } else if (event.error !== "no-speech") {
-        addMsg("Voice capture error: " + event.error + ". Try typing instead.", "bot", false);
+        if (!micBlocked) {
+          micBlocked = true;
+          addMsg("Microphone access denied. Please allow microphone in your browser settings, then refresh the page.", "bot", false);
+          // Hide mic button so user doesn't keep clicking it
+          if (mic) { mic.style.display = "none"; }
+        }
+      } else if (event.error === "no-speech") {
+        // Silent — user just didn't speak, no need for a message
+      } else {
+        addMsg("Voice capture error (" + event.error + "). You can type instead.", "bot", false);
       }
     };
     recognition.onend = function() {
@@ -316,20 +342,34 @@ router.get("/widget/loader.js", async (req, res) => {
   }
 
   fetch(BASE_URL + "/api/widget/config/" + API_KEY)
-    .then(function(r){ return r.json(); })
-    .then(function(cfg){
+    .then(function(r){
+      return r.json().then(function(data){ return { ok: r.ok, data: data }; });
+    })
+    .then(function(res){
+      var nameEl = document.getElementById("_dw-aname");
+      if (!res.ok) {
+        if (nameEl) nameEl.textContent = "Offline";
+        var modeEl = document.getElementById("_dw-mode");
+        if (modeEl) { modeEl.textContent = "Offline"; modeEl.style.background = "rgba(239,68,68,.3)"; }
+        addMsg("This widget is currently inactive. Please contact the site owner.", "bot", false);
+        return;
+      }
+      var cfg = res.data;
       agentName = cfg.agentName || "Assistant";
       agentLang = cfg.language || "en-US";
-      document.getElementById("_dw-aname").textContent = agentName;
+      if (nameEl) nameEl.textContent = agentName;
       if (!hasSpeechAPI) {
-        var modeEl = document.getElementById("_dw-mode");
-        if (modeEl) modeEl.textContent = "Text";
+        var modeEl2 = document.getElementById("_dw-mode");
+        if (modeEl2) modeEl2.textContent = "Text";
       }
-      addMsg(cfg.greeting || ("Hi! I\u2019m " + agentName + ". How can I help you today?"), "bot", false);
-      history.push({role:"assistant", content:cfg.greeting});
+      var greeting = cfg.greeting || ("Hi! I\u2019m " + agentName + ". How can I help you today?");
+      addMsg(greeting, "bot", false);
+      history.push({role:"assistant", content:greeting});
     })
     .catch(function(){
-      document.getElementById("_dw-aname").textContent = "Assistant";
+      var nameEl = document.getElementById("_dw-aname");
+      if (nameEl) nameEl.textContent = "Offline";
+      addMsg("Could not connect to the assistant. Please try again later.", "bot", false);
     });
 
   if (window.speechSynthesis) {
