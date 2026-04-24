@@ -426,16 +426,18 @@ router.post("/twilio/voice", async (req, res) => {
 
   if (isSilent || !speechResult.trim()) {
     aiResponse = "I didn't quite catch that. Are you still there? Please go ahead and speak.";
+  } else if (isIndianLanguage(lang)) {
+    const encodedSpeech = encodeURIComponent(speechResult);
+    const encodedHistory = encodeURIComponent(JSON.stringify(history.slice(-4)));
+    twiml.say({ language: "en-US", voice: "Polly.Raveena" }, "One moment please.");
+    twiml.redirect({ method: "POST" }, `${baseUrl}/api/twilio/voice-indic?callLogId=${callLogId}&history=${encodedHistory}&speech=${encodedSpeech}`);
+    res.type("text/xml");
+    res.send(twiml.toString());
+    return;
   } else {
     const systemPrompt = await buildSystemPrompt(userId, agentConfig || {});
     try {
-      if (isIndianLanguage(lang)) {
-        const indicResult = await generateAIResponseIndic(systemPrompt, history, speechResult, lang, baseUrl);
-        aiResponse = indicResult.text;
-        ttsAudioId = indicResult.ttsAudioId;
-      } else {
-        aiResponse = await generateAIResponse(systemPrompt, history, speechResult, resolveOpenAIModel(aiModel));
-      }
+      aiResponse = await generateAIResponse(systemPrompt, history, speechResult, resolveOpenAIModel(aiModel));
     } catch (err) {
       console.error("AI response error:", err);
       aiResponse = "I'm sorry, I had a technical issue. Could you please repeat that?";
@@ -445,6 +447,77 @@ router.post("/twilio/voice", async (req, res) => {
   const newHistory = isSilent
     ? history
     : [...history, { role: "user", content: speechResult }, { role: "assistant", content: aiResponse }];
+  const encodedHistory = encodeURIComponent(JSON.stringify(newHistory.slice(-4)));
+
+  const gather = twiml.gather({
+    input: ["speech"],
+    action: `${baseUrl}/api/twilio/voice?callLogId=${callLogId}&history=${encodedHistory}`,
+    method: "POST",
+    speechTimeout: "auto",
+    timeout: 10,
+    language: lang,
+    actionOnEmptyResult: true,
+  });
+
+  if (ttsAudioId) {
+    gather.play(`${baseUrl}/api/twilio/tts-audio/${ttsAudioId}`);
+  } else {
+    gather.say({ voice, language: lang }, aiResponse);
+  }
+
+  twiml.redirect({ method: "POST" }, `${baseUrl}/api/twilio/voice?callLogId=${callLogId}&history=${encodedHistory}&silent=1`);
+
+  res.type("text/xml");
+  res.send(twiml.toString());
+});
+
+router.post("/twilio/voice-indic", async (req, res) => {
+  const twiml = new twilio.twiml.VoiceResponse();
+  const callLogId = req.query.callLogId as string;
+
+  const userId = await resolveUserFromCallLog(callLogId);
+  if (!userId) {
+    twiml.say("This call session is no longer active. Goodbye.");
+    res.type("text/xml");
+    res.send(twiml.toString());
+    return;
+  }
+
+  const speechResult = decodeURIComponent((req.query.speech as string) || "");
+  const rawHistory = req.query.history as string || "";
+
+  const history: {role: string, content: string}[] = [];
+  if (rawHistory) {
+    try {
+      const decoded = decodeURIComponent(rawHistory);
+      const parsed = JSON.parse(decoded);
+      if (Array.isArray(parsed)) history.push(...parsed);
+    } catch { }
+  }
+
+  const agentConfig = await db.query.agentConfigsTable.findFirst({ where: eq(agentConfigsTable.userId, userId) });
+  const baseUrl = getBaseUrl(req);
+  const voice = mapVoice(agentConfig?.voice);
+  const lang = agentConfig?.language || "en-US";
+
+  let aiResponse: string;
+  let ttsAudioId: string | null = null;
+
+  if (!speechResult.trim()) {
+    aiResponse = "I didn't quite catch that. Are you still there? Please go ahead and speak.";
+  } else {
+    const systemPrompt = await buildSystemPrompt(userId, agentConfig || {});
+    try {
+      const indicResult = await generateAIResponseIndic(systemPrompt, history, speechResult, lang, baseUrl);
+      aiResponse = indicResult.text;
+      ttsAudioId = indicResult.ttsAudioId;
+    } catch (err) {
+      console.error("[voice-indic] AI response error:", err);
+      aiResponse = "I'm sorry, I had a technical issue. Could you please repeat that?";
+    }
+  }
+
+  const newHistory = [...history, { role: "user", content: speechResult }, { role: "assistant", content: aiResponse }];
   const encodedHistory = encodeURIComponent(JSON.stringify(newHistory.slice(-4)));
 
   const gather = twiml.gather({
