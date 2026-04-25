@@ -1,0 +1,89 @@
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ git pull origin main
+Username for 'https://github.com': noeticminds                                                                                                                    
+Password for 'https://noeticminds@github.com':                                                                                                                    
+From https://github.com/noeticminds/Dialog                                                                                                                        
+ * branch            main       -> FETCH_HEAD                                                                                                                     
+Already up to date.                                                                                                                                               
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ sudo rm -rf artifacts/api-server/dist
+                                                                                                                                                                  
+pnpm --filter @workspace/api-server run buildroot@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ 
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ 
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ pnpm --filter @workspace/api-server run build
+                                                                                                                                                                  
+> @workspace/api-server@0.0.0 build /var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/artifacts/api-server                                         
+> node ./build.mjs                                                                                                                                                
+                                                                                                                                                                  
+                                                                                                                                                                  
+  dist/index.mjs                      21.9mb ⚠️
+  dist/pino-worker.mjs               153.5kb
+  dist/pino-file.mjs                 142.1kb
+  dist/pino-pretty.mjs               114.6kb
+  dist/thread-stream-worker.mjs        7.3kb
+  dist/index.mjs.map                  35.2mb
+  dist/pino-worker.mjs.map           256.9kb
+  dist/pino-file.mjs.map             229.1kb
+  dist/pino-pretty.mjs.map           203.9kb
+  dist/thread-stream-worker.mjs.map   12.0kb
+                                                                                                                                                                  
+⚡ Done in 4084ms
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ JWT=$(openssl rand -hex 64)
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ 
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ echo "d38251cc5596c36486b0c7e77d291cb79cc96eb755c9540dd368bcfcdfff2480c2f57fe07d
+84458ef81c24b3071beeacb42cf5c9841ff1cacc6c4660ae2c3e01"                                                                                                           
+d38251cc5596c36486b0c7e77d291cb79cc96eb755c9540dd368bcfcdfff2480c2f57fe07d84458ef81c24b3071beeacb42cf5c9841ff1cacc6c4660ae2c3e01                                  
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ 
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ 
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ 
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ cat > ecosystem.config.cjs << EOF
+>                                                                                                                                                                 
+> module.exports = {                                                                                                                                              
+>                                                                                                                                                                 
+>   apps: [                                                                                                                                                       
+>                                                                                                                                                                 
+>     {                                                                                                                                                           
+>                                                                                                                                                                 
+>       name: "dialog-api",                                                                                                                                       
+>                                                                                                                                                                 
+>       script: "artifacts/api-server/dist/index.mjs",                                                                                                            
+>                                                                                                                                                                 
+>       cwd: "/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog",                                                                                  
+>                                                                                                                                                                 
+>       node_args: "--enable-source-maps",                                                                                                                        
+>                                                                                                                                                                 
+>       instances: 1,                                                                                                                                             
+>                                                                                                                                                                 
+>       exec_mode: "fork",                                                                                                                                        
+>                                                                                                                                                                 
+>       autorestart: true,                                                                                                                                        
+>                                                                                                                                                                 
+>       max_restarts: 10,                                                                                                                                         
+>                                                                                                                                                                 
+>       restart_delay: 3000,                                                                                                                                      
+>                                                                                                                                                                 
+>       env: {                                                                                                                                                    
+>                                                                                                                                                                 
+>         PORT: "3002",                                                                                                                                           
+>                                                                                                                                                                 
+>         NODE_ENV: "production",                                                                                                                                 
+>                                                                                                                                                                 
+>         DATABASE_URL: "postgresql://noetic_dial_usr:Webworks%401234@localhost:5432/noetic_dialog",                                                              
+>                                                                                                                                                                 
+>         DATABASE_SSL: "true",                                                                                                                                   
+>                                                                                                                                                                 
+>         JWT_SECRET: "$JWT",                                                                                                                                     
+>                                                                                                                                                                 
+>         OPENAI_API_KEY: "sk-YOUR-OPENAI-KEY-HERE",                                                                                                              
+>                                                                                                                                                                 
+>       },                                                                                                                                                        
+>                                                                                                                                                                 
+>     },                                                                                                                                                          
+>                                                                                                                                                                 
+>   ],                                                                                                                                                            
+>                                                                                                                                                                 
+> };                                                                                                                                                              
+>                                                                                                                                                                 
+> EOF                                                                                                                                                             
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ 
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ echo "ecosystem.config.cjs written"
+ecosystem.config.cjs written                                                                                                                                      
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$
