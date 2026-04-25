@@ -1,0 +1,150 @@
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ psql "$DATABASE_URL"                                                            
+psql (18.3 (Ubuntu 18.3-1.pgdg24.04+1), server 15.17 (Ubuntu 15.17-1.pgdg24.04+1))                                                                                
+SSL connection (protocol: TLSv1.3, cipher: TLS_AES_256_GCM_SHA384, compression: off, ALPN: none)                                                                  
+Type "help" for help.                                                                                                                                             
+                                                                                                                                                                  
+noetic_dialog=> -- 1. Add missing columns to tenant_users (this is what's crashing login)                                                                         
+noetic_dialog=>                                                                                                                                                   
+noetic_dialog=> ALTER TABLE tenant_users                                                                                                                          
+noetic_dialog->                                                                                                                                                   
+noetic_dialog->   ADD COLUMN IF NOT EXISTS user_id integer REFERENCES users(id) ON DELETE CASCADE,                                                                
+noetic_dialog->                                                                                                                                                   
+noetic_dialog->   ADD COLUMN IF NOT EXISTS password_hash text;                                                                                                    
+NOTICE:  column "user_id" of relation "tenant_users" already exists, skipping                                                                                     
+NOTICE:  column "password_hash" of relation "tenant_users" already exists, skipping                                                                               
+ALTER TABLE                                                                                                                                                       
+noetic_dialog=>                                                                                                                                                   
+noetic_dialog=>                                                                                                                                                   
+noetic_dialog=>                                                                                                                                                   
+noetic_dialog=> -- Create the unique index if it doesn't exist                                                                                                    
+noetic_dialog=>                                                                                                                                                   
+noetic_dialog=> CREATE UNIQUE INDEX IF NOT EXISTS tenant_users_tenant_email_unique                                                                                
+noetic_dialog->                                                                                                                                                   
+noetic_dialog->   ON tenant_users(tenant_id, email);                                                                                                              
+NOTICE:  relation "tenant_users_tenant_email_unique" already exists, skipping                                                                                     
+CREATE INDEX                                                                                                                                                      
+noetic_dialog=>                                                                                                                                                   
+noetic_dialog=>                                                                                                                                                   
+noetic_dialog=>                                                                                                                                                   
+noetic_dialog=> -- 2. Add missing columns to agent_configs                                                                                                        
+noetic_dialog=>                                                                                                                                                   
+noetic_dialog=> ALTER TABLE agent_configs                                                                                                                         
+noetic_dialog->                                                                                                                                                   
+noetic_dialog->   ADD COLUMN IF NOT EXISTS language text,                                                                                                         
+noetic_dialog->                                                                                                                                                   
+noetic_dialog->   ADD COLUMN IF NOT EXISTS telephony_provider text NOT NULL DEFAULT 'twilio',                                                                     
+noetic_dialog->                                                                                                                                                   
+noetic_dialog->   ADD COLUMN IF NOT EXISTS telephony_provider_name text,                                                                                          
+noetic_dialog->                                                                                                                                                   
+noetic_dialog->   ADD COLUMN IF NOT EXISTS telephony_api_key text,                                                                                                
+noetic_dialog->                                                                                                                                                   
+noetic_dialog->   ADD COLUMN IF NOT EXISTS telephony_api_secret text,                                                                                             
+noetic_dialog->                                                                                                                                                   
+noetic_dialog->   ADD COLUMN IF NOT EXISTS telephony_app_id text,                                                                                                 
+noetic_dialog->                                                                                                                                                   
+noetic_dialog->   ADD COLUMN IF NOT EXISTS widget_enabled boolean NOT NULL DEFAULT false,                                                                         
+noetic_dialog->                                                                                                                                                   
+noetic_dialog->   ADD COLUMN IF NOT EXISTS widget_api_key text,                                                                                                   
+noetic_dialog->                                                                                                                                                   
+noetic_dialog->   ADD COLUMN IF NOT EXISTS widget_campaign_id integer REFERENCES campaigns(id) ON DELETE SET NULL;                                                
+NOTICE:  column "language" of relation "agent_configs" already exists, skipping                                                                                   
+ALTER TABLE                                                                                                                                                       
+noetic_dialog=>                                                                                                                                                   
+noetic_dialog=>                                                                                                                                                   
+noetic_dialog=>                                                                                                                                                   
+noetic_dialog=> -- 3. Add missing column to tenants (commission and payment terms)                                                                                
+noetic_dialog=>                                                                                                                                                   
+noetic_dialog=> ALTER TABLE tenants                                                                                                                               
+noetic_dialog->                                                                                                                                                   
+noetic_dialog->   ADD COLUMN IF NOT EXISTS commission_pct numeric(5,2) NOT NULL DEFAULT 0,                                                                        
+noetic_dialog->                                                                                                                                                   
+noetic_dialog->   ADD COLUMN IF NOT EXISTS payment_terms_days integer NOT NULL DEFAULT 30,                                                                        
+noetic_dialog->                                                                                                                                                   
+noetic_dialog->   ADD COLUMN IF NOT EXISTS suspended_at timestamp;                                                                                                
+NOTICE:  column "commission_pct" of relation "tenants" already exists, skipping                                                                                   
+NOTICE:  column "payment_terms_days" of relation "tenants" already exists, skipping                                                                               
+NOTICE:  column "suspended_at" of relation "tenants" already exists, skipping                                                                                     
+ALTER TABLE                                                                                                                                                       
+noetic_dialog=>                                                                                                                                                   
+noetic_dialog=>                                                                                                                                                   
+noetic_dialog=>                                                                                                                                                   
+noetic_dialog=> -- 4. Seed the superadmin (safe upsert)                                                                                                           
+noetic_dialog=>                                                                                                                                                   
+noetic_dialog=> DO $$                                                                                                                                             
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$> DECLARE                                                                                                                                           
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>   v_user_id integer;                                                                                                                              
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>   v_tenant_id integer;                                                                                                                            
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$> BEGIN                                                                                                                                             
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>   SELECT id INTO v_user_id FROM users WHERE email = 'superadmin@dialog.com';                                                                      
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>   IF v_user_id IS NULL THEN                                                                                                                       
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>     INSERT INTO users (email, name, is_superadmin, plan)                                                                                          
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>     VALUES ('superadmin@dialog.com', 'Platform Admin', true, 'enterprise')                                                                        
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>     RETURNING id INTO v_user_id;                                                                                                                  
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>   ELSE                                                                                                                                            
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>     UPDATE users SET is_superadmin = true WHERE id = v_user_id;                                                                                   
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>     RAISE NOTICE 'Using existing user id=%', v_user_id;                                                                                           
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>   END IF;                                                                                                                                         
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>   SELECT id INTO v_tenant_id FROM tenants WHERE slug = 'superadmin-portal';                                                                       
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>   IF v_tenant_id IS NULL THEN                                                                                                                     
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>     INSERT INTO tenants (name, slug, status, owner_id)                                                                                            
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>     VALUES ('Platform Admin', 'superadmin-portal', 'active', v_user_id)                                                                           
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>     RETURNING id INTO v_tenant_id;                                                                                                                
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>   ELSE                                                                                                                                            
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>     UPDATE tenants SET owner_id = v_user_id WHERE id = v_tenant_id;                                                                               
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>     RAISE NOTICE 'Using existing tenant id=%', v_tenant_id;                                                                                       
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>   END IF;                                                                                                                                         
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>   INSERT INTO tenant_users (tenant_id, role, email, name, password_hash, is_active)                                                               
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>   VALUES (                                                                                                                                        
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>     v_tenant_id, 'admin', 'superadmin@dialog.com', 'Platform Admin',                                                                              
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>     '$2b$12$BAWf63l/U9AAqRc4338z9OH.xGIhmb365O.VigSLqWgxrVRLou8YG',                                                                               
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>     true                                                                                                                                          
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>   )                                                                                                                                               
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>   ON CONFLICT (tenant_id, email) DO UPDATE                                                                                                        
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>     SET password_hash = EXCLUDED.password_hash, is_active = true, role = 'admin';                                                                 
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>   RAISE NOTICE 'Done — user_id=%, tenant_id=%', v_user_id, v_tenant_id;                                                                           
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$> END $$;                                                                                                                                           
+NOTICE:  Using existing tenant id=1                                                                                                                               
+NOTICE:  Done — user_id=3, tenant_id=1                                                                                                                            
+DO                                                                                                                                                                
+noetic_dialog=> \q                                                                                                                                                
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ fuser -k 3002/tcp
+3002/tcp:            3438352                                                                                                                                      
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ 
