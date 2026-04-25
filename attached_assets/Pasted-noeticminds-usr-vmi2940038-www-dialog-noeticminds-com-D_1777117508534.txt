@@ -1,0 +1,182 @@
+noeticminds__usr@vmi2940038:~/www/dialog.noeticminds.com/Dialog$ pm2 logs dialog-app --lines 50
+[TAILING] Tailing last 50 lines for [dialog-app] process (change the value with --lines option)
+/var/www/noeticminds__usr/data/.pm2/logs/dialog-app-error.log last 50 lines:
+2|dialog-a |     at file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/node_modules/.pnpm/drizzle-orm@0.45.1_@types+pg@8.18.0_pg@8.20.0/node_modules/src/node-postgres/session.ts:154:19
+2|dialog-a |     at file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/artifacts/api-server/src/routes/auth-public.ts:37:18
+2|dialog-a | Error: Failed query: select "id", "tenant_id", "user_id", "role", "email", "name", "password_hash", "is_active", "created_at", "updated_at" from "tenant_users" "tenantUsersTable" where ("tenantUsersTable"."email" = $1 and "tenantUsersTable"."is_active" = $2) limit $3
+2|dialog-a | params: superadmin@salessutra.com,true,1
+2|dialog-a |     at NodePgPreparedQuery.queryWithCache (file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/node_modules/.pnpm/drizzle-orm@0.45.1_@types+pg@8.18.0_pg@8.20.0/node_modules/src/pg-core/session.ts:73:11)
+2|dialog-a |     at processTicksAndRejections (node:internal/process/task_queues:95:5)
+2|dialog-a |     at file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/node_modules/.pnpm/drizzle-orm@0.45.1_@types+pg@8.18.0_pg@8.20.0/node_modules/src/node-postgres/session.ts:154:19
+2|dialog-a |     at file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/artifacts/api-server/src/routes/auth-public.ts:37:18
+2|dialog-a | Error: Failed query: select "id", "tenant_id", "user_id", "role", "email", "name", "password_hash", "is_active", "created_at", "updated_at" from "tenant_users" "tenantUsersTable" where ("tenantUsersTable"."email" = $1 and "tenantUsersTable"."is_active" = $2) limit $3
+2|dialog-a | params: superadmin@salessutra.com,true,1
+2|dialog-a |     at NodePgPreparedQuery.queryWithCache (file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/node_modules/.pnpm/drizzle-orm@0.45.1_@types+pg@8.18.0_pg@8.20.0/node_modules/src/pg-core/session.ts:73:11)
+2|dialog-a |     at processTicksAndRejections (node:internal/process/task_queues:95:5)
+2|dialog-a |     at file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/node_modules/.pnpm/drizzle-orm@0.45.1_@types+pg@8.18.0_pg@8.20.0/node_modules/src/node-postgres/session.ts:154:19
+2|dialog-a |     at file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/artifacts/api-server/src/routes/auth-public.ts:37:18
+2|dialog-a | Error: Failed query: select "id", "tenant_id", "user_id", "role", "email", "name", "password_hash", "is_active", "created_at", "updated_at" from "tenant_users" "tenantUsersTable" where ("tenantUsersTable"."email" = $1 and "tenantUsersTable"."is_active" = $2) limit $3
+2|dialog-a | params: superadmin@salessutra.com,true,1
+2|dialog-a |     at NodePgPreparedQuery.queryWithCache (file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/node_modules/.pnpm/drizzle-orm@0.45.1_@types+pg@8.18.0_pg@8.20.0/node_modules/src/pg-core/session.ts:73:11)
+2|dialog-a |     at processTicksAndRejections (node:internal/process/task_queues:95:5)
+2|dialog-a |     at file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/node_modules/.pnpm/drizzle-orm@0.45.1_@types+pg@8.18.0_pg@8.20.0/node_modules/src/node-postgres/session.ts:154:19
+2|dialog-a |     at file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/artifacts/api-server/src/routes/auth-public.ts:37:18
+2|dialog-a | Error: Failed query: select "id", "tenant_id", "user_id", "role", "email", "name", "password_hash", "is_active", "created_at", "updated_at" from "tenant_users" "tenantUsersTable" where ("tenantUsersTable"."email" = $1 and "tenantUsersTable"."is_active" = $2) limit $3
+2|dialog-a | params: superadmin@salessutra.com,true,1
+2|dialog-a |     at NodePgPreparedQuery.queryWithCache (file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/node_modules/.pnpm/drizzle-orm@0.45.1_@types+pg@8.18.0_pg@8.20.0/node_modules/src/pg-core/session.ts:73:11)
+2|dialog-a |     at processTicksAndRejections (node:internal/process/task_queues:95:5)
+2|dialog-a |     at file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/node_modules/.pnpm/drizzle-orm@0.45.1_@types+pg@8.18.0_pg@8.20.0/node_modules/src/node-postgres/session.ts:154:19
+2|dialog-a |     at file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/artifacts/api-server/src/routes/auth-public.ts:37:18
+2|dialog-a | Error: Failed query: select "id", "tenant_id", "user_id", "role", "email", "name", "password_hash", "is_active", "created_at", "updated_at" from "tenant_users" "tenantUsersTable" where ("tenantUsersTable"."email" = $1 and "tenantUsersTable"."is_active" = $2) limit $3
+2|dialog-a | params: superadmin@salessutra.com,true,1
+2|dialog-a |     at NodePgPreparedQuery.queryWithCache (file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/node_modules/.pnpm/drizzle-orm@0.45.1_@types+pg@8.18.0_pg@8.20.0/node_modules/src/pg-core/session.ts:73:11)
+2|dialog-a |     at processTicksAndRejections (node:internal/process/task_queues:95:5)
+2|dialog-a |     at file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/node_modules/.pnpm/drizzle-orm@0.45.1_@types+pg@8.18.0_pg@8.20.0/node_modules/src/node-postgres/session.ts:154:19
+2|dialog-a |     at file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/artifacts/api-server/src/routes/auth-public.ts:37:18
+2|dialog-a | Error: Failed query: select "id", "tenant_user_id", "tenant_id", "token", "expires_at", "revoked_at", "created_at" from "tenant_sessions" "tenantSessionsTable" where ("tenantSessionsTable"."token" = $1 and "tenantSessionsTable"."expires_at" > $2) limit $3
+2|dialog-a | params: 21dda2f0d5b8c4937af032c6af29aa5ccb93c221e5bf849d7829200049b3151a,2026-04-25T10:33:18.960Z,1
+2|dialog-a |     at NodePgPreparedQuery.queryWithCache (file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/node_modules/.pnpm/drizzle-orm@0.45.1_@types+pg@8.18.0_pg@8.20.0/node_modules/src/pg-core/session.ts:73:11)
+2|dialog-a |     at processTicksAndRejections (node:internal/process/task_queues:95:5)
+2|dialog-a |     at file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/node_modules/.pnpm/drizzle-orm@0.45.1_@types+pg@8.18.0_pg@8.20.0/node_modules/src/node-postgres/session.ts:154:19
+2|dialog-a |     at resolveUser (file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/artifacts/api-server/src/middleware/auth.ts:105:23)
+2|dialog-a | Error: Failed query: select "id", "tenant_id", "user_id", "role", "email", "name", "password_hash", "is_active", "created_at", "updated_at" from "tenant_users" "tenantUsersTable" where ("tenantUsersTable"."email" = $1 and "tenantUsersTable"."is_active" = $2) limit $3
+2|dialog-a | params: superadmin@salessutra.com,true,1
+2|dialog-a |     at NodePgPreparedQuery.queryWithCache (file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/node_modules/.pnpm/drizzle-orm@0.45.1_@types+pg@8.18.0_pg@8.20.0/node_modules/src/pg-core/session.ts:73:11)
+2|dialog-a |     at processTicksAndRejections (node:internal/process/task_queues:95:5)
+2|dialog-a |     at file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/node_modules/.pnpm/drizzle-orm@0.45.1_@types+pg@8.18.0_pg@8.20.0/node_modules/src/node-postgres/session.ts:154:19
+2|dialog-a |     at file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/artifacts/api-server/src/routes/auth-public.ts:37:18
+2|dialog-a | Error: Failed query: select "id", "tenant_id", "user_id", "role", "email", "name", "password_hash", "is_active", "created_at", "updated_at" from "tenant_users" "tenantUsersTable" where ("tenantUsersTable"."email" = $1 and "tenantUsersTable"."is_active" = $2) limit $3
+2|dialog-a | params: superadmin@salessutra.com,true,1
+2|dialog-a |     at NodePgPreparedQuery.queryWithCache (file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/node_modules/.pnpm/drizzle-orm@0.45.1_@types+pg@8.18.0_pg@8.20.0/node_modules/src/pg-core/session.ts:73:11)
+2|dialog-a |     at processTicksAndRejections (node:internal/process/task_queues:95:5)
+2|dialog-a |     at file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/node_modules/.pnpm/drizzle-orm@0.45.1_@types+pg@8.18.0_pg@8.20.0/node_modules/src/node-postgres/session.ts:154:19
+2|dialog-a |     at file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/artifacts/api-server/src/routes/auth-public.ts:37:18
+
+/var/www/noeticminds__usr/data/.pm2/logs/dialog-app-out.log last 50 lines:
+2|dialog-a |               at listenInCluster (node:net:1965:12)
+2|dialog-a |               at Server.listen (node:net:2067:7)
+2|dialog-a |               at Function.listen (file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/node_modules/.pnpm/express@5.2.1/node_modules/express/lib/application.js:605:24)
+2|dialog-a |               at file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/artifacts/api-server/src/index.ts:18:5
+2|dialog-a |               at ModuleJob.run (node:internal/modules/esm/module_job:325:25)
+2|dialog-a |               at ModuleLoader.import (node:internal/modules/esm/loader:606:24)
+2|dialog-a |       "code": "EADDRINUSE",
+2|dialog-a |       "errno": -98,
+2|dialog-a |       "syscall": "listen",
+2|dialog-a |       "address": "::",
+2|dialog-a |       "port": 3002
+2|dialog-a |     }
+2|dialog-a | [16:43:22.637] ERROR (3447322): Error listening on port
+2|dialog-a |     err: {
+2|dialog-a |       "type": "Error",
+2|dialog-a |       "message": "listen EADDRINUSE: address already in use :::3002",
+2|dialog-a |       "stack":
+2|dialog-a |           Error: listen EADDRINUSE: address already in use :::3002
+2|dialog-a |               at Server.setupListenHandle [as _listen2] (node:net:1908:16)
+2|dialog-a |               at listenInCluster (node:net:1965:12)
+2|dialog-a |               at Server.listen (node:net:2067:7)
+2|dialog-a |               at Function.listen (file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/node_modules/.pnpm/express@5.2.1/node_modules/express/lib/application.js:605:24)
+2|dialog-a |               at file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/artifacts/api-server/src/index.ts:18:5
+2|dialog-a |               at ModuleJob.run (node:internal/modules/esm/module_job:325:25)
+2|dialog-a |               at ModuleLoader.import (node:internal/modules/esm/loader:606:24)
+2|dialog-a |       "code": "EADDRINUSE",
+2|dialog-a |       "errno": -98,
+2|dialog-a |       "syscall": "listen",
+2|dialog-a |       "address": "::",
+2|dialog-a |       "port": 3002
+2|dialog-a |     }
+2|dialog-a | [16:43:37.645] ERROR (3447500): Error listening on port
+2|dialog-a |     err: {
+2|dialog-a |       "type": "Error",
+2|dialog-a |       "message": "listen EADDRINUSE: address already in use :::3002",
+2|dialog-a |       "stack":
+2|dialog-a |           Error: listen EADDRINUSE: address already in use :::3002
+2|dialog-a |               at Server.setupListenHandle [as _listen2] (node:net:1908:16)
+2|dialog-a |               at listenInCluster (node:net:1965:12)
+2|dialog-a |               at Server.listen (node:net:2067:7)
+2|dialog-a |               at Function.listen (file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/node_modules/.pnpm/express@5.2.1/node_modules/express/lib/application.js:605:24)
+2|dialog-a |               at file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/artifacts/api-server/src/index.ts:18:5
+2|dialog-a |               at ModuleJob.run (node:internal/modules/esm/module_job:325:25)
+2|dialog-a |               at ModuleLoader.import (node:internal/modules/esm/loader:606:24)
+2|dialog-a |       "code": "EADDRINUSE",
+2|dialog-a |       "errno": -98,
+2|dialog-a |       "syscall": "listen",
+2|dialog-a |       "address": "::",
+2|dialog-a |       "port": 3002
+2|dialog-a |     }
+
+2|dialog-app  | [16:43:52.349] ERROR (3447518): Error listening on port
+2|dialog-app  |     err: {
+2|dialog-app  |       "type": "Error",
+2|dialog-app  |       "message": "listen EADDRINUSE: address already in use :::3002",
+2|dialog-app  |       "stack":
+2|dialog-app  |           Error: listen EADDRINUSE: address already in use :::3002
+2|dialog-app  |               at Server.setupListenHandle [as _listen2] (node:net:1908:16)
+2|dialog-app  |               at listenInCluster (node:net:1965:12)
+2|dialog-app  |               at Server.listen (node:net:2067:7)
+2|dialog-app  |               at Function.listen (file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/node_modules/.pnpm/express@5.2.1/node_modules/express/lib/application.js:605:24)
+2|dialog-app  |               at file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/artifacts/api-server/src/index.ts:18:5
+2|dialog-app  |               at ModuleJob.run (node:internal/modules/esm/module_job:325:25)
+2|dialog-app  |               at ModuleLoader.import (node:internal/modules/esm/loader:606:24)
+2|dialog-app  |       "code": "EADDRINUSE",
+2|dialog-app  |       "errno": -98,
+2|dialog-app  |       "syscall": "listen",
+2|dialog-app  |       "address": "::",
+2|dialog-app  |       "port": 3002
+2|dialog-app  |     }
+2|dialog-app  | [16:44:07.440] ERROR (3447547): Error listening on port
+2|dialog-app  |     err: {
+2|dialog-app  |       "type": "Error",
+2|dialog-app  |       "message": "listen EADDRINUSE: address already in use :::3002",
+2|dialog-app  |       "stack":
+2|dialog-app  |           Error: listen EADDRINUSE: address already in use :::3002
+2|dialog-app  |               at Server.setupListenHandle [as _listen2] (node:net:1908:16)
+2|dialog-app  |               at listenInCluster (node:net:1965:12)
+2|dialog-app  |               at Server.listen (node:net:2067:7)
+2|dialog-app  |               at Function.listen (file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/node_modules/.pnpm/express@5.2.1/node_modules/express/lib/application.js:605:24)
+2|dialog-app  |               at file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/artifacts/api-server/src/index.ts:18:5
+2|dialog-app  |               at ModuleJob.run (node:internal/modules/esm/module_job:325:25)
+2|dialog-app  |               at ModuleLoader.import (node:internal/modules/esm/loader:606:24)
+2|dialog-app  |       "code": "EADDRINUSE",
+2|dialog-app  |       "errno": -98,
+2|dialog-app  |       "syscall": "listen",
+2|dialog-app  |       "address": "::",
+2|dialog-app  |       "port": 3002
+2|dialog-app  |     }
+2|dialog-app  | [16:44:22.377] ERROR (3447567): Error listening on port
+2|dialog-app  |     err: {
+2|dialog-app  |       "type": "Error",
+2|dialog-app  |       "message": "listen EADDRINUSE: address already in use :::3002",
+2|dialog-app  |       "stack":
+2|dialog-app  |           Error: listen EADDRINUSE: address already in use :::3002
+2|dialog-app  |               at Server.setupListenHandle [as _listen2] (node:net:1908:16)
+2|dialog-app  |               at listenInCluster (node:net:1965:12)
+2|dialog-app  |               at Server.listen (node:net:2067:7)
+2|dialog-app  |               at Function.listen (file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/node_modules/.pnpm/express@5.2.1/node_modules/express/lib/application.js:605:24)
+2|dialog-app  |               at file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/artifacts/api-server/src/index.ts:18:5
+2|dialog-app  |               at ModuleJob.run (node:internal/modules/esm/module_job:325:25)
+2|dialog-app  |               at ModuleLoader.import (node:internal/modules/esm/loader:606:24)
+2|dialog-app  |       "code": "EADDRINUSE",
+2|dialog-app  |       "errno": -98,
+2|dialog-app  |       "syscall": "listen",
+2|dialog-app  |       "address": "::",
+2|dialog-app  |       "port": 3002
+2|dialog-app  |     }
+2|dialog-app  | [16:44:38.044] ERROR (3447588): Error listening on port
+2|dialog-app  |     err: {
+2|dialog-app  |       "type": "Error",
+2|dialog-app  |       "message": "listen EADDRINUSE: address already in use :::3002",
+2|dialog-app  |       "stack":
+2|dialog-app  |           Error: listen EADDRINUSE: address already in use :::3002
+2|dialog-app  |               at Server.setupListenHandle [as _listen2] (node:net:1908:16)
+2|dialog-app  |               at listenInCluster (node:net:1965:12)
+2|dialog-app  |               at Server.listen (node:net:2067:7)
+2|dialog-app  |               at Function.listen (file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/node_modules/.pnpm/express@5.2.1/node_modules/express/lib/application.js:605:24)
+2|dialog-app  |               at file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/artifacts/api-server/src/index.ts:18:5
+2|dialog-app  |               at ModuleJob.run (node:internal/modules/esm/module_job:325:25)
+2|dialog-app  |               at ModuleLoader.import (node:internal/modules/esm/loader:606:24)
+2|dialog-app  |       "code": "EADDRINUSE",
+2|dialog-app  |       "errno": -98,
+2|dialog-app  |       "syscall": "listen",
+2|dialog-app  |       "address": "::",
+2|dialog-app  |       "port": 3002
+2|dialog-app  |     }

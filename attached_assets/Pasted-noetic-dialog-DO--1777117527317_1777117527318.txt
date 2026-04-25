@@ -1,0 +1,63 @@
+noetic_dialog=> DO $$                                                                                                                                             
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$> DECLARE                                                                                                                                           
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>   v_user_id integer;                                                                                                                              
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>   v_tenant_id integer;                                                                                                                            
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$> BEGIN                                                                                                                                             
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>   -- Create superadmin owner record                                                                                                               
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>   INSERT INTO users (email, name, is_superadmin, plan)                                                                                            
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>   VALUES ('superadmin@dialog.com', 'Platform Admin', true, 'enterprise')                                                                          
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>   RETURNING id INTO v_user_id;                                                                                                                    
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>   -- Create the Platform Admin tenant                                                                                                             
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>   INSERT INTO tenants (name, slug, status, owner_id)                                                                                              
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>   VALUES ('Platform Admin', 'superadmin-portal', 'active', v_user_id)                                                                             
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>   RETURNING id INTO v_tenant_id;                                                                                                                  
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>   -- Create the login account (password: Admin1234!)                                                                                              
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>   INSERT INTO tenant_users (tenant_id, role, email, name, password_hash, is_active)                                                               
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>   VALUES (                                                                                                                                        
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>     v_tenant_id,                                                                                                                                  
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>     'admin',                                                                                                                                      
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>     'superadmin@dialog.com',                                                                                                                      
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>     'Platform Admin',                                                                                                                             
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>     '$2b$12$BAWf63l/U9AAqRc4338z9OH.xGIhmb365O.VigSLqWgxrVRLou8YG',                                                                               
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>     true                                                                                                                                          
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>   );                                                                                                                                              
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$>   RAISE NOTICE 'Superadmin created with tenant_id=%', v_tenant_id;                                                                                
+noetic_dialog$>                                                                                                                                                   
+noetic_dialog$> END $$;                                                                                                                                           
+ERROR:  duplicate key value violates unique constraint "users_pkey"                                                                                               
+DETAIL:  Key (id)=(2) already exists.                                                                                                                             
+CONTEXT:  SQL statement "INSERT INTO users (email, name, is_superadmin, plan)                                                                                     
+                                                                                                                                                                  
+  VALUES ('superadmin@dialog.com', 'Platform Admin', true, 'enterprise')                                                                                          
+                                                                                                                                                                  
+  RETURNING id"                                                                                                                                                   
+PL/pgSQL function inline_code_block line 13 at SQL statement 
