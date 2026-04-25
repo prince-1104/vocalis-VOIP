@@ -13,7 +13,14 @@ module.exports = {
       env: {
         PORT: "3002",
         NODE_ENV: "production",
+        // Database
+        DATABASE_URL: "postgresql://user:pass@localhost:5432/dbname",
         DATABASE_SSL: "true",
+        // Auth — generate with: openssl rand -hex 64
+        JWT_SECRET: "REPLACE_WITH_64_CHAR_HEX_SECRET",
+        // AI — optional, enables chat widget & AI features
+        // Use either Replit integration vars OR a plain OpenAI key:
+        OPENAI_API_KEY: "sk-...",
       },
     },
   ],
