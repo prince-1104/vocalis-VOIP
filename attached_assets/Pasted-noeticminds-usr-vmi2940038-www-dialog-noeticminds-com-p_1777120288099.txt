@@ -1,0 +1,127 @@
+noeticminds__usr@vmi2940038:~/www/dialog.noeticminds.com$ pm2 logs dialog-app --lines 30 --nostream
+[TAILING] Tailing last 30 lines for [dialog-app] process (change the value with --lines option)
+/var/www/noeticminds__usr/data/.pm2/logs/dialog-app-error.log last 30 lines:
+0|dialog-a | Error: Failed query: select "id", "tenant_id", "user_id", "role", "email", "name", "password_hash", "is_active", "created_at", "updated_at" from "tenant_users" "tenantUsersTable" where ("tenantUsersTable"."email" = $1 and "tenantUsersTable"."is_active" = $2) limit $3
+0|dialog-a | params: superadmin@salessutra.com,true,1
+0|dialog-a |     at NodePgPreparedQuery.queryWithCache (file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/node_modules/.pnpm/drizzle-orm@0.45.1_@types+pg@8.18.0_pg@8.20.0/node_modules/src/pg-core/session.ts:73:11)
+0|dialog-a |     at processTicksAndRejections (node:internal/process/task_queues:95:5)
+0|dialog-a |     at file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/node_modules/.pnpm/drizzle-orm@0.45.1_@types+pg@8.18.0_pg@8.20.0/node_modules/src/node-postgres/session.ts:154:19
+0|dialog-a |     at file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/artifacts/api-server/src/routes/auth-public.ts:37:18
+0|dialog-a | Error: Failed query: select "id", "tenant_id", "user_id", "role", "email", "name", "password_hash", "is_active", "created_at", "updated_at" from "tenant_users" "tenantUsersTable" where ("tenantUsersTable"."email" = $1 and "tenantUsersTable"."is_active" = $2) limit $3
+0|dialog-a | params: superadmin@salessutra.com,true,1
+0|dialog-a |     at NodePgPreparedQuery.queryWithCache (file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/node_modules/.pnpm/drizzle-orm@0.45.1_@types+pg@8.18.0_pg@8.20.0/node_modules/src/pg-core/session.ts:73:11)
+0|dialog-a |     at processTicksAndRejections (node:internal/process/task_queues:95:5)
+0|dialog-a |     at file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/node_modules/.pnpm/drizzle-orm@0.45.1_@types+pg@8.18.0_pg@8.20.0/node_modules/src/node-postgres/session.ts:154:19
+0|dialog-a |     at file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/artifacts/api-server/src/routes/auth-public.ts:37:18
+0|dialog-a | Error: Failed query: select "id", "tenant_user_id", "tenant_id", "token", "expires_at", "revoked_at", "created_at" from "tenant_sessions" "tenantSessionsTable" where ("tenantSessionsTable"."token" = $1 and "tenantSessionsTable"."expires_at" > $2) limit $3
+0|dialog-a | params: 21dda2f0d5b8c4937af032c6af29aa5ccb93c221e5bf849d7829200049b3151a,2026-04-25T10:33:18.960Z,1
+0|dialog-a |     at NodePgPreparedQuery.queryWithCache (file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/node_modules/.pnpm/drizzle-orm@0.45.1_@types+pg@8.18.0_pg@8.20.0/node_modules/src/pg-core/session.ts:73:11)
+0|dialog-a |     at processTicksAndRejections (node:internal/process/task_queues:95:5)
+0|dialog-a |     at file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/node_modules/.pnpm/drizzle-orm@0.45.1_@types+pg@8.18.0_pg@8.20.0/node_modules/src/node-postgres/session.ts:154:19
+0|dialog-a |     at resolveUser (file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/artifacts/api-server/src/middleware/auth.ts:105:23)
+0|dialog-a | Error: Failed query: select "id", "tenant_id", "user_id", "role", "email", "name", "password_hash", "is_active", "created_at", "updated_at" from "tenant_users" "tenantUsersTable" where ("tenantUsersTable"."email" = $1 and "tenantUsersTable"."is_active" = $2) limit $3
+0|dialog-a | params: superadmin@salessutra.com,true,1
+0|dialog-a |     at NodePgPreparedQuery.queryWithCache (file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/node_modules/.pnpm/drizzle-orm@0.45.1_@types+pg@8.18.0_pg@8.20.0/node_modules/src/pg-core/session.ts:73:11)
+0|dialog-a |     at processTicksAndRejections (node:internal/process/task_queues:95:5)
+0|dialog-a |     at file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/node_modules/.pnpm/drizzle-orm@0.45.1_@types+pg@8.18.0_pg@8.20.0/node_modules/src/node-postgres/session.ts:154:19
+0|dialog-a |     at file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/artifacts/api-server/src/routes/auth-public.ts:37:18
+0|dialog-a | Error: Failed query: select "id", "tenant_id", "user_id", "role", "email", "name", "password_hash", "is_active", "created_at", "updated_at" from "tenant_users" "tenantUsersTable" where ("tenantUsersTable"."email" = $1 and "tenantUsersTable"."is_active" = $2) limit $3
+0|dialog-a | params: superadmin@salessutra.com,true,1
+0|dialog-a |     at NodePgPreparedQuery.queryWithCache (file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/node_modules/.pnpm/drizzle-orm@0.45.1_@types+pg@8.18.0_pg@8.20.0/node_modules/src/pg-core/session.ts:73:11)
+0|dialog-a |     at processTicksAndRejections (node:internal/process/task_queues:95:5)
+0|dialog-a |     at file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/node_modules/.pnpm/drizzle-orm@0.45.1_@types+pg@8.18.0_pg@8.20.0/node_modules/src/node-postgres/session.ts:154:19
+0|dialog-a |     at file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/artifacts/api-server/src/routes/auth-public.ts:37:18
+
+/var/www/noeticminds__usr/data/.pm2/logs/dialog-app-out.log last 30 lines:
+0|dialog-a |               at Server.listen (node:net:2067:7)
+0|dialog-a |               at Function.listen (file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/node_modules/.pnpm/express@5.2.1/node_modules/express/lib/application.js:605:24)
+0|dialog-a |               at file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/artifacts/api-server/src/index.ts:18:5
+0|dialog-a |               at ModuleJob.run (node:internal/modules/esm/module_job:325:25)
+0|dialog-a |               at ModuleLoader.import (node:internal/modules/esm/loader:606:24)
+0|dialog-a |       "code": "EADDRINUSE",
+0|dialog-a |       "errno": -98,
+0|dialog-a |       "syscall": "listen",
+0|dialog-a |       "address": "::",
+0|dialog-a |       "port": 3002
+0|dialog-a |     }
+0|dialog-a | [16:56:35.286] INFO (3449919): Server listening
+0|dialog-a |     port: 3002
+0|dialog-a | [16:56:35.356] INFO (3449919): Overdue invoice check complete
+0|dialog-a |  ERR_PNPM_NO_IMPORTER_MANIFEST_FOUND  No package.json (or package.yaml, or package.json5) was found in "/var/www/noeticminds__usr/data/www/dialog.noeticminds.com".
+0|dialog-a |  ERR_PNPM_NO_IMPORTER_MANIFEST_FOUND  No package.json (or package.yaml, or package.json5) was found in "/var/www/noeticminds__usr/data/www/dialog.noeticminds.com".
+0|dialog-a |  ERR_PNPM_NO_IMPORTER_MANIFEST_FOUND  No package.json (or package.yaml, or package.json5) was found in "/var/www/noeticminds__usr/data/www/dialog.noeticminds.com".
+0|dialog-a |  ERR_PNPM_NO_IMPORTER_MANIFEST_FOUND  No package.json (or package.yaml, or package.json5) was found in "/var/www/noeticminds__usr/data/www/dialog.noeticminds.com".
+0|dialog-a |  ERR_PNPM_NO_IMPORTER_MANIFEST_FOUND  No package.json (or package.yaml, or package.json5) was found in "/var/www/noeticminds__usr/data/www/dialog.noeticminds.com".
+0|dialog-a |  ERR_PNPM_NO_IMPORTER_MANIFEST_FOUND  No package.json (or package.yaml, or package.json5) was found in "/var/www/noeticminds__usr/data/www/dialog.noeticminds.com".
+0|dialog-a |  ERR_PNPM_NO_IMPORTER_MANIFEST_FOUND  No package.json (or package.yaml, or package.json5) was found in "/var/www/noeticminds__usr/data/www/dialog.noeticminds.com".
+0|dialog-a |  ERR_PNPM_NO_IMPORTER_MANIFEST_FOUND  No package.json (or package.yaml, or package.json5) was found in "/var/www/noeticminds__usr/data/www/dialog.noeticminds.com".
+0|dialog-a |  ERR_PNPM_NO_IMPORTER_MANIFEST_FOUND  No package.json (or package.yaml, or package.json5) was found in "/var/www/noeticminds__usr/data/www/dialog.noeticminds.com".
+0|dialog-a |  ERR_PNPM_NO_IMPORTER_MANIFEST_FOUND  No package.json (or package.yaml, or package.json5) was found in "/var/www/noeticminds__usr/data/www/dialog.noeticminds.com".
+0|dialog-a |  ERR_PNPM_NO_IMPORTER_MANIFEST_FOUND  No package.json (or package.yaml, or package.json5) was found in "/var/www/noeticminds__usr/data/www/dialog.noeticminds.com".
+0|dialog-a |  ERR_PNPM_NO_IMPORTER_MANIFEST_FOUND  No package.json (or package.yaml, or package.json5) was found in "/var/www/noeticminds__usr/data/www/dialog.noeticminds.com".
+0|dialog-a |  ERR_PNPM_NO_IMPORTER_MANIFEST_FOUND  No package.json (or package.yaml, or package.json5) was found in "/var/www/noeticminds__usr/data/www/dialog.noeticminds.com".
+0|dialog-a |  ERR_PNPM_NO_IMPORTER_MANIFEST_FOUND  No package.json (or package.yaml, or package.json5) was found in "/var/www/noeticminds__usr/data/www/dialog.noeticminds.com".
+0|dialog-a |  ERR_PNPM_NO_IMPORTER_MANIFEST_FOUND  No package.json (or package.yaml, or package.json5) was found in "/var/www/noeticminds__usr/data/www/dialog.noeticminds.com".
+0|dialog-a |  ERR_PNPM_NO_IMPORTER_MANIFEST_FOUND  No package.json (or package.yaml, or package.json5) was found in "/var/www/noeticminds__usr/data/www/dialog.noeticminds.com".
+
+noeticminds__usr@vmi2940038:~/www/dialog.noeticminds.com$ pm2 show dialog-app | grep -E "script|args|cwd|exec"
+│ script path       │ /usr/bin/pnpm                                                 │
+│ script args       │ start                                                         │
+│ interpreter args  │ N/A                                                           │
+│ script id         │ 0                                                             │
+│ exec cwd          │ /var/www/noeticminds__usr/data/www/dialog.noeticminds.com     │
+│ exec mode         │ fork_mode                                                     │
+noeticminds__usr@vmi2940038:~/www/dialog.noeticminds.com$ cd /var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog
+
+# Kill whatever has the port
+fuser -k 3002/tcp 2>/dev/null; sleep 1
+
+# Delete the errored process
+pm2 delete dialog-app
+
+# Rebuild API from the pulled source
+pnpm --filter @workspace/api-server run build
+
+# Also rebuild frontend
+pnpm --filter @workspace/sales-sutra run build
+[PM2] Applying action deleteProcessId on app [dialog-app](ids: [ 0 ])
+[PM2] [dialog-app](0) ✓
+┌────┬────────────────────┬─────────────┬─────────┬─────────┬──────────┬────────┬──────┬───────────┬──────────┬──────────┬──────────┬──────────┐
+│ id │ name               │ namespace   │ version │ mode    │ pid      │ uptime │ ↺    │ status    │ cpu      │ mem      │ user     │ watching │
+├────┼────────────────────┼─────────────┼─────────┼─────────┼──────────┼────────┼──────┼───────────┼──────────┼──────────┼──────────┼──────────┤
+│ 1  │ noeticminds_com    │ default     │ N/A     │ fork    │ 0        │ 0      │ 30   │ errored   │ 0%       │ 0b       │ noe… │ disabled │
+│ 2  │ noeticminds_com    │ default     │ N/A     │ fork    │ 3452600  │ 13m    │ 1    │ online    │ 0%       │ 69.6mb   │ noe… │ disabled │
+└────┴────────────────────┴─────────────┴─────────┴─────────┴──────────┴────────┴──────┴───────────┴──────────┴──────────┴──────────┴──────────┘
+
+> @workspace/api-server@0.0.0 build /var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/artifacts/api-server
+> node ./build.mjs
+
+[Error: EACCES: permission denied, unlink '/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/artifacts/api-server/dist/index.mjs'] {
+  errno: -13,
+  code: 'EACCES',
+  syscall: 'unlink',
+  path: '/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/artifacts/api-server/dist/index.mjs'
+}
+/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/artifacts/api-server:
+ ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL  @workspace/api-server@0.0.0 build: `node ./build.mjs`
+Exit status 1
+
+> @workspace/sales-sutra@0.0.0 build /var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/artifacts/sales-sutra
+> vite build --config vite.config.ts
+
+failed to load config from /var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/artifacts/sales-sutra/vite.config.ts
+error during build:
+Error: PORT environment variable is required but was not provided.
+    at file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/artifacts/sales-sutra/node_modules/.vite-temp/vite.config.ts.timestamp-1777120251959-05a1538570ff1.mjs:10:9
+    at ModuleJob.run (node:internal/modules/esm/module_job:325:25)
+    at async ModuleLoader.import (node:internal/modules/esm/loader:606:24)
+    at async loadConfigFromBundledFile (file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/node_modules/.pnpm/vite@7.3.1_@types+node@25.3.5_jiti@2.6.1_lightningcss@1.31.1_tsx@4.21.0_yaml@2.8.2/node_modules/vite/dist/node/chunks/config.js:35909:12)
+    at async bundleAndLoadConfigFile (file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/node_modules/.pnpm/vite@7.3.1_@types+node@25.3.5_jiti@2.6.1_lightningcss@1.31.1_tsx@4.21.0_yaml@2.8.2/node_modules/vite/dist/node/chunks/config.js:35797:17)
+    at async loadConfigFromFile (file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/node_modules/.pnpm/vite@7.3.1_@types+node@25.3.5_jiti@2.6.1_lightningcss@1.31.1_tsx@4.21.0_yaml@2.8.2/node_modules/vite/dist/node/chunks/config.js:35764:42)
+    at async resolveConfig (file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/node_modules/.pnpm/vite@7.3.1_@types+node@25.3.5_jiti@2.6.1_lightningcss@1.31.1_tsx@4.21.0_yaml@2.8.2/node_modules/vite/dist/node/chunks/config.js:35413:22)
+    at async createBuilder (file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/node_modules/.pnpm/vite@7.3.1_@types+node@25.3.5_jiti@2.6.1_lightningcss@1.31.1_tsx@4.21.0_yaml@2.8.2/node_modules/vite/dist/node/chunks/config.js:33875:19)
+    at async CAC.<anonymous> (file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/node_modules/.pnpm/vite@7.3.1_@types+node@25.3.5_jiti@2.6.1_lightningcss@1.31.1_tsx@4.21.0_yaml@2.8.2/node_modules/vite/dist/node/cli.js:629:10)
+/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/artifacts/sales-sutra:
+ ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL  @workspace/sales-sutra@0.0.0 build: `vite build --config vite.config.ts`
+Exit status 1
+noeticminds__usr@vmi2940038:~/www/dialog.noeticminds.com/Dialog$ 
