@@ -1,0 +1,54 @@
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ git config --global --add safe.directory /var/www/noeticminds__usr/data/www/dial
+og.noeticminds.com/Dialog                                                                                                                                         
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ 
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ git pull origin main
+Username for 'https://github.com': noeticminds                                                                                                                    
+Password for 'https://noeticminds@github.com':                                                                                                                    
+From https://github.com/noeticminds/Dialog                                                                                                                        
+ * branch            main       -> FETCH_HEAD                                                                                                                     
+Already up to date.                                                                                                                                               
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ # Get the current DATABASE_URL
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ 
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ echo $DATABASE_URL
+postgresql://noetic_dial_usr:Webworks%401234@localhost:5432/noetic_dialog                                                                                         
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ 
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ 
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ 
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ # Then edit ecosystem.config.cjs and paste it into the env block:
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ 
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ nano ecosystem.config.cjs
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ nano ecosystem.config.cjs
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ nano ecosystem.config.cjs
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ cat ecosystem.config.cjs                                                        
+DATABASE_URL:postgresql://noetic_dial_usr:Webworks%401234@localhost:5432/noetic_dialog                                                                            
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ pm2 start ecosystem.config.cjs
+[PM2][ERROR] File ecosystem.config.cjs malformated
+/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/ecosystem.config.cjs:2                                                                           
+                                                                                                                                                                  
+                                                                                                                                                                  
+                                                                                                                                                                  
+SyntaxError: Unexpected end of input                                                                                                                              
+    at wrapSafe (node:internal/modules/cjs/loader:1666:18)                                                                                                        
+    at Module._compile (node:internal/modules/cjs/loader:1708:20)                                                                                                 
+    at Object..js (node:internal/modules/cjs/loader:1899:10)                                                                                                      
+    at Module.load (node:internal/modules/cjs/loader:1469:32)                                                                                                     
+    at Function._load (node:internal/modules/cjs/loader:1286:12)                                                                                                  
+    at TracingChannel.traceSync (node:diagnostics_channel:322:14)                                                                                                 
+    at wrapModuleLoad (node:internal/modules/cjs/loader:235:24)                                                                                                   
+    at Module.require (node:internal/modules/cjs/loader:1491:12)                                                                                                  
+    at require (node:internal/modules/helpers:135:16)                                                                                                             
+    at Common.parseConfig (/opt/fnode/lib/node_modules/pm2/lib/Common.js:331:12)
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ 
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ pm2 save
+[PM2] Saving current process list...
+[PM2] Successfully saved in /root/.pm2/dump.pm2
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ 
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ pm2 list
+┌────┬──────────────────────┬─────────────┬─────────┬─────────┬──────────┬────────┬──────┬───────────┬──────────┬──────────┬──────────┬──────────┐                
+│ id │ name                 │ namespace   │ version │ mode    │ pid      │ uptime │ ↺    │ status    │ cpu      │ mem      │ user     │ watching │
+├────┼──────────────────────┼─────────────┼─────────┼─────────┼──────────┼────────┼──────┼───────────┼──────────┼──────────┼──────────┼──────────┤                
+│ 1  │ gurumitra-ai         │ default     │ N/A     │ fork    │ 3438364  │ 2h     │ 7    │ online    │ 0%       │ 64.6mb   │ root     │ disabled │
+│ 0  │ gurumitra-backend    │ default     │ 1.0.0   │ fork    │ 3454026  │ 8m     │ 28   │ online    │ 0%       │ 67.1mb   │ root     │ disabled │
+└────┴──────────────────────┴─────────────┴─────────┴─────────┴──────────┴────────┴──────┴───────────┴──────────┴──────────┴──────────┴──────────┘                
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ 
+                                                                                   
