@@ -1,0 +1,112 @@
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ cat > lib/integrations-openai-ai-server/src/client.ts << 'EOF'
+>                                                                                                                                                                 
+> import OpenAI from "openai";                                                                                                                                    
+>                                                                                                                                                                 
+>                                                                                                                                                                 
+>                                                                                                                                                                 
+> function createOpenAIClient(): OpenAI {                                                                                                                         
+>                                                                                                                                                                 
+>   const baseURL =                                                                                                                                               
+>                                                                                                                                                                 
+>     process.env.AI_INTEGRATIONS_OPENAI_BASE_URL ||                                                                                                              
+>                                                                                                                                                                 
+>     "https://api.openai.com/v1";                                                                                                                                
+>                                                                                                                                                                 
+>                                                                                                                                                                 
+>                                                                                                                                                                 
+>   const apiKey =                                                                                                                                                
+>                                                                                                                                                                 
+>     process.env.AI_INTEGRATIONS_OPENAI_API_KEY ||                                                                                                               
+>                                                                                                                                                                 
+>     process.env.OPENAI_API_KEY;                                                                                                                                 
+>                                                                                                                                                                 
+>                                                                                                                                                                 
+>                                                                                                                                                                 
+>   if (!apiKey) {                                                                                                                                                
+>                                                                                                                                                                 
+>     throw new Error(                                                                                                                                            
+>                                                                                                                                                                 
+>       "No OpenAI API key found. Set OPENAI_API_KEY in your ecosystem.config.cjs",                                                                               
+>                                                                                                                                                                 
+>     );                                                                                                                                                          
+>                                                                                                                                                                 
+>   }                                                                                                                                                             
+>                                                                                                                                                                 
+>                                                                                                                                                                 
+>                                                                                                                                                                 
+>   return new OpenAI({ apiKey, baseURL });                                                                                                                       
+>                                                                                                                                                                 
+> }                                                                                                                                                               
+>                                                                                                                                                                 
+>                                                                                                                                                                 
+>                                                                                                                                                                 
+> let _client: OpenAI | null = null;                                                                                                                              
+>                                                                                                                                                                 
+>                                                                                                                                                                 
+>                                                                                                                                                                 
+> export const openai: OpenAI = new Proxy({} as OpenAI, {                                                                                                         
+>                                                                                                                                                                 
+>   get(_target, prop) {                                                                                                                                          
+>                                                                                                                                                                 
+>     if (!_client) {                                                                                                                                             
+>                                                                                                                                                                 
+>       _client = createOpenAIClient();                                                                                                                           
+>                                                                                                                                                                 
+>     }                                                                                                                                                           
+>                                                                                                                                                                 
+>     const value = (_client as any)[prop];                                                                                                                       
+>                                                                                                                                                                 
+>     return typeof value === "function" ? value.bind(_client) : value;                                                                                           
+>                                                                                                                                                                 
+>   },                                                                                                                                                            
+>                                                                                                                                                                 
+> });                                                                                                                                                             
+>                                                                                                                                                                 
+> EOF                                                                                                                                                             
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ pnpm --filter @workspace/api-server run build
+                                                                                                                                                                  
+                                                                                                                                                                  
+> @workspace/api-server@0.0.0 build /var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/artifacts/api-server                                         
+> node ./build.mjs                                                                                                                                                
+                                                                                                                                                                  
+                                                                                                                                                                  
+  dist/index.mjs                      21.9mb ⚠️
+  dist/pino-worker.mjs               153.5kb
+  dist/pino-file.mjs                 142.1kb
+  dist/pino-pretty.mjs               114.6kb
+  dist/thread-stream-worker.mjs        7.3kb
+  dist/index.mjs.map                  35.2mb
+  dist/pino-worker.mjs.map           256.9kb
+  dist/pino-file.mjs.map             229.1kb
+  dist/pino-pretty.mjs.map           203.9kb
+  dist/thread-stream-worker.mjs.map   12.0kb
+                                                                                                                                                                  
+⚡ Done in 6207ms
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ 
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ pm2 restart dialog-api --update-env
+[PM2] Applying action restartProcessId on app [dialog-api](ids: [ 3 ])
+[PM2][ERROR] Process 3 not found
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ 
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ sleep 3
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ 
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ pm2 logs dialog-api --lines 15 --nostream
+[TAILING] Tailing last 15 lines for [dialog-api] process (change the value with --lines option)                                                                   
+/root/.pm2/logs/dialog-api-out-3.log last 15 lines:                                                                                                               
+/root/.pm2/logs/dialog-api-error-3.log last 15 lines:                                                                                                             
+3|dialog-a |     at file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/lib/integrations-openai-ai-server/src/client.ts:4:9
+3|dialog-a |     at ModuleJob.run (node:internal/modules/esm/module_job:274:25)
+3|dialog-a |     at onImport.tracePromise.__proto__ (node:internal/modules/esm/loader:644:26)
+3|dialog-a | Error: AI_INTEGRATIONS_OPENAI_BASE_URL must be set. Did you forget to provision the OpenAI AI integration?
+3|dialog-a |     at file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/lib/integrations-openai-ai-server/src/client.ts:4:9
+3|dialog-a |     at ModuleJob.run (node:internal/modules/esm/module_job:274:25)
+3|dialog-a |     at onImport.tracePromise.__proto__ (node:internal/modules/esm/loader:644:26)
+3|dialog-a | Error: AI_INTEGRATIONS_OPENAI_BASE_URL must be set. Did you forget to provision the OpenAI AI integration?
+3|dialog-a |     at file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/lib/integrations-openai-ai-server/src/client.ts:4:9
+3|dialog-a |     at ModuleJob.run (node:internal/modules/esm/module_job:274:25)
+3|dialog-a |     at onImport.tracePromise.__proto__ (node:internal/modules/esm/loader:644:26)
+3|dialog-a | Error: AI_INTEGRATIONS_OPENAI_BASE_URL must be set. Did you forget to provision the OpenAI AI integration?
+3|dialog-a |     at file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/lib/integrations-openai-ai-server/src/client.ts:4:9
+3|dialog-a |     at ModuleJob.run (node:internal/modules/esm/module_job:274:25)
+3|dialog-a |     at onImport.tracePromise.__proto__ (node:internal/modules/esm/loader:644:26)
+                                                                                                                                                                  
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$
