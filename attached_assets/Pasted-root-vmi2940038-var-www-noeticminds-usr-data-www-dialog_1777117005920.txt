@@ -1,0 +1,26 @@
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ psql "$DATABASE_URL"                                                            
+psql (18.3 (Ubuntu 18.3-1.pgdg24.04+1), server 15.17 (Ubuntu 15.17-1.pgdg24.04+1))                                                                                
+SSL connection (protocol: TLSv1.3, cipher: TLS_AES_256_GCM_SHA384, compression: off, ALPN: none)                                                                  
+Type "help" for help.                                                                                                                                             
+                                                                                                                                                                  
+noetic_dialog=> \dt                                                                                                                                               
+                    List of tables                                                                                                                                
+ Schema |        Name        | Type  |      Owner                                                                                                                 
+--------+--------------------+-------+-----------------                                                                                                           
+ public | agent_configs      | table | noetic_dial_usr                                                                                                            
+ public | call_logs          | table | noetic_dial_usr                                                                                                            
+ public | calling_scripts    | table | noetic_dial_usr                                                                                                            
+ public | campaign_contacts  | table | noetic_dial_usr                                                                                                            
+ public | campaigns          | table | noetic_dial_usr                                                                                                            
+ public | contacts           | table | noetic_dial_usr                                                                                                            
+ public | invoice_line_items | table | noetic_dial_usr                                                                                                            
+ public | invoices           | table | noetic_dial_usr                                                                                                            
+ public | platform_settings  | table | noetic_dial_usr                                                                                                            
+ public | tenant_sessions    | table | noetic_dial_usr                                                                                                            
+ public | tenant_users       | table | noetic_dial_usr                                                                                                            
+ public | tenants            | table | noetic_dial_usr                                                                                                            
+ public | training_data      | table | noetic_dial_usr                                                                                                            
+ public | users              | table | noetic_dial_usr                                                                                                            
+(14 rows)                                                                                                                                                         
+                                                                                                                                                                  
+noetic_dialog=> 
