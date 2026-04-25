@@ -1,0 +1,37 @@
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ pm2 delete dialog-api
+[PM2] Applying action deleteProcessId on app [dialog-api](ids: [ 2 ])
+[PM2] [dialog-api](2) ✓
+┌────┬──────────────────────┬─────────────┬─────────┬─────────┬──────────┬────────┬──────┬───────────┬──────────┬──────────┬──────────┬──────────┐                
+│ id │ name                 │ namespace   │ version │ mode    │ pid      │ uptime │ ↺    │ status    │ cpu      │ mem      │ user     │ watching │
+├────┼──────────────────────┼─────────────┼─────────┼─────────┼──────────┼────────┼──────┼───────────┼──────────┼──────────┼──────────┼──────────┤                
+│ 1  │ gurumitra-ai         │ default     │ N/A     │ fork    │ 3438364  │ 2h     │ 7    │ online    │ 0%       │ 64.6mb   │ root     │ disabled │
+│ 0  │ gurumitra-backend    │ default     │ 1.0.0   │ fork    │ 3454026  │ 19m    │ 28   │ online    │ 0%       │ 67.1mb   │ root     │ disabled │
+└────┴──────────────────────┴─────────────┴─────────┴─────────┴──────────┴────────┴──────┴───────────┴──────────┴──────────┴──────────┴──────────┘                
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ 
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ pm2 start ecosystem.config.cjs
+[PM2][WARN] Applications dialog-api not running, starting...
+[PM2] App [dialog-api] launched (1 instances)
+┌────┬──────────────────────┬─────────────┬─────────┬─────────┬──────────┬────────┬──────┬───────────┬──────────┬──────────┬──────────┬──────────┐                
+│ id │ name                 │ namespace   │ version │ mode    │ pid      │ uptime │ ↺    │ status    │ cpu      │ mem      │ user     │ watching │
+├────┼──────────────────────┼─────────────┼─────────┼─────────┼──────────┼────────┼──────┼───────────┼──────────┼──────────┼──────────┼──────────┤                
+│ 3  │ dialog-api           │ default     │ 0.0.0   │ fork    │ 3457413  │ 0s     │ 0    │ online    │ 0%       │ 28.3mb   │ root     │ disabled │
+│ 1  │ gurumitra-ai         │ default     │ N/A     │ fork    │ 3438364  │ 2h     │ 7    │ online    │ 0%       │ 64.6mb   │ root     │ disabled │
+│ 0  │ gurumitra-backend    │ default     │ 1.0.0   │ fork    │ 3454026  │ 19m    │ 28   │ online    │ 0%       │ 67.4mb   │ root     │ disabled │
+└────┴──────────────────────┴─────────────┴─────────┴─────────┴──────────┴────────┴──────┴───────────┴──────────┴──────────┴──────────┴──────────┘                
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ 
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ pm2 save
+[PM2] Saving current process list...
+[PM2] Successfully saved in /root/.pm2/dump.pm2
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ 
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ sleep 3
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ 
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$ pm2 logs dialog-api --lines 15 --nostream
+[TAILING] Tailing last 15 lines for [dialog-api] process (change the value with --lines option)                                                                   
+/root/.pm2/logs/dialog-api-out-3.log last 15 lines:                                                                                                               
+/root/.pm2/logs/dialog-api-error-3.log last 15 lines:                                                                                                             
+3|dialog-a | Error: AI_INTEGRATIONS_OPENAI_BASE_URL must be set. Did you forget to provision the OpenAI AI integration?
+3|dialog-a |     at file:///var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog/lib/integrations-openai-ai-server/src/client.ts:4:9
+3|dialog-a |     at ModuleJob.run (node:internal/modules/esm/module_job:274:25)
+3|dialog-a |     at onImport.tracePromise.__proto__ (node:internal/modules/esm/loader:644:26)
+                                                                                                                                                                  
+root@vmi2940038:/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog$
