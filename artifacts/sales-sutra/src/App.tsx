@@ -22,6 +22,7 @@ import AdminTenantDetail from "@/pages/admin/AdminTenantDetail";
 import AdminInvoices from "@/pages/admin/AdminInvoices";
 import Billing from "@/pages/Billing";
 import NotFound from "@/pages/not-found";
+import WidgetTest from "@/pages/WidgetTest";
 import Forbidden from "@/pages/admin/Forbidden";
 import { useAuth } from "@/hooks/use-auth";
 
@@ -53,6 +54,7 @@ function AuthGuard({ children }: { children: React.ReactNode }) {
 function Router() {
   return (
     <Switch>
+      <Route path="/test" component={WidgetTest} />
       <Route path="/login" component={Login} />
 
       <Route path="/admin">
