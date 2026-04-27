@@ -113,8 +113,8 @@ router.post("/training/upload", upload.single("file"), async (req, res) => {
 
   rawText = rawText.replace(/\r\n/g, "\n").replace(/[ \t]+/g, " ").trim();
 
-  if (!rawText || rawText.length < 10) {
-    res.status(422).json({ error: "File appears to be empty or unreadable." });
+  if (!rawText || rawText.length < 3) {
+    res.status(422).json({ error: "File contains no extractable text. If this is a scanned PDF, please upload a text-based PDF instead." });
     return;
   }
 
