@@ -79,7 +79,7 @@ const publicDir = path.resolve(process.cwd(), "artifacts/sales-sutra/dist/public
 app.use(express.static(publicDir));
 
 // SPA fallback — serve index.html for any non-API route that doesn't match a static file
-app.get("*", (_req, res) => {
+app.use((_req, res) => {
   res.sendFile(path.join(publicDir, "index.html"));
 });
 // ─────────────────────────────────────────────────────────────────────────
