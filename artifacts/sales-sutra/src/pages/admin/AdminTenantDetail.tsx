@@ -21,9 +21,9 @@ function authHeaders(): Record<string, string> {
   return h;
 }
 
-async function apiFetch(path: string, options: Omit<RequestInit, "headers"> = {}) {
+async function apiFetch(path: string, options: Omit<RequestInit, "headers"> = {}): Promise<any> {
   const res = await fetch(path, { ...options, headers: authHeaders() });
-  const data = await res.json() as { error?: string };
+  const data = await res.json() as any;
   if (!res.ok) throw new Error(data.error || "Request failed");
   return data;
 }

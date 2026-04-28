@@ -9,7 +9,6 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from 
 import { format } from "date-fns";
 import { Search, Plus, Upload, UserPlus, Phone, Loader2 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
-import { apiClient } from "@/lib/api-client";
 import { useQueryClient } from "@tanstack/react-query";
 
 export default function Contacts() {
