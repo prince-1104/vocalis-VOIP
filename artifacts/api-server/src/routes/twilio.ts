@@ -111,7 +111,7 @@ function resolveSplitModelLLM(lang: string): "deepseek-chat" | "sarvam-m" {
 
 async function callSarvamSTT(audioBuffer: Buffer, mimeType: string, lang: string): Promise<string> {
   const formData = new FormData();
-  const blob = new Blob([audioBuffer], { type: mimeType });
+  const blob = new Blob([new Uint8Array(audioBuffer)], { type: mimeType });
   formData.append("file", blob, "audio.wav");
   formData.append("model", "saaras:v3");
   formData.append("language_code", lang);
@@ -401,11 +401,11 @@ router.post("/twilio/inbound", async (req, res) => {
     method: "POST",
     speechTimeout: "auto",
     timeout: 10,
-    language: agentConfig?.language || "en-US",
+    language: (agentConfig?.language || "en-US") as any,
     actionOnEmptyResult: true,
   });
 
-  gather.say({ voice: mapVoice(agentConfig?.voice), language: agentConfig?.language || "en-US" }, greeting);
+  gather.say({ voice: mapVoice(agentConfig?.voice) as any, language: (agentConfig?.language || "en-US") as any }, greeting);
 
   twiml.redirect({ method: "POST" }, `${baseUrl}/api/twilio/voice?callLogId=${callLog.id}&history=&silent=1`);
 
@@ -478,14 +478,14 @@ router.post("/twilio/voice", async (req, res) => {
     method: "POST",
     speechTimeout: "auto",
     timeout: 10,
-    language: lang,
+    language: lang as any,
     actionOnEmptyResult: true,
   });
 
   if (ttsAudioId) {
     gather.play(`${baseUrl}/api/twilio/tts-audio/${ttsAudioId}`);
   } else {
-    gather.say({ voice, language: lang }, aiResponse);
+    gather.say({ voice: voice as any, language: lang as any }, aiResponse);
   }
 
   twiml.redirect({ method: "POST" }, `${baseUrl}/api/twilio/voice?callLogId=${callLogId}&history=${encodedHistory}&silent=1`);
@@ -549,14 +549,14 @@ router.post("/twilio/voice-indic", async (req, res) => {
     method: "POST",
     speechTimeout: "auto",
     timeout: 10,
-    language: lang,
+    language: lang as any,
     actionOnEmptyResult: true,
   });
 
   if (ttsAudioId) {
     gather.play(`${baseUrl}/api/twilio/tts-audio/${ttsAudioId}`);
   } else {
-    gather.say({ voice, language: lang }, aiResponse);
+    gather.say({ voice: voice as any, language: lang as any }, aiResponse);
   }
 
   twiml.redirect({ method: "POST" }, `${baseUrl}/api/twilio/voice?callLogId=${callLogId}&history=${encodedHistory}&silent=1`);
@@ -595,11 +595,11 @@ router.post("/twilio/outbound-voice", async (req, res) => {
     method: "POST",
     speechTimeout: "auto",
     timeout: 10,
-    language: lang,
+    language: lang as any,
     actionOnEmptyResult: true,
   });
 
-  gather.say({ voice, language: lang }, openingLine);
+  gather.say({ voice: voice as any, language: lang as any }, openingLine);
 
   twiml.redirect({ method: "POST" }, `${baseUrl}/api/twilio/voice?callLogId=${callLogId}&history=&silent=1`);
 

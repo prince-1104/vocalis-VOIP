@@ -159,7 +159,7 @@ router.post("/admin/invoices/generate", requireSuperadmin, async (req, res) => {
 
 router.get("/admin/invoices/:id", requireSuperadmin, async (req, res) => {
   try {
-    const id = parseInt(req.params.id);
+    const id = parseInt(String(req.params.id));
     const invoice = await db.query.invoicesTable.findFirst({
       where: eq(invoicesTable.id, id),
     });
@@ -180,7 +180,7 @@ router.get("/admin/invoices/:id", requireSuperadmin, async (req, res) => {
 
 router.patch("/admin/invoices/:id", requireSuperadmin, async (req, res) => {
   try {
-    const id = parseInt(req.params.id);
+    const id = parseInt(String(req.params.id));
     const { status, notes } = req.body as { status?: string; notes?: string };
 
     const invoice = await db.query.invoicesTable.findFirst({ where: eq(invoicesTable.id, id) });
@@ -240,7 +240,7 @@ router.get("/invoices", requireRole("admin", "manager"), async (req, res) => {
 
 router.get("/invoices/:id", requireRole("admin", "manager"), async (req, res) => {
   try {
-    const id = parseInt(req.params.id);
+    const id = parseInt(String(req.params.id));
     const tenantId = req.tenantId!;
 
     const invoice = await db.query.invoicesTable.findFirst({
