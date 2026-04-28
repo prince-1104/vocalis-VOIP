@@ -68,6 +68,26 @@ app.use("/api", requireSuperadmin, adminRouter);
 
 app.use("/api", invoicesRouter);
 
+// ── Serve the frontend SPA ─────────────────────────────────────────────
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// The built frontend lives at <project>/artifacts/sales-sutra/dist/public
+// In production, CWD is the project root (set in ecosystem.config.cjs)
+const publicDir = path.resolve(process.cwd(), "artifacts/sales-sutra/dist/public");
+
+// Serve static assets (JS, CSS, images, etc.)
+app.use(express.static(publicDir));
+
+// SPA fallback — serve index.html for any non-API route that doesn't match a static file
+app.get("*", (_req, res) => {
+  res.sendFile(path.join(publicDir, "index.html"));
+});
+// ─────────────────────────────────────────────────────────────────────────
+
 const OVERDUE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 async function runOverdueCheck() {
