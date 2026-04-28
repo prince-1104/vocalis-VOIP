@@ -70,10 +70,6 @@ app.use("/api", invoicesRouter);
 
 // ── Serve the frontend SPA ─────────────────────────────────────────────
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 // The built frontend lives at <project>/artifacts/sales-sutra/dist/public
 // In production, CWD is the project root (set in ecosystem.config.cjs)
