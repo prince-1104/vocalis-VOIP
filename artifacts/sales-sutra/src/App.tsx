@@ -23,6 +23,7 @@ import AdminInvoices from "@/pages/admin/AdminInvoices";
 import Billing from "@/pages/Billing";
 import NotFound from "@/pages/not-found";
 import WidgetTest from "@/pages/WidgetTest";
+import WidgetDemo from "@/pages/WidgetDemo";
 import Forbidden from "@/pages/admin/Forbidden";
 import { useAuth } from "@/hooks/use-auth";
 
@@ -56,6 +57,10 @@ function Router() {
     <Switch>
       <Route path="/test" component={WidgetTest} />
       <Route path="/test/" component={WidgetTest} />
+      <Route path="/widget-test" component={WidgetTest} />
+      <Route path="/widget-test/" component={WidgetTest} />
+      <Route path="/widget-demo" component={WidgetDemo} />
+      <Route path="/widget-demo/" component={WidgetDemo} />
       <Route path="/login" component={Login} />
 
       <Route path="/admin">

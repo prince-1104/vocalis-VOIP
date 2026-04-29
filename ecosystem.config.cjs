@@ -1,3 +1,14 @@
+const fs = require('fs');
+const dotenv = require('dotenv');
+
+// Load .env file dynamically so we don't hardcode secrets
+let envConfig = {};
+try {
+  envConfig = dotenv.parse(fs.readFileSync('.env'));
+} catch (e) {
+  console.warn("Could not load .env file, relying on system environment variables.");
+}
+
 module.exports = {
   apps: [
     {
@@ -11,16 +22,13 @@ module.exports = {
       max_restarts: 10,
       restart_delay: 3000,
       env: {
-        PORT: "3002",
+        PORT: envConfig.PORT || "3002",
         NODE_ENV: "production",
-        // Database
-        DATABASE_URL: "postgresql://user:pass@localhost:5432/dbname",
-        DATABASE_SSL: "true",
-        // Auth — generate with: openssl rand -hex 64
-        JWT_SECRET: "REPLACE_WITH_64_CHAR_HEX_SECRET",
-        // AI — optional, enables chat widget & AI features
-        // Use either Replit integration vars OR a plain OpenAI key:
-        OPENAI_API_KEY: "sk-...",
+        // Map DATABASE_URI to DATABASE_URL since the code expects DATABASE_URL
+        DATABASE_URL: envConfig.DATABASE_URI || envConfig.DATABASE_URL,
+        DATABASE_SSL: envConfig.DATABASE_SSL || "true",
+        JWT_SECRET: envConfig.JWT_SECRET,
+        OPENAI_API_KEY: envConfig.OPENAI_API_KEY,
       },
     },
   ],
