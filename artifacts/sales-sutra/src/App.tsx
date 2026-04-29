@@ -24,6 +24,8 @@ import Billing from "@/pages/Billing";
 import NotFound from "@/pages/not-found";
 import WidgetTest from "@/pages/WidgetTest";
 import WidgetDemo from "@/pages/WidgetDemo";
+import BbmpDemo from "@/pages/BbmpDemo";
+import NmcDemo from "@/pages/NmcDemo";
 import Forbidden from "@/pages/admin/Forbidden";
 import { useAuth } from "@/hooks/use-auth";
 
@@ -61,6 +63,10 @@ function Router() {
       <Route path="/widget-test/" component={WidgetTest} />
       <Route path="/widget-demo" component={WidgetDemo} />
       <Route path="/widget-demo/" component={WidgetDemo} />
+      <Route path="/bbmp" component={BbmpDemo} />
+      <Route path="/bbmp/" component={BbmpDemo} />
+      <Route path="/nmc" component={NmcDemo} />
+      <Route path="/nmc/" component={NmcDemo} />
       <Route path="/login" component={Login} />
 
       <Route path="/admin">
