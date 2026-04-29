@@ -1,12 +1,11 @@
 import { useEffect } from "react";
-import { ArrowRight, Bot, Cpu, Globe, MessageSquare, Zap } from "lucide-react";
+import { ArrowRight, CheckCircle, TrendingUp, Users, Target, Zap, BarChart, Rocket } from "lucide-react";
 
 export default function NmcDemo() {
   useEffect(() => {
     // Inject the widget script
     const s = document.createElement("script");
     // Uses window.location.origin so it automatically works in production (dialog.noeticminds.com)
-    // Note: You may need to change this key to your production tenant key if the local key doesn't exist on production DB
     s.src = window.location.origin + "/api/widget/loader.js?key=fc64b771-c5b8-4e64-8768-43590504da08";
     s.id = "nmc-demo-widget-script";
     s.defer = true;
@@ -23,96 +22,148 @@ export default function NmcDemo() {
     };
   }, []);
 
+  const services = [
+    {
+      icon: <TrendingUp className="h-8 w-8" />,
+      title: "Digital Marketing",
+      description: "Drive growth with data-driven digital marketing strategies that deliver measurable results.",
+    },
+    {
+      icon: <Users className="h-8 w-8" />,
+      title: "Sales-as-a-Service",
+      description: "Scale your sales operations with our expert team and proven methodologies.",
+    },
+    {
+      icon: <Target className="h-8 w-8" />,
+      title: "Lead Generation",
+      description: "Generate high-quality leads that convert into long-term customers.",
+    },
+    {
+      icon: <Zap className="h-8 w-8" />,
+      title: "AI Assistance",
+      description: "Leverage AI-powered insights to transform lead generation, automate engagement, and scale growth.",
+    },
+    {
+      icon: <BarChart className="h-8 w-8" />,
+      title: "Lead Qualification",
+      description: "HITL + AI-powered lead qualification that ensures every prospect is scored, matched, and primed for conversion.",
+    },
+    {
+      icon: <Rocket className="h-8 w-8" />,
+      title: "Social Media Marketing",
+      description: "Build brand awareness and engage your audience across social platforms.",
+    }
+  ];
+
   return (
-    <div className="min-h-screen bg-slate-50 font-sans text-slate-900 overflow-x-hidden">
-      {/* Navigation */}
-      <nav className="bg-white border-b border-slate-200 sticky top-0 z-40 shadow-sm">
+    <div className="min-h-screen bg-gray-50 font-sans text-gray-900 overflow-x-hidden">
+      {/* Header/Navbar */}
+      <header className="bg-white/80 backdrop-blur-md sticky top-0 z-40 border-b border-gray-100 shadow-sm">
         <div className="max-w-7xl mx-auto px-6 py-4 flex justify-between items-center">
           <div className="flex items-center gap-2">
-            <div className="w-10 h-10 bg-indigo-600 text-white rounded-lg flex items-center justify-center font-bold text-xl shadow-md">
+            {/* NMC Logo placeholder mimicking the original */}
+            <div className="w-10 h-10 rounded-full bg-gradient-to-r from-blue-600 to-indigo-600 flex items-center justify-center text-white font-bold text-lg shadow-lg">
               NMC
             </div>
-            <span className="text-xl font-bold tracking-tight text-slate-800">NoeticMinds Consulting</span>
+            <span className="text-xl font-bold tracking-tight text-gray-900 hidden sm:block">
+              Technology & Business Delivered!
+            </span>
           </div>
-          <div className="hidden md:flex gap-8 font-medium text-slate-600">
-            <a href="#" className="hover:text-indigo-600 transition-colors">Services</a>
-            <a href="#" className="hover:text-indigo-600 transition-colors">Solutions</a>
-            <a href="#" className="hover:text-indigo-600 transition-colors">About Us</a>
-            <a href="#" className="hover:text-indigo-600 transition-colors">Contact</a>
+          <div className="hidden lg:flex gap-8 font-semibold text-gray-600">
+            <a href="#" className="hover:text-blue-600 transition-colors">Home</a>
+            <a href="#" className="hover:text-blue-600 transition-colors">Services</a>
+            <a href="#" className="hover:text-blue-600 transition-colors">Products</a>
+            <a href="#" className="hover:text-blue-600 transition-colors">About Us</a>
+            <a href="#" className="hover:text-blue-600 transition-colors">Blog</a>
           </div>
-          <button className="bg-indigo-600 hover:bg-indigo-700 text-white px-5 py-2.5 rounded-full font-medium transition-all shadow-sm">
-            Get Started
+          <button className="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white px-6 py-2.5 rounded-full font-bold transition-all shadow-md hover:shadow-lg transform hover:-translate-y-0.5">
+            Start Trial
           </button>
         </div>
-      </nav>
+      </header>
 
       {/* Hero Section */}
-      <div className="relative overflow-hidden bg-slate-900 text-white">
-        {/* Background gradient/pattern */}
-        <div className="absolute inset-0 bg-[linear-gradient(to_right,#4f46e5,#0f172a)] opacity-90"></div>
-        <div className="absolute top-0 right-0 -mr-48 -mt-48 w-96 h-96 rounded-full bg-indigo-500 blur-3xl opacity-20"></div>
-        <div className="absolute bottom-0 left-0 -ml-48 -mb-48 w-96 h-96 rounded-full bg-blue-500 blur-3xl opacity-20"></div>
+      <section className="relative min-h-[90vh] flex items-center justify-center overflow-hidden">
+        {/* Deep Gradient Background mimicking the original */}
+        <div className="absolute inset-0 bg-gradient-to-br from-indigo-900 via-purple-900 to-pink-900"></div>
+        {/* Subtle mesh/overlay pattern could go here */}
+        <div className="absolute inset-0 opacity-20 bg-[url('https://www.transparenttextures.com/patterns/cubes.png')] mix-blend-overlay"></div>
         
-        <div className="relative max-w-7xl mx-auto px-6 py-24 md:py-32 flex flex-col items-center text-center">
-          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-indigo-500/20 border border-indigo-400/30 text-indigo-200 mb-8 text-sm font-medium">
-            <Zap className="w-4 h-4 text-yellow-400" />
-            <span>Next-Generation AI Solutions</span>
-          </div>
-          
-          <h1 className="text-4xl md:text-6xl font-extrabold tracking-tight mb-6 leading-tight max-w-4xl">
-            Empower Your Business with <span className="text-transparent bg-clip-text bg-gradient-to-r from-indigo-400 to-cyan-400">Intelligent Automation</span>
+        <div className="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-20 text-center z-10">
+          <h1 className="text-5xl md:text-7xl lg:text-8xl font-extrabold mb-8 text-white tracking-tight drop-shadow-lg leading-tight">
+            Transform Your Business with
+            <span className="block text-yellow-400 mt-2 drop-shadow-md">Digital Excellence</span>
           </h1>
-          
-          <p className="text-lg md:text-xl text-slate-300 mb-10 max-w-2xl leading-relaxed">
-            NMC helps enterprises scale faster by integrating cutting-edge conversational AI, predictive analytics, and workflow automation seamlessly into your operations.
+          <p className="text-xl md:text-2xl text-gray-100 mb-12 max-w-4xl mx-auto font-medium leading-relaxed drop-shadow">
+            Stop wasting money on marketing that doesn't convert. Our AI-powered strategies deliver 
+            <strong className="text-yellow-400 text-2xl font-bold"> 3X ROI </strong> 
+            and turn your website into a lead-generating powerhouse that works while you sleep.
           </p>
           
-          <div className="flex flex-col sm:flex-row gap-4">
-            <button className="px-8 py-4 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg font-bold transition-all shadow-[0_0_20px_rgba(79,70,229,0.4)] flex items-center justify-center gap-2">
-              Explore Services <ArrowRight className="w-5 h-5" />
+          <div className="flex flex-col sm:flex-row gap-6 justify-center items-center mb-16">
+            <button className="px-10 py-5 bg-gradient-to-r from-blue-500 to-indigo-500 text-white rounded-full font-bold text-lg shadow-[0_10px_25px_-5px_rgba(79,70,229,0.5)] hover:scale-105 transition-transform duration-300 flex items-center">
+              Start Trial
+              <ArrowRight className="ml-3 h-6 w-6" />
             </button>
-            <button className="px-8 py-4 bg-white/10 hover:bg-white/20 border border-white/20 text-white rounded-lg font-bold transition-all flex items-center justify-center gap-2">
-              Schedule Demo
+            <button className="px-10 py-5 bg-white/10 backdrop-blur-sm border-2 border-white/80 text-white hover:bg-white hover:text-indigo-900 rounded-full font-bold text-lg shadow-xl hover:scale-105 transition-all duration-300">
+              Schedule Consultation
             </button>
           </div>
-        </div>
-      </div>
 
-      {/* Features Section */}
-      <div className="py-20 bg-white">
-        <div className="max-w-7xl mx-auto px-6">
-          <div className="text-center mb-16">
-            <h2 className="text-3xl font-bold text-slate-900 mb-4">Why Choose NoeticMinds?</h2>
-            <p className="text-slate-500 max-w-2xl mx-auto">We bridge the gap between complex AI technology and practical business value.</p>
-          </div>
-          
-          <div className="grid md:grid-cols-3 gap-8">
-            <div className="p-8 rounded-2xl bg-slate-50 border border-slate-100 hover:shadow-lg transition-all hover:-translate-y-1">
-              <div className="w-14 h-14 bg-indigo-100 rounded-xl flex items-center justify-center mb-6 text-indigo-600">
-                <Bot className="w-7 h-7" />
-              </div>
-              <h3 className="text-xl font-bold mb-3 text-slate-900">Conversational AI</h3>
-              <p className="text-slate-600 leading-relaxed">Deploy smart agents that understand context, resolve issues instantly, and provide 24/7 support to your customers.</p>
+          {/* Trust Indicators */}
+          <div className="flex flex-wrap justify-center gap-8 md:gap-12 text-gray-100 font-semibold text-lg md:text-xl">
+            <div className="flex items-center space-x-3 bg-white/5 backdrop-blur-sm px-4 py-2 rounded-xl border border-white/10">
+              <CheckCircle className="h-7 w-7 text-green-400" />
+              <span>100+ Successful Projects</span>
             </div>
-            
-            <div className="p-8 rounded-2xl bg-slate-50 border border-slate-100 hover:shadow-lg transition-all hover:-translate-y-1">
-              <div className="w-14 h-14 bg-cyan-100 rounded-xl flex items-center justify-center mb-6 text-cyan-600">
-                <Cpu className="w-7 h-7" />
-              </div>
-              <h3 className="text-xl font-bold mb-3 text-slate-900">Machine Learning</h3>
-              <p className="text-slate-600 leading-relaxed">Leverage your proprietary data to build predictive models that forecast trends and optimize your resources.</p>
+            <div className="flex items-center space-x-3 bg-white/5 backdrop-blur-sm px-4 py-2 rounded-xl border border-white/10">
+              <CheckCircle className="h-7 w-7 text-green-400" />
+              <span>50+ Happy Clients</span>
             </div>
-            
-            <div className="p-8 rounded-2xl bg-slate-50 border border-slate-100 hover:shadow-lg transition-all hover:-translate-y-1">
-              <div className="w-14 h-14 bg-blue-100 rounded-xl flex items-center justify-center mb-6 text-blue-600">
-                <Globe className="w-7 h-7" />
-              </div>
-              <h3 className="text-xl font-bold mb-3 text-slate-900">Global Integration</h3>
-              <p className="text-slate-600 leading-relaxed">Seamlessly connect our intelligent solutions with your existing CRM, ERP, and communication platforms worldwide.</p>
+            <div className="flex items-center space-x-3 bg-white/5 backdrop-blur-sm px-4 py-2 rounded-xl border border-white/10">
+              <CheckCircle className="h-7 w-7 text-green-400" />
+              <span>10+ Years Experience</span>
             </div>
           </div>
         </div>
-      </div>
+      </section>
+
+      {/* Services Section */}
+      <section className="py-24 bg-gray-50">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+          <div className="text-center mb-20">
+            <h2 className="text-4xl md:text-5xl font-extrabold mb-6 text-gray-900 tracking-tight">
+              What We Do <span className="text-transparent bg-clip-text bg-gradient-to-r from-blue-600 to-indigo-600">Best</span>
+            </h2>
+            <p className="text-xl text-gray-600 max-w-2xl mx-auto font-medium">
+              Revenue-driving solutions that turn clicks into customers and visitors into loyal advocates.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
+            {services.map((service, index) => (
+              <div 
+                key={index}
+                className="bg-white p-10 rounded-3xl shadow-sm border border-gray-100 hover:shadow-2xl transition-all duration-300 hover:-translate-y-2 group cursor-pointer"
+              >
+                <div className="w-16 h-16 bg-blue-50 rounded-2xl flex items-center justify-center text-blue-600 mb-6 group-hover:scale-110 group-hover:bg-blue-600 group-hover:text-white transition-all duration-300 shadow-sm">
+                  {service.icon}
+                </div>
+                <h3 className="text-2xl font-bold mb-4 text-gray-900 group-hover:text-blue-600 transition-colors">
+                  {service.title}
+                </h3>
+                <p className="text-gray-600 mb-6 text-lg leading-relaxed">
+                  {service.description}
+                </p>
+                <div className="flex items-center text-blue-600 font-bold text-lg">
+                  Learn More
+                  <ArrowRight className="ml-2 h-5 w-5 group-hover:translate-x-2 transition-transform" />
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
       
     </div>
   );
