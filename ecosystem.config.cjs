@@ -24,7 +24,7 @@ module.exports = {
   apps: [
     {
       name: "dialog-api",
-      script: "artifacts/api-server/dist/index.js",
+      script: "artifacts/api-server/dist/index.cjs",
       cwd: "/var/www/noeticminds__usr/data/www/dialog.noeticminds.com/Dialog",
       node_args: "--enable-source-maps",
       instances: 1,
