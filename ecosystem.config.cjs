@@ -1,10 +1,21 @@
 const fs = require('fs');
-const dotenv = require('dotenv');
+const path = require('path');
 
 // Load .env file dynamically so we don't hardcode secrets
+// Uses plain string parsing to avoid requiring the 'dotenv' npm module
 let envConfig = {};
 try {
-  envConfig = dotenv.parse(fs.readFileSync('.env'));
+  const envPath = path.resolve(__dirname, '.env');
+  const envFile = fs.readFileSync(envPath, 'utf8');
+  envFile.split('\n').forEach((line) => {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) return;
+    const eqIndex = trimmed.indexOf('=');
+    if (eqIndex === -1) return;
+    const key = trimmed.slice(0, eqIndex).trim();
+    const value = trimmed.slice(eqIndex + 1).trim();
+    envConfig[key] = value;
+  });
 } catch (e) {
   console.warn("Could not load .env file, relying on system environment variables.");
 }
