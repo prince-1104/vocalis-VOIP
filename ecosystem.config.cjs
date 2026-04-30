@@ -33,13 +33,10 @@ module.exports = {
       max_restarts: 10,
       restart_delay: 3000,
       env: {
-        PORT: envConfig.PORT || "3002",
+        ...envConfig,
         NODE_ENV: "production",
         // Map DATABASE_URI to DATABASE_URL since the code expects DATABASE_URL
         DATABASE_URL: envConfig.DATABASE_URI || envConfig.DATABASE_URL,
-        DATABASE_SSL: envConfig.DATABASE_SSL || "true",
-        JWT_SECRET: envConfig.JWT_SECRET,
-        OPENAI_API_KEY: envConfig.OPENAI_API_KEY,
       },
     },
   ],
