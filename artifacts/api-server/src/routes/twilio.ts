@@ -58,6 +58,9 @@ function getBaseUrl(req: any): string {
 const KB_ENTRY_MAX_CHARS = 300;
 const KB_MAX_ENTRIES = 6;
 
+const SUPPORTED_LANGUAGES_LINE =
+  "You support these languages and MUST be able to converse in any of them: English (en-US), Hindi (hi-IN), Kannada (kn-IN), Tamil (ta-IN), Telugu (te-IN), and Marathi (mr-IN). NEVER tell the caller you only speak English or Hindi. If the caller asks for Kannada / Tamil / Telugu / Marathi, switch to that language immediately and continue the entire conversation in it.";
+
 function buildRomanizedScriptInstruction(language?: string | null): string {
   if (language === "hi-IN") {
     return "CRITICAL SCRIPT RULE: Reply in Hindi using only English letters (romanized Hindi / Hinglish). Never use Devanagari or Urdu script.";
@@ -65,8 +68,17 @@ function buildRomanizedScriptInstruction(language?: string | null): string {
   if (language === "kn-IN") {
     return "CRITICAL SCRIPT RULE: Reply in Kannada using only English letters (romanized Kannada). Never use Kannada script.";
   }
+  if (language === "ta-IN") {
+    return "CRITICAL SCRIPT RULE: Reply in Tamil using only English letters (romanized Tamil). Never use Tamil script.";
+  }
+  if (language === "te-IN") {
+    return "CRITICAL SCRIPT RULE: Reply in Telugu using only English letters (romanized Telugu). Never use Telugu script.";
+  }
+  if (language === "mr-IN") {
+    return "CRITICAL SCRIPT RULE: Reply in Marathi using only English letters (romanized Marathi). Never use Devanagari script.";
+  }
   if (language === "auto") {
-    return "CRITICAL SCRIPT RULE: If the user speaks Hindi or Kannada, reply only in romanized text using English letters. Never use Urdu, Devanagari, or Kannada script.";
+    return "CRITICAL SCRIPT RULE: Detect the user's language. If they use Hindi / Kannada / Tamil / Telugu / Marathi, reply in that language but ONLY in English letters (romanized). Never use Devanagari, Kannada, Tamil, Telugu, or Urdu script.";
   }
   return "";
 }
@@ -80,6 +92,8 @@ async function buildSystemPrompt(userId: number, agentConfig: any): Promise<stri
   let system = `You are ${agentConfig.agentName || "SalesBot"}, an AI sales representative`;
   if (agentConfig.personality) system += ` with a ${agentConfig.personality} personality`;
   system += `. You are on a live phone call. Keep ALL responses under 2 sentences — be direct and conversational. Never mention you are an AI unless directly asked.\n\n`;
+
+  system += `${SUPPORTED_LANGUAGES_LINE}\n\n`;
 
   if (agentConfig.language === "auto") {
     system += `CRITICAL INSTRUCTION: Automatically detect the language the user is speaking. You MUST reply in the exact same language they used. Do NOT default to English if they speak another language.\n\n`;
