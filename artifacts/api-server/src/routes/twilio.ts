@@ -61,24 +61,26 @@ const KB_MAX_ENTRIES = 6;
 const SUPPORTED_LANGUAGES_LINE =
   "You support these languages and MUST be able to converse in any of them: English (en-US), Hindi (hi-IN), Kannada (kn-IN), Tamil (ta-IN), Telugu (te-IN), and Marathi (mr-IN). NEVER tell the caller you only speak English or Hindi. If the caller asks for Kannada / Tamil / Telugu / Marathi, switch to that language immediately and continue the entire conversation in it.";
 
-function buildRomanizedScriptInstruction(language?: string | null): string {
+// IMPORTANT: Indian replies MUST be in NATIVE SCRIPT for correct Bulbul v3 TTS pronunciation.
+// Romanized Kannada / Hindi etc. is read as English by the TTS engine and sounds wrong.
+function buildScriptInstruction(language?: string | null): string {
   if (language === "hi-IN") {
-    return "CRITICAL SCRIPT RULE: Reply in Hindi using only English letters (romanized Hindi / Hinglish). Never use Devanagari or Urdu script.";
+    return "CRITICAL SCRIPT RULE: Reply in Hindi using NATIVE Devanagari script (देवनागरी). Do NOT use romanized/Hinglish letters. Example: 'नमस्ते! मैं आपकी कैसे मदद कर सकता हूं?'";
   }
   if (language === "kn-IN") {
-    return "CRITICAL SCRIPT RULE: Reply in Kannada using only English letters (romanized Kannada). Never use Kannada script.";
+    return "CRITICAL SCRIPT RULE: Reply in Kannada using NATIVE Kannada script (ಕನ್ನಡ ಲಿಪಿ). Do NOT romanize. Example: 'ನಮಸ್ಕಾರ! ನಾನು ನಿಮಗೆ ಹೇಗೆ ಸಹಾಯ ಮಾಡಬಹುದು?'";
   }
   if (language === "ta-IN") {
-    return "CRITICAL SCRIPT RULE: Reply in Tamil using only English letters (romanized Tamil). Never use Tamil script.";
+    return "CRITICAL SCRIPT RULE: Reply in Tamil using NATIVE Tamil script (தமிழ்). Do NOT romanize.";
   }
   if (language === "te-IN") {
-    return "CRITICAL SCRIPT RULE: Reply in Telugu using only English letters (romanized Telugu). Never use Telugu script.";
+    return "CRITICAL SCRIPT RULE: Reply in Telugu using NATIVE Telugu script (తెలుగు). Do NOT romanize.";
   }
   if (language === "mr-IN") {
-    return "CRITICAL SCRIPT RULE: Reply in Marathi using only English letters (romanized Marathi). Never use Devanagari script.";
+    return "CRITICAL SCRIPT RULE: Reply in Marathi using NATIVE Devanagari script (मराठी). Do NOT romanize.";
   }
   if (language === "auto") {
-    return "CRITICAL SCRIPT RULE: Detect the user's language. If they use Hindi / Kannada / Tamil / Telugu / Marathi, reply in that language but ONLY in English letters (romanized). Never use Devanagari, Kannada, Tamil, Telugu, or Urdu script.";
+    return "CRITICAL SCRIPT RULE: Detect the caller's language. Reply in their NATIVE script — Hindi → Devanagari, Kannada → ಕನ್ನಡ, Tamil → தமிழ், Telugu → తెలుగు, Marathi → मराठी. Never romanize Indian languages.";
   }
   return "";
 }
@@ -99,7 +101,7 @@ async function buildSystemPrompt(userId: number, agentConfig: any): Promise<stri
     system += `CRITICAL INSTRUCTION: Automatically detect the language the user is speaking. You MUST reply in the exact same language they used. Do NOT default to English if they speak another language.\n\n`;
   }
 
-  const scriptRule = buildRomanizedScriptInstruction(agentConfig.language);
+  const scriptRule = buildScriptInstruction(agentConfig.language);
   if (scriptRule) {
     system += `${scriptRule}\n\n`;
   }
@@ -171,6 +173,27 @@ function getTwilioLang(lang?: string | null): string {
 function resolveSplitModelLLM(lang: string): "deepseek-chat" | "sarvam-m" {
   if (lang === "hi-IN") return "deepseek-chat";
   return "sarvam-m";
+}
+
+// Detect caller's language from their last utterance (used in auto mode).
+// Twilio <Gather> returns transcripts in the requested language code, so we
+// also accept native script in case the caller speaks Kannada/Hindi etc.
+function detectCallLanguage(text: string): "en-US" | "hi-IN" | "kn-IN" | "ta-IN" | "te-IN" | "mr-IN" {
+  if (!text) return "en-US";
+  if (/[\u0C80-\u0CFF]/.test(text)) return "kn-IN";
+  if (/[\u0B80-\u0BFF]/.test(text)) return "ta-IN";
+  if (/[\u0C00-\u0C7F]/.test(text)) return "te-IN";
+  if (/[\u0900-\u097F]/.test(text)) {
+    if (/(आहे|नाही|पाहिजे|तुम्ही|मला)/.test(text)) return "mr-IN";
+    return "hi-IN";
+  }
+  const lower = text.toLowerCase();
+  if (/\b(namaskara|hege|maadi|maadu|nanage|nanu|beku|swalpa|thumba|kannada|kanada)\b/.test(lower)) return "kn-IN";
+  if (/\b(kya|kaise|nahi|chahiye|mujhe|aap|hai|hain|hindi|bataao|samjhao)\b/.test(lower)) return "hi-IN";
+  if (/\b(enna|naan|naangal|konjam|venum|irukku|tamil|tamizh)\b/.test(lower)) return "ta-IN";
+  if (/\b(nenu|meeru|enti|kavali|chestunna|telugu)\b/.test(lower)) return "te-IN";
+  if (/\b(mala|tula|tumhi|kasa|ahe|pahije|marathi)\b/.test(lower)) return "mr-IN";
+  return "en-US";
 }
 
 async function callSarvamSTT(audioBuffer: Buffer, mimeType: string, lang: string): Promise<string> {
@@ -268,9 +291,11 @@ async function callSarvamLLM(
   return data.choices?.[0]?.message?.content ?? "ಮತ್ತೊಮ್ಮೆ ಹೇಳುತ್ತೀರಾ?";
 }
 
+// Sarvam Bulbul v3 voices, language-tuned for natural prosody.
+// Kannada → "manan" is Sarvam's recommended showcase voice for clarity & accuracy.
 const BULBUL_VOICE_FOR_LANG: Record<string, string> = {
   "hi-IN": "kavya",
-  "kn-IN": "kavya",
+  "kn-IN": "manan",
   "ta-IN": "priya",
   "te-IN": "pooja",
   "mr-IN": "simran",
@@ -279,7 +304,7 @@ const BULBUL_VOICE_FOR_LANG: Record<string, string> = {
 async function callSarvamTTS(text: string, lang: string): Promise<string | null> {
   if (!SARVAM_API_KEY) return null;
 
-  const speaker = BULBUL_VOICE_FOR_LANG[lang] ?? "kavya";
+  const speaker = BULBUL_VOICE_FOR_LANG[lang] ?? "manan";
 
   const res = await fetch("https://api.sarvam.ai/text-to-speech", {
     method: "POST",
@@ -292,6 +317,8 @@ async function callSarvamTTS(text: string, lang: string): Promise<string | null>
       target_language_code: lang,
       speaker,
       model: "bulbul:v3",
+      // Lower temperature → deterministic, cleaner pronunciation. Bulbul v3 ignores pitch/loudness.
+      temperature: 0.4,
       pace: 1.0,
       speech_sample_rate: 8000,
       enable_preprocessing: true,
@@ -541,8 +568,15 @@ router.post("/twilio/voice", async (req, res) => {
   const agentConfig = await db.query.agentConfigsTable.findFirst({ where: eq(agentConfigsTable.userId, userId) });
   const baseUrl = getBaseUrl(req);
   const voice = mapVoice(agentConfig?.voice);
-  const lang = agentConfig?.language || "en-US";
+  const configuredLang = agentConfig?.language || "en-US";
   const aiModel = agentConfig?.aiModel || "gpt-4o-mini";
+
+  // Auto-detect language from caller speech when configured language is "auto".
+  let lang = configuredLang;
+  if (configuredLang === "auto" && speechResult) {
+    lang = detectCallLanguage(speechResult);
+    console.log(`[twilio/voice] auto-detected lang=${lang} from utterance`);
+  }
 
   let aiResponse: string;
   let ttsAudioId: string | null = null;
@@ -552,13 +586,17 @@ router.post("/twilio/voice", async (req, res) => {
   } else if (isIndianLanguage(lang)) {
     const encodedSpeech = encodeURIComponent(speechResult);
     const encodedHistory = encodeURIComponent(JSON.stringify(history.slice(-4)));
+    const encodedLang = encodeURIComponent(lang);
     twiml.say({ language: "en-US", voice: "Polly.Raveena" }, "One moment please.");
-    twiml.redirect({ method: "POST" }, `${baseUrl}/api/twilio/voice-indic?callLogId=${callLogId}&history=${encodedHistory}&speech=${encodedSpeech}`);
+    twiml.redirect({ method: "POST" }, `${baseUrl}/api/twilio/voice-indic?callLogId=${callLogId}&history=${encodedHistory}&speech=${encodedSpeech}&lang=${encodedLang}`);
     res.type("text/xml");
     res.send(twiml.toString());
     return;
   } else {
-    const systemPrompt = await buildSystemPrompt(userId, agentConfig || {});
+    const promptConfig = configuredLang === "auto"
+      ? { ...(agentConfig || {}), language: lang }
+      : (agentConfig || {});
+    const systemPrompt = await buildSystemPrompt(userId, promptConfig);
     try {
       aiResponse = await generateAIResponse(systemPrompt, history, speechResult, resolveOpenAIModel(aiModel));
     } catch (err) {
@@ -582,17 +620,20 @@ router.post("/twilio/voice", async (req, res) => {
     actionOnEmptyResult: true,
   });
 
-  if (!ttsAudioId && lang === "auto") {
+  // For non-Indian languages in auto/explicit English mode, use OpenAI TTS for natural English speech.
+  let ttsUseMp3 = false;
+  if (!ttsAudioId && (lang === "auto" || lang === "en-US" || lang === "en-IN")) {
     try {
       const b64 = await generateOpenAITTS(aiResponse, agentConfig?.voice || "nova");
       ttsAudioId = storeTtsAudio(b64);
+      ttsUseMp3 = true;
     } catch (e) {
       console.error("OpenAI TTS err:", e);
     }
   }
 
   if (ttsAudioId) {
-    gather.play(`${baseUrl}/api/twilio/${lang === "auto" ? "tts-audio-mp3" : "tts-audio"}/${ttsAudioId}`);
+    gather.play(`${baseUrl}/api/twilio/${ttsUseMp3 ? "tts-audio-mp3" : "tts-audio"}/${ttsAudioId}`);
   } else {
     gather.say({ voice: voice as any, language: getTwilioLang(lang) as any }, aiResponse);
   }
@@ -630,7 +671,10 @@ router.post("/twilio/voice-indic", async (req, res) => {
   const agentConfig = await db.query.agentConfigsTable.findFirst({ where: eq(agentConfigsTable.userId, userId) });
   const baseUrl = getBaseUrl(req);
   const voice = mapVoice(agentConfig?.voice);
-  const lang = agentConfig?.language || "en-US";
+  const configuredLang = agentConfig?.language || "en-US";
+  // Auto mode passes the detected language via the ?lang= query param.
+  const queryLang = (req.query.lang as string) || "";
+  const lang = (configuredLang === "auto" && queryLang) ? queryLang : configuredLang;
 
   let aiResponse: string;
   let ttsAudioId: string | null = null;
@@ -638,7 +682,7 @@ router.post("/twilio/voice-indic", async (req, res) => {
   if (!speechResult.trim()) {
     aiResponse = "I didn't quite catch that. Are you still there? Please go ahead and speak.";
   } else {
-    const systemPrompt = await buildSystemPrompt(userId, agentConfig || {});
+    const systemPrompt = await buildSystemPrompt(userId, { ...(agentConfig || {}), language: lang });
     try {
       const indicResult = await generateAIResponseIndic(systemPrompt, history, speechResult, lang, baseUrl);
       aiResponse = indicResult.text;

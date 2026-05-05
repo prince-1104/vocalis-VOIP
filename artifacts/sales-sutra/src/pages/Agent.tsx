@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
-import { Bot, Phone, Settings2, AlertCircle, Copy, CheckCircle2, Webhook, Cpu, Lock, Ear, Brain, Volume2, Zap, ChevronDown, Play, Square } from "lucide-react";
+import { Bot, Phone, Settings2, AlertCircle, Copy, CheckCircle2, Webhook, Cpu, Lock, Ear, Brain, Volume2, Zap, ChevronDown, Play, Square, Languages, Sparkles } from "lucide-react";
 import { useForm } from "react-hook-form";
 import { useAuth } from "@/hooks/use-auth";
 
@@ -29,6 +29,10 @@ const TELEPHONY_PROVIDERS = [
 
 function isIndian(lang: string) {
   return INDIAN_LANGUAGES.includes(lang);
+}
+
+function isAuto(lang: string) {
+  return lang === "auto";
 }
 
 interface AgentFormValues {
@@ -95,6 +99,66 @@ function TelephonyReadOnly({ configured, phoneNumber, provider }: { configured: 
           </p>
         </div>
         {configured && <CheckCircle2 className="w-5 h-5 text-green-400 ml-auto shrink-0" />}
+      </div>
+    </div>
+  );
+}
+
+function AutoModePanel() {
+  return (
+    <div className="rounded-xl border border-fuchsia-500/30 bg-gradient-to-br from-fuchsia-500/10 via-violet-500/5 to-cyan-500/10 p-5 space-y-4">
+      <div className="flex items-center gap-2">
+        <Sparkles className="w-4 h-4 text-fuchsia-300" />
+        <span className="text-sm font-semibold text-fuchsia-200">Auto-Detect Mode Active</span>
+        <span className="ml-auto text-[10px] uppercase tracking-wider text-fuchsia-300/70 font-medium bg-fuchsia-500/10 border border-fuchsia-500/20 rounded-full px-2 py-0.5">
+          Multilingual Pipeline
+        </span>
+      </div>
+      <p className="text-xs text-muted-foreground leading-relaxed">
+        The agent automatically detects each caller's / visitor's language from their first words and routes
+        the conversation through the best provider for that language. Designed for low latency and high
+        accuracy on <strong className="text-foreground">English, Hindi, and Kannada</strong>.
+      </p>
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+        <div className="bg-background/50 border border-blue-500/30 rounded-lg p-3 space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-blue-300 text-xs font-bold uppercase tracking-wider">English</span>
+            <span className="text-[10px] text-blue-300/60">en-US / en-IN</span>
+          </div>
+          <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground"><Brain className="w-3 h-3 text-blue-400" /> GPT-4o Mini</div>
+          <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground"><Volume2 className="w-3 h-3 text-blue-400" /> OpenAI TTS</div>
+          <div className="text-[10px] text-blue-300/80">Lowest latency • ~700ms</div>
+        </div>
+
+        <div className="bg-background/50 border border-orange-500/30 rounded-lg p-3 space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-orange-300 text-xs font-bold uppercase tracking-wider">Hindi</span>
+            <span className="text-[10px] text-orange-300/60">hi-IN</span>
+          </div>
+          <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground"><Brain className="w-3 h-3 text-orange-400" /> DeepSeek V3</div>
+          <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground"><Volume2 className="w-3 h-3 text-orange-400" /> Sarvam Bulbul v3 (Kavya)</div>
+          <div className="text-[10px] text-orange-300/80">Native Devanagari • Hi-fi</div>
+        </div>
+
+        <div className="bg-background/50 border border-emerald-500/30 rounded-lg p-3 space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-emerald-300 text-xs font-bold uppercase tracking-wider">Kannada</span>
+            <span className="text-[10px] text-emerald-300/60">kn-IN</span>
+          </div>
+          <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground"><Brain className="w-3 h-3 text-emerald-400" /> Sarvam-M (Indic-native)</div>
+          <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground"><Volume2 className="w-3 h-3 text-emerald-400" /> Sarvam Bulbul v3 (Manan)</div>
+          <div className="text-[10px] text-emerald-300/80">Native ಕನ್ನಡ • Accurate prosody</div>
+        </div>
+      </div>
+
+      <div className="flex items-start gap-2 text-[11px] text-muted-foreground bg-black/30 border border-white/5 rounded-lg p-3">
+        <Languages className="w-3.5 h-3.5 text-fuchsia-300 mt-0.5 shrink-0" />
+        <div>
+          Detection runs on every turn — if the user switches mid-conversation (e.g. starts in English then
+          switches to Kannada), the pipeline switches automatically. Tamil, Telugu, and Marathi are also
+          supported with Sarvam-M + Bulbul v3.
+        </div>
       </div>
     </div>
   );
@@ -276,15 +340,26 @@ export default function AgentSettings() {
                 <Input {...form.register("agentName")} className="bg-background/50 border-white/10" />
               </div>
               <div className="space-y-2">
-                <label className="text-sm font-medium">Language</label>
+                <label className="text-sm font-medium flex items-center gap-1.5">
+                  Language
+                  {isAuto(watchedLanguage) && (
+                    <span className="text-[10px] text-fuchsia-300 bg-fuchsia-500/10 border border-fuchsia-500/20 rounded-full px-1.5 py-0 font-normal flex items-center gap-1">
+                      <Sparkles className="w-2.5 h-2.5" /> Auto
+                    </span>
+                  )}
+                </label>
                 <select {...form.register("language")} className={selectCls}>
-                  <option value="auto">Auto-Detect (Multilingual)</option>
-                  <option value="en-US">English (US)</option>
-                  <option value="hi-IN">Hindi — हिन्दी</option>
-                  <option value="kn-IN">Kannada — ಕನ್ನಡ</option>
-                  <option value="ta-IN">Tamil — தமிழ்</option>
-                  <option value="te-IN">Telugu — తెలుగు</option>
-                  <option value="mr-IN">Marathi — मराठी</option>
+                  <optgroup label="Smart">
+                    <option value="auto">Auto-Detect (English + Hindi + Kannada + more)</option>
+                  </optgroup>
+                  <optgroup label="Single language">
+                    <option value="en-US">English (US)</option>
+                    <option value="hi-IN">Hindi — हिन्दी</option>
+                    <option value="kn-IN">Kannada — ಕನ್ನಡ</option>
+                    <option value="ta-IN">Tamil — தமிழ்</option>
+                    <option value="te-IN">Telugu — తెలుగు</option>
+                    <option value="mr-IN">Marathi — मराठी</option>
+                  </optgroup>
                 </select>
               </div>
               <div className="space-y-2">
@@ -306,7 +381,10 @@ export default function AgentSettings() {
                   )}
                 </div>
                 {isIndian(watchedLanguage) && (
-                  <p className="text-xs text-indigo-400">Voice overridden by <strong>Sarvam Bulbul V3</strong> for Indian languages (Hindi, Kannada, Tamil, Telugu, Marathi) when <code>SARVAM_API_KEY</code> is configured.</p>
+                  <p className="text-xs text-indigo-400">Voice overridden by <strong>Sarvam Bulbul V3</strong> (native script TTS) for Indian languages — Kannada uses <strong>Manan</strong>, Hindi uses <strong>Kavya</strong>, etc. Requires <code>SARVAM_API_KEY</code>.</p>
+                )}
+                {isAuto(watchedLanguage) && (
+                  <p className="text-xs text-fuchsia-300">Auto mode: voice is selected per-turn based on detected language — OpenAI voices for English, Sarvam Bulbul V3 (native script) for Indian languages.</p>
                 )}
               </div>
               <div className="space-y-2">
@@ -371,6 +449,7 @@ export default function AgentSettings() {
                 <div className="text-muted-foreground text-[9px] mt-0.5 leading-tight">Sarvam AI<br/>Indic-native</div>
               </div>
             </div>
+            {isAuto(watchedLanguage) && <AutoModePanel />}
             {isIndian(watchedLanguage) && <SplitModelPanel language={watchedLanguage} />}
           </CardContent>
         </Card>

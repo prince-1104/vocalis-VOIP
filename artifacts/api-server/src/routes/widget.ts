@@ -7,12 +7,17 @@ import { randomUUID } from "crypto";
 const router: IRouter = Router();
 
 const SARVAM_API_KEY = process.env.SARVAM_API_KEY ?? "";
+const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY ?? "";
 
 const INDIAN_LANGUAGES = new Set(["kn-IN", "hi-IN", "ta-IN", "te-IN", "mr-IN"]);
 
+// Sarvam Bulbul v3 voices, matched per-language for natural prosody.
+// Kannada: "manan" (Sarvam-recommended, conversational, consistent).
+// Hindi:   "kavya" (clear female Hindi voice).
+// Tamil:   "priya". Telugu: "pooja". Marathi: "simran".
 const BULBUL_VOICE_FOR_LANG: Record<string, string> = {
   "hi-IN": "kavya",
-  "kn-IN": "kavya",
+  "kn-IN": "manan",
   "ta-IN": "priya",
   "te-IN": "pooja",
   "mr-IN": "simran",
@@ -25,7 +30,7 @@ function isIndianLanguage(lang?: string | null): boolean {
 async function generateSarvamWidgetTTS(text: string, lang: string): Promise<string | null> {
   if (!SARVAM_API_KEY || !isIndianLanguage(lang)) return null;
 
-  const speaker = BULBUL_VOICE_FOR_LANG[lang] ?? "kavya";
+  const speaker = BULBUL_VOICE_FOR_LANG[lang] ?? "manan";
   const res = await fetch("https://api.sarvam.ai/text-to-speech", {
     method: "POST",
     headers: {
@@ -37,6 +42,8 @@ async function generateSarvamWidgetTTS(text: string, lang: string): Promise<stri
       target_language_code: lang,
       speaker,
       model: "bulbul:v3",
+      // Lower temperature → more deterministic, cleaner pronunciation.
+      temperature: 0.4,
       pace: 1.0,
       enable_preprocessing: true,
       output_audio_codec: "wav",
@@ -85,39 +92,59 @@ async function synthesizeWidgetTTS(
   }
 }
 
-const KB_ENTRY_MAX_CHARS = 300;
-const KB_MAX_ENTRIES = 6;
+const KB_ENTRY_MAX_CHARS = 280;
+const KB_MAX_ENTRIES = 4;
 
 const SUPPORTED_LANGUAGES_LINE =
   "You support these languages and MUST be able to converse in any of them: English (en-US), Hindi (hi-IN), Kannada (kn-IN), Tamil (ta-IN), Telugu (te-IN), and Marathi (mr-IN). NEVER tell the user you only speak English or Hindi. If the user asks for Kannada / Tamil / Telugu / Marathi, switch to that language immediately and continue the entire conversation in it.";
 
-function buildRomanizedScriptInstruction(language?: string | null): string {
+// IMPORTANT: Indian-language replies MUST be in NATIVE SCRIPT (not romanized).
+// Sarvam Bulbul v3 TTS pronounces native scripts perfectly, but treats romanized
+// text as English which causes the wrong-pronunciation bug we used to ship with.
+function buildScriptInstruction(language?: string | null): string {
   if (language === "hi-IN") {
-    return "CRITICAL SCRIPT RULE: Reply in Hindi using only English letters (romanized Hindi / Hinglish). Never use Devanagari or Urdu script.";
+    return "CRITICAL SCRIPT RULE: Reply in Hindi using NATIVE Devanagari script (देवनागरी). Do NOT use romanized Hinglish. Example: 'नमस्ते! मैं आपकी कैसे मदद कर सकता हूं?'";
   }
   if (language === "kn-IN") {
-    return "CRITICAL SCRIPT RULE: Reply in Kannada using only English letters (romanized Kannada). Never use Kannada script. Example style: 'Namaskara! Naanu nimage hege sahaaya maadabahudu?'";
+    return "CRITICAL SCRIPT RULE: Reply in Kannada using NATIVE Kannada script (ಕನ್ನಡ ಲಿಪಿ). Do NOT romanize. Example: 'ನಮಸ್ಕಾರ! ನಾನು ನಿಮಗೆ ಹೇಗೆ ಸಹಾಯ ಮಾಡಬಹುದು?'";
   }
   if (language === "ta-IN") {
-    return "CRITICAL SCRIPT RULE: Reply in Tamil using only English letters (romanized Tamil). Never use Tamil script.";
+    return "CRITICAL SCRIPT RULE: Reply in Tamil using NATIVE Tamil script (தமிழ்). Do NOT romanize. Example: 'வணக்கம்! நான் உங்களுக்கு எப்படி உதவ முடியும்?'";
   }
   if (language === "te-IN") {
-    return "CRITICAL SCRIPT RULE: Reply in Telugu using only English letters (romanized Telugu). Never use Telugu script.";
+    return "CRITICAL SCRIPT RULE: Reply in Telugu using NATIVE Telugu script (తెలుగు). Do NOT romanize. Example: 'నమస్కారం! నేను మీకు ఎలా సహాయం చేయగలను?'";
   }
   if (language === "mr-IN") {
-    return "CRITICAL SCRIPT RULE: Reply in Marathi using only English letters (romanized Marathi). Never use Devanagari script.";
+    return "CRITICAL SCRIPT RULE: Reply in Marathi using NATIVE Devanagari script (मराठी). Do NOT romanize. Example: 'नमस्कार! मी तुम्हाला कशी मदत करू शकतो?'";
   }
   if (language === "auto") {
-    return "CRITICAL SCRIPT RULE: Detect the user's language from their message. If they use Hindi / Kannada / Tamil / Telugu / Marathi, reply in that same language but ONLY in English letters (romanized). Never use Devanagari, Kannada, Tamil, Telugu, or Urdu script.";
+    return "CRITICAL SCRIPT RULE: Detect the user's language from their message. Reply in their NATIVE script — Hindi → Devanagari (देवनागरी), Kannada → ಕನ್ನಡ, Tamil → தமிழ், Telugu → తెలుగు, Marathi → मराठी. Never romanize Indian languages. English questions → English reply.";
   }
   return "";
 }
 
+// Detect language from native (Unicode) script ranges. This is the fastest and
+// most reliable signal — far better than guessing from romanized hints.
+function detectNativeScriptLanguage(text: string): "hi-IN" | "kn-IN" | "ta-IN" | "te-IN" | "mr-IN" | null {
+  if (/[\u0C80-\u0CFF]/.test(text)) return "kn-IN"; // Kannada
+  if (/[\u0B80-\u0BFF]/.test(text)) return "ta-IN"; // Tamil
+  if (/[\u0C00-\u0C7F]/.test(text)) return "te-IN"; // Telugu
+  // Devanagari is shared by Hindi & Marathi. Strong Marathi-specific words first.
+  if (/[\u0900-\u097F]/.test(text)) {
+    if (/(आहे|नाही|पाहिजे|तुम्ही|मला|करतो|कसा)/.test(text)) return "mr-IN";
+    return "hi-IN";
+  }
+  return null;
+}
+
 function detectRomanizedIndicLanguage(text: string): "hi-IN" | "kn-IN" | "ta-IN" | "te-IN" | "mr-IN" | null {
+  const native = detectNativeScriptLanguage(text);
+  if (native) return native;
+
   const lower = text.toLowerCase();
 
   const explicitMentions: Array<[RegExp, "hi-IN" | "kn-IN" | "ta-IN" | "te-IN" | "mr-IN"]> = [
-    [/\b(kannada|kanada|canada)\b/, "kn-IN"],
+    [/\b(kannada|kanada)\b/, "kn-IN"],
     [/\b(hindi|hindii)\b/, "hi-IN"],
     [/\b(tamil|tamizh)\b/, "ta-IN"],
     [/\b(telugu)\b/, "te-IN"],
@@ -129,9 +156,9 @@ function detectRomanizedIndicLanguage(text: string): "hi-IN" | "kn-IN" | "ta-IN"
 
   const kannadaHints = [
     "nanag", "nanage", "nanu", "nanna", "beku", "bekagittu", "bagge", "yaake", "yake",
-    "yenu", "enu", "ide", "illa", "kodti", "kodutte", "heli", "tilsi", "saku",
+    "yenu", "ide", "illa", "kodti", "kodutte", "heli", "tilsi", "saku",
     "namaskara", "hege", "yelli", "yaaru", "maadi", "maadu", "maadta", "maaduttare",
-    "guru", "swalpa", "thumba", "barbeku", "barthini",
+    "swalpa", "thumba", "barbeku", "barthini", "khata", "ekhata",
   ];
   const hindiHints = [
     "mujhe", "mujh", "aap", "kya", "kaise", "hai", "hain", "nahi", "chahiye", "karna",
@@ -139,7 +166,7 @@ function detectRomanizedIndicLanguage(text: string): "hi-IN" | "kn-IN" | "ta-IN"
   ];
   const tamilHints = ["enna", "yenna", "naan", "naangal", "ennoda", "konjam", "vendam", "venum", "irukku", "panra", "panren"];
   const teluguHints = ["nenu", "meeru", "enti", "emi", "kavali", "kavalsina", "chestunna", "chestunnaru", "ela"];
-  const marathiHints = ["mala", "tula", "tumhi", "kasa", "kase", "ahe", "nahi", "pahije", "karto", "kartoy"];
+  const marathiHints = ["mala", "tula", "tumhi", "kasa", "kase", "ahe", "pahije", "karto", "kartoy"];
 
   const score = (hints: string[]) => hints.reduce((acc, token) => acc + (lower.includes(token) ? 1 : 0), 0);
   const knScore = score(kannadaHints);
@@ -176,9 +203,85 @@ function resolveEffectiveWidgetLanguage(
     if (detected) return detected;
   }
 
-  return configuredLanguage || "en-US";
+  return "en-US";
 }
 
+// Strip stray romanization the LLM might still output (e.g. "Namaskara"
+// appearing inside Devanagari text) and trim to a single short reply.
+function normalizeIndicReply(reply: string, language: string): string {
+  const trimmed = reply.trim();
+  if (!isIndianLanguage(language)) return trimmed;
+  // Replace English greetings the model occasionally code-switches into.
+  return trimmed
+    .replace(/^(Hi|Hello|Hey)[!,.]?\s*/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+async function callDeepSeekChat(
+  messages: any[],
+): Promise<string | null> {
+  if (!DEEPSEEK_API_KEY) return null;
+  try {
+    const res = await fetch("https://api.deepseek.com/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${DEEPSEEK_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: "deepseek-chat",
+        messages,
+        max_tokens: 140,
+        temperature: 0.4,
+      }),
+    });
+    if (!res.ok) {
+      console.error(`[widget/chat] DeepSeek failed: ${res.status} ${await res.text()}`);
+      return null;
+    }
+    const data = await res.json() as any;
+    return data.choices?.[0]?.message?.content ?? null;
+  } catch (err) {
+    console.error("[widget/chat] DeepSeek exception:", err);
+    return null;
+  }
+}
+
+async function callSarvamChat(
+  messages: any[],
+): Promise<string | null> {
+  if (!SARVAM_API_KEY) return null;
+  try {
+    const res = await fetch("https://api.sarvam.ai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${SARVAM_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: "sarvam-m",
+        messages,
+        max_completion_tokens: 140,
+      }),
+    });
+    if (!res.ok) {
+      console.error(`[widget/chat] Sarvam-M failed: ${res.status} ${await res.text()}`);
+      return null;
+    }
+    const data = await res.json() as any;
+    return data.choices?.[0]?.message?.content ?? null;
+  } catch (err) {
+    console.error("[widget/chat] Sarvam-M exception:", err);
+    return null;
+  }
+}
+
+// Pipeline routing per language.
+//   en-US  → gpt-4o-mini   (fastest, OpenAI TTS downstream)
+//   hi-IN  → DeepSeek V3  → Sarvam Bulbul TTS (Devanagari)
+//   kn-IN  → Sarvam-M      → Sarvam Bulbul TTS (native Kannada)
+//   ta/te/mr → Sarvam-M    → Sarvam Bulbul TTS (native scripts)
 async function generateWidgetReply(
   systemPrompt: string,
   history: { role: string; content: string }[],
@@ -192,49 +295,37 @@ async function generateWidgetReply(
     { role: "user", content: message },
   ];
 
-  const SARVAM_PREFERRED_LANGS: Record<string, string> = {
-    "kn-IN": "Kannada",
-    "ta-IN": "Tamil",
-    "te-IN": "Telugu",
-    "mr-IN": "Marathi",
+  const NATIVE_LANG_NAMES: Record<string, { name: string; script: string }> = {
+    "hi-IN": { name: "Hindi", script: "Devanagari (देवनागरी)" },
+    "kn-IN": { name: "Kannada", script: "ಕನ್ನಡ ಲಿಪಿ" },
+    "ta-IN": { name: "Tamil", script: "தமிழ் எழுத்து" },
+    "te-IN": { name: "Telugu", script: "తెలుగు లిపి" },
+    "mr-IN": { name: "Marathi", script: "Devanagari (देवनागरी)" },
   };
 
-  if (SARVAM_PREFERRED_LANGS[normalizedLanguage] && SARVAM_API_KEY) {
-    const langName = SARVAM_PREFERRED_LANGS[normalizedLanguage];
-    const styleSystem = `Reply ONLY in natural ${langName} written in English letters (romanized ${langName}). Do not switch to Hindi/Urdu/English except for unavoidable brand names. Never refuse to reply in ${langName}.`;
-    try {
-      const sarvamRes = await fetch("https://api.sarvam.ai/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${SARVAM_API_KEY}`,
-        },
-        body: JSON.stringify({
-          model: "sarvam-m",
-          messages: [{ role: "system", content: styleSystem }, ...messages],
-          max_completion_tokens: 200,
-        }),
-      });
-      if (sarvamRes.ok) {
-        const data = await sarvamRes.json() as any;
-        const reply = data.choices?.[0]?.message?.content;
-        if (reply) return { reply, modelUsed: "sarvam-m" };
-      } else {
-        const errText = await sarvamRes.text();
-        console.error(`[widget/chat] Sarvam chat failed for ${normalizedLanguage}, fallback to OpenAI:`, errText);
-      }
-    } catch (err) {
-      console.error(`[widget/chat] Sarvam chat exception for ${normalizedLanguage}, fallback to OpenAI:`, err);
-    }
+  // --- Hindi: prefer DeepSeek V3 (best Hinglish + Devanagari accuracy) ---
+  if (normalizedLanguage === "hi-IN" && DEEPSEEK_API_KEY) {
+    const styleSystem = `Reply ONLY in natural Hindi written in NATIVE Devanagari script (देवनागरी). Never use romanized/Hinglish letters. Keep replies under 2 sentences.`;
+    const reply = await callDeepSeekChat([{ role: "system", content: styleSystem }, ...messages]);
+    if (reply) return { reply: normalizeIndicReply(reply, normalizedLanguage), modelUsed: "deepseek-chat" };
   }
 
+  // --- Kannada/Tamil/Telugu/Marathi: prefer Sarvam-M (Indic-native) ---
+  const langInfo = NATIVE_LANG_NAMES[normalizedLanguage];
+  if (langInfo && normalizedLanguage !== "hi-IN" && SARVAM_API_KEY) {
+    const styleSystem = `Reply ONLY in natural ${langInfo.name} written in NATIVE ${langInfo.script}. Do not romanize. Do not switch to Hindi/English except for unavoidable brand names like "BBMP" or "e-Khata". Keep replies under 2 sentences. Never refuse to reply in ${langInfo.name}.`;
+    const reply = await callSarvamChat([{ role: "system", content: styleSystem }, ...messages]);
+    if (reply) return { reply: normalizeIndicReply(reply, normalizedLanguage), modelUsed: "sarvam-m" };
+  }
+
+  // --- English (or any fallback): gpt-4o-mini (fast & multilingual) ---
   const completion = await openai.chat.completions.create({
     model: "gpt-4o-mini",
-    max_completion_tokens: 200,
+    max_completion_tokens: 140,
     messages,
   });
   const reply = completion.choices[0]?.message?.content || "I'm sorry, I couldn't process that. Could you try again?";
-  return { reply, modelUsed: "gpt-4o-mini" };
+  return { reply: normalizeIndicReply(reply, normalizedLanguage), modelUsed: "gpt-4o-mini" };
 }
 
 async function getAgentByWidgetKey(apiKey: string) {
@@ -253,15 +344,15 @@ async function buildSystemPromptForWidget(userId: number, agentConfig: any): Pro
 
   let system = `You are ${agentConfig.agentName || "SalesBot"}, an AI sales representative`;
   if (agentConfig.personality) system += ` with a ${agentConfig.personality} personality`;
-  system += `. You are chatting with a visitor on the company website. Keep responses concise — 2-3 sentences max. Be helpful and guide the visitor toward taking an action. Never mention you are an AI unless directly asked.\n\n`;
+  system += `. You are chatting with a visitor on the company website. Keep responses concise — 2 short sentences max. Be helpful and guide the visitor toward taking an action. Never mention you are an AI unless directly asked.\n\n`;
 
   system += `${SUPPORTED_LANGUAGES_LINE}\n\n`;
 
   if (agentConfig.language === "auto") {
-    system += `CRITICAL INSTRUCTION: Automatically detect the language the user is speaking/typing. You MUST reply in the exact same language they used. Do NOT default to English if they speak another language.\n\n`;
+    system += `CRITICAL INSTRUCTION: Automatically detect the language the user is typing or speaking. You MUST reply in the exact same language they used. Do NOT default to English if they speak another language.\n\n`;
   }
 
-  const scriptRule = buildRomanizedScriptInstruction(agentConfig.language);
+  const scriptRule = buildScriptInstruction(agentConfig.language);
   if (scriptRule) {
     system += `${scriptRule}\n\n`;
   }
@@ -367,9 +458,19 @@ router.post("/widget/chat", async (req, res) => {
     audioMimeType = ttsResult.mimeType;
   }
 
-  console.log(`[widget/chat] lang=${language} model=${modelUsed} tts=${provider ?? "none"} includeAudio=${!!includeAudio}`);
+  console.log(`[widget/chat] configured=${agent.language} effective=${language} model=${modelUsed} tts=${provider ?? "none"} includeAudio=${!!includeAudio}`);
 
-  res.json({ reply, agentName: agent.agentName, language, audio, provider, audioMimeType });
+  res.json({
+    reply,
+    agentName: agent.agentName,
+    language,
+    detectedLanguage: language,
+    configuredLanguage: agent.language,
+    modelUsed,
+    audio,
+    provider,
+    audioMimeType,
+  });
 });
 
 // Server-side TTS for the Web Widget using OpenAI TTS (Fast, multilingual, high-quality)
@@ -424,6 +525,8 @@ router.get("/widget/loader.js", async (req, res) => {
   var history = [];
   var agentName = "Assistant";
   var agentLang = "en-US";
+  var configuredLang = "en-US";
+  var sessionLang = "en-US";
   var open = false;
   var listening = false;
   var speaking = false;
@@ -431,6 +534,20 @@ router.get("/widget/loader.js", async (req, res) => {
   var micBlocked = false;
   var SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   var hasSpeechAPI = !!SpeechRecognition;
+  var INDIC_RANGES = [
+    {re: /[\u0C80-\u0CFF]/, lang: "kn-IN"},
+    {re: /[\u0B80-\u0BFF]/, lang: "ta-IN"},
+    {re: /[\u0C00-\u0C7F]/, lang: "te-IN"},
+    {re: /[\u0900-\u097F]/, lang: "hi-IN"}
+  ];
+  function detectLangFromText(t) {
+    if (!t) return null;
+    for (var i=0;i<INDIC_RANGES.length;i++){ if (INDIC_RANGES[i].re.test(t)) return INDIC_RANGES[i].lang; }
+    var l = (t||"").toLowerCase();
+    if (/\b(namaskara|hege|maadi|maadu|nanage|nanu|beku|swalpa|thumba)\b/.test(l)) return "kn-IN";
+    if (/\b(kya|kaise|nahi|chahiye|mujhe|aap|hai|hain|bataao|samjhao)\b/.test(l)) return "hi-IN";
+    return null;
+  }
 
   function el(tag, attrs, text) {
     var e = document.createElement(tag);
@@ -539,10 +656,11 @@ router.get("/widget/loader.js", async (req, res) => {
 
   function speakReply(text) {
     speaking = true;
+    var ttsLang = (configuredLang === "auto") ? sessionLang : agentLang;
     fetch(BASE_URL + "/api/widget/tts", {
       method: "POST",
       headers: {"Content-Type":"application/json"},
-      body: JSON.stringify({ text: text, language: agentLang, apiKey: API_KEY })
+      body: JSON.stringify({ text: text, language: ttsLang, apiKey: API_KEY })
     }).then(function(r){ return r.json(); }).then(function(data) {
       if (data.audio) {
         playReplyAudio(data.audio, data.audioMimeType);
@@ -557,6 +675,10 @@ router.get("/widget/loader.js", async (req, res) => {
     history.push({role:"user", content:msg});
     setTyping(true);
     if (mic) mic.disabled = true;
+    if (configuredLang === "auto") {
+      var quickGuess = detectLangFromText(msg);
+      if (quickGuess) sessionLang = quickGuess;
+    }
     fetch(BASE_URL + "/api/widget/chat", {
       method: "POST",
       headers: {"Content-Type":"application/json"},
@@ -573,6 +695,7 @@ router.get("/widget/loader.js", async (req, res) => {
         var reply = res.data.reply || "I\u2019m sorry, I didn\u2019t understand that.";
         addMsg(reply, "bot", false);
         history.push({role:"assistant", content:reply});
+        if (res.data.detectedLanguage) sessionLang = res.data.detectedLanguage;
         if (isVoice) {
           if (res.data.audio) playReplyAudio(res.data.audio, res.data.audioMimeType);
           else speakReply(reply);
@@ -597,7 +720,13 @@ router.get("/widget/loader.js", async (req, res) => {
     if (listening) { stopListening(); return; }
     if (window.speechSynthesis) window.speechSynthesis.cancel();
     recognition = new SpeechRecognition();
-    recognition.lang = agentLang === "auto" ? "en-IN" : agentLang;
+    var micLang;
+    if (configuredLang === "auto") {
+      micLang = sessionLang && sessionLang !== "auto" ? sessionLang : "en-IN";
+    } else {
+      micLang = agentLang;
+    }
+    recognition.lang = micLang;
     recognition.continuous = false;
     recognition.interimResults = false;
     recognition.maxAlternatives = 1;
@@ -653,7 +782,14 @@ router.get("/widget/loader.js", async (req, res) => {
       var cfg = res.data;
       agentName = cfg.agentName || "Assistant";
       agentLang = cfg.language || "en-US";
+      configuredLang = agentLang;
+      sessionLang = agentLang === "auto" ? "en-IN" : agentLang;
       if (nameEl) nameEl.textContent = agentName;
+      var modeBadge = document.getElementById("_dw-mode");
+      if (modeBadge && agentLang === "auto") {
+        modeBadge.textContent = "Auto";
+        modeBadge.title = "Auto-detects English / Hindi / Kannada and more";
+      }
       if (!hasSpeechAPI) {
         var modeEl2 = document.getElementById("_dw-mode");
         if (modeEl2) modeEl2.textContent = "Text";
