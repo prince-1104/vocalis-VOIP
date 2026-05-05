@@ -33,6 +33,18 @@ router.get("/twilio/tts-audio/:id", (req, res) => {
   res.send(buf);
 });
 
+router.get("/twilio/tts-audio-mp3/:id", (req, res) => {
+  const buf = ttsAudioCache.get(req.params.id);
+  if (!buf) {
+    res.status(404).send("Not found");
+    return;
+  }
+  ttsAudioCache.delete(req.params.id);
+  res.set("Content-Type", "audio/mpeg");
+  res.set("Content-Length", String(buf.length));
+  res.send(buf);
+});
+
 function getBaseUrl(req: any): string {
   const domains = process.env.REPLIT_DOMAINS;
   if (domains) {
@@ -46,6 +58,19 @@ function getBaseUrl(req: any): string {
 const KB_ENTRY_MAX_CHARS = 300;
 const KB_MAX_ENTRIES = 6;
 
+function buildRomanizedScriptInstruction(language?: string | null): string {
+  if (language === "hi-IN") {
+    return "CRITICAL SCRIPT RULE: Reply in Hindi using only English letters (romanized Hindi / Hinglish). Never use Devanagari or Urdu script.";
+  }
+  if (language === "kn-IN") {
+    return "CRITICAL SCRIPT RULE: Reply in Kannada using only English letters (romanized Kannada). Never use Kannada script.";
+  }
+  if (language === "auto") {
+    return "CRITICAL SCRIPT RULE: If the user speaks Hindi or Kannada, reply only in romanized text using English letters. Never use Urdu, Devanagari, or Kannada script.";
+  }
+  return "";
+}
+
 async function buildSystemPrompt(userId: number, agentConfig: any): Promise<string> {
   const [trainingData, scripts] = await Promise.all([
     db.select().from(trainingDataTable).where(eq(trainingDataTable.userId, userId)).limit(KB_MAX_ENTRIES),
@@ -55,6 +80,15 @@ async function buildSystemPrompt(userId: number, agentConfig: any): Promise<stri
   let system = `You are ${agentConfig.agentName || "SalesBot"}, an AI sales representative`;
   if (agentConfig.personality) system += ` with a ${agentConfig.personality} personality`;
   system += `. You are on a live phone call. Keep ALL responses under 2 sentences — be direct and conversational. Never mention you are an AI unless directly asked.\n\n`;
+
+  if (agentConfig.language === "auto") {
+    system += `CRITICAL INSTRUCTION: Automatically detect the language the user is speaking. You MUST reply in the exact same language they used. Do NOT default to English if they speak another language.\n\n`;
+  }
+
+  const scriptRule = buildRomanizedScriptInstruction(agentConfig.language);
+  if (scriptRule) {
+    system += `${scriptRule}\n\n`;
+  }
 
   if (trainingData.length > 0) {
     system += `KNOWLEDGE BASE (use this to answer questions):\n`;
@@ -98,10 +132,26 @@ async function generateAIResponse(systemPrompt: string, history: {role: string, 
   return response.choices[0]?.message?.content || "I'm sorry, I didn't catch that. Could you repeat that?";
 }
 
+async function generateOpenAITTS(text: string, voice: string = "nova"): Promise<string> {
+  const mp3 = await openai.audio.speech.create({
+    model: "tts-1",
+    voice: voice as any,
+    input: text,
+  });
+  const arrayBuffer = await mp3.arrayBuffer();
+  const buffer = Buffer.from(arrayBuffer);
+  return buffer.toString("base64");
+}
+
 const INDIAN_LANGUAGES = new Set(["kn-IN", "hi-IN", "ta-IN", "te-IN", "mr-IN"]);
 
 function isIndianLanguage(lang?: string | null): boolean {
   return INDIAN_LANGUAGES.has(lang ?? "");
+}
+
+function getTwilioLang(lang?: string | null): string {
+  if (lang === "auto") return "en-IN";
+  return lang || "en-US";
 }
 
 function resolveSplitModelLLM(lang: string): "deepseek-chat" | "sarvam-m" {
@@ -274,6 +324,35 @@ async function generateAIResponseIndic(
   return { text, ttsAudioId };
 }
 
+async function renderPromptAudioForCall(
+  text: string,
+  lang: string,
+  voice: string,
+): Promise<{ ttsAudioId: string | null; useMp3: boolean }> {
+  if (isIndianLanguage(lang)) {
+    try {
+      const sarvamTtsId = await callSarvamTTS(text, lang);
+      if (sarvamTtsId) {
+        return { ttsAudioId: sarvamTtsId, useMp3: false };
+      }
+    } catch (err) {
+      console.error("[call-audio] Sarvam greeting TTS failed:", err);
+    }
+  }
+
+  if (lang === "auto") {
+    try {
+      const b64 = await generateOpenAITTS(text, voice || "nova");
+      const ttsId = storeTtsAudio(b64);
+      return { ttsAudioId: ttsId, useMp3: true };
+    } catch (err) {
+      console.error("[call-audio] OpenAI greeting TTS failed:", err);
+    }
+  }
+
+  return { ttsAudioId: null, useMp3: false };
+}
+
 const OPENAI_MODEL_MAP: Record<string, string> = {
   "gpt-4o-mini":          "gpt-4o-mini",
   "gpt-4o":               "gpt-4o",
@@ -401,11 +480,18 @@ router.post("/twilio/inbound", async (req, res) => {
     method: "POST",
     speechTimeout: "auto",
     timeout: 10,
-    language: (agentConfig?.language || "en-US") as any,
+    language: getTwilioLang(agentConfig?.language) as any,
     actionOnEmptyResult: true,
   });
 
-  gather.say({ voice: mapVoice(agentConfig?.voice) as any, language: (agentConfig?.language || "en-US") as any }, greeting);
+  const initialLang = agentConfig?.language || "en-US";
+  const initialVoice = agentConfig?.voice || "nova";
+  const initialAudio = await renderPromptAudioForCall(greeting, initialLang, initialVoice);
+  if (initialAudio.ttsAudioId) {
+    gather.play(`${baseUrl}/api/twilio/${initialAudio.useMp3 ? "tts-audio-mp3" : "tts-audio"}/${initialAudio.ttsAudioId}`);
+  } else {
+    gather.say({ voice: mapVoice(initialVoice) as any, language: getTwilioLang(initialLang) as any }, greeting);
+  }
 
   twiml.redirect({ method: "POST" }, `${baseUrl}/api/twilio/voice?callLogId=${callLog.id}&history=&silent=1`);
 
@@ -478,14 +564,23 @@ router.post("/twilio/voice", async (req, res) => {
     method: "POST",
     speechTimeout: "auto",
     timeout: 10,
-    language: lang as any,
+    language: getTwilioLang(lang) as any,
     actionOnEmptyResult: true,
   });
 
+  if (!ttsAudioId && lang === "auto") {
+    try {
+      const b64 = await generateOpenAITTS(aiResponse, agentConfig?.voice || "nova");
+      ttsAudioId = storeTtsAudio(b64);
+    } catch (e) {
+      console.error("OpenAI TTS err:", e);
+    }
+  }
+
   if (ttsAudioId) {
-    gather.play(`${baseUrl}/api/twilio/tts-audio/${ttsAudioId}`);
+    gather.play(`${baseUrl}/api/twilio/${lang === "auto" ? "tts-audio-mp3" : "tts-audio"}/${ttsAudioId}`);
   } else {
-    gather.say({ voice: voice as any, language: lang as any }, aiResponse);
+    gather.say({ voice: voice as any, language: getTwilioLang(lang) as any }, aiResponse);
   }
 
   twiml.redirect({ method: "POST" }, `${baseUrl}/api/twilio/voice?callLogId=${callLogId}&history=${encodedHistory}&silent=1`);
@@ -549,14 +644,14 @@ router.post("/twilio/voice-indic", async (req, res) => {
     method: "POST",
     speechTimeout: "auto",
     timeout: 10,
-    language: lang as any,
+    language: getTwilioLang(lang) as any,
     actionOnEmptyResult: true,
   });
 
   if (ttsAudioId) {
     gather.play(`${baseUrl}/api/twilio/tts-audio/${ttsAudioId}`);
   } else {
-    gather.say({ voice: voice as any, language: lang as any }, aiResponse);
+    gather.say({ voice: voice as any, language: getTwilioLang(lang) as any }, aiResponse);
   }
 
   twiml.redirect({ method: "POST" }, `${baseUrl}/api/twilio/voice?callLogId=${callLogId}&history=${encodedHistory}&silent=1`);
@@ -595,11 +690,16 @@ router.post("/twilio/outbound-voice", async (req, res) => {
     method: "POST",
     speechTimeout: "auto",
     timeout: 10,
-    language: lang as any,
+    language: getTwilioLang(lang) as any,
     actionOnEmptyResult: true,
   });
 
-  gather.say({ voice: voice as any, language: lang as any }, openingLine);
+  const openingAudio = await renderPromptAudioForCall(openingLine, lang, agentConfig?.voice || "nova");
+  if (openingAudio.ttsAudioId) {
+    gather.play(`${baseUrl}/api/twilio/${openingAudio.useMp3 ? "tts-audio-mp3" : "tts-audio"}/${openingAudio.ttsAudioId}`);
+  } else {
+    gather.say({ voice: voice as any, language: getTwilioLang(lang) as any }, openingLine);
+  }
 
   twiml.redirect({ method: "POST" }, `${baseUrl}/api/twilio/voice?callLogId=${callLogId}&history=&silent=1`);
 

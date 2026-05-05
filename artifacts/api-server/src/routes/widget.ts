@@ -6,8 +6,96 @@ import { randomUUID } from "crypto";
 
 const router: IRouter = Router();
 
+const SARVAM_API_KEY = process.env.SARVAM_API_KEY ?? "";
+
+const INDIAN_LANGUAGES = new Set(["kn-IN", "hi-IN", "ta-IN", "te-IN", "mr-IN"]);
+
+const BULBUL_VOICE_FOR_LANG: Record<string, string> = {
+  "hi-IN": "kavya",
+  "kn-IN": "kavya",
+  "ta-IN": "priya",
+  "te-IN": "pooja",
+  "mr-IN": "simran",
+};
+
+function isIndianLanguage(lang?: string | null): boolean {
+  return INDIAN_LANGUAGES.has(lang ?? "");
+}
+
+async function generateSarvamWidgetTTS(text: string, lang: string): Promise<string | null> {
+  if (!SARVAM_API_KEY || !isIndianLanguage(lang)) return null;
+
+  const speaker = BULBUL_VOICE_FOR_LANG[lang] ?? "kavya";
+  const res = await fetch("https://api.sarvam.ai/text-to-speech", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "api-subscription-key": SARVAM_API_KEY,
+    },
+    body: JSON.stringify({
+      inputs: [text],
+      target_language_code: lang,
+      speaker,
+      model: "bulbul:v3",
+      pace: 1.0,
+      enable_preprocessing: true,
+      output_audio_codec: "mp3",
+    }),
+  });
+
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(`Sarvam widget TTS error ${res.status}: ${errorText}`);
+  }
+
+  const data = await res.json() as any;
+  return data.audios?.[0] ?? null;
+}
+
+async function generateOpenAIWidgetTTS(text: string, voice: string): Promise<string> {
+  const mp3 = await openai.audio.speech.create({
+    model: "tts-1",
+    voice: voice as any,
+    input: text,
+  });
+  const arrayBuffer = await mp3.arrayBuffer();
+  return Buffer.from(arrayBuffer).toString("base64");
+}
+
+async function synthesizeWidgetTTS(text: string, voice: string, language: string): Promise<{ audio: string | null; provider: "sarvam" | "openai" | null }> {
+  if (isIndianLanguage(language)) {
+    try {
+      const sarvamAudio = await generateSarvamWidgetTTS(text, language);
+      if (sarvamAudio) return { audio: sarvamAudio, provider: "sarvam" };
+    } catch (sarvamErr) {
+      console.error("[widget/tts] Sarvam TTS failed, falling back to OpenAI:", sarvamErr);
+    }
+  }
+
+  try {
+    const openAiAudio = await generateOpenAIWidgetTTS(text, voice);
+    return { audio: openAiAudio, provider: "openai" };
+  } catch (openAiErr) {
+    console.error("[widget/tts] OpenAI TTS error:", openAiErr);
+    return { audio: null, provider: null };
+  }
+}
+
 const KB_ENTRY_MAX_CHARS = 300;
 const KB_MAX_ENTRIES = 6;
+
+function buildRomanizedScriptInstruction(language?: string | null): string {
+  if (language === "hi-IN") {
+    return "CRITICAL SCRIPT RULE: Reply in Hindi using only English letters (romanized Hindi / Hinglish). Never use Devanagari or Urdu script.";
+  }
+  if (language === "kn-IN") {
+    return "CRITICAL SCRIPT RULE: Reply in Kannada using only English letters (romanized Kannada). Never use Kannada script.";
+  }
+  if (language === "auto") {
+    return "CRITICAL SCRIPT RULE: If the user types/speaks Hindi or Kannada, reply only in romanized text using English letters. Never use Urdu, Devanagari, or Kannada script.";
+  }
+  return "";
+}
 
 async function getAgentByWidgetKey(apiKey: string) {
   return db.query.agentConfigsTable.findFirst({
@@ -26,6 +114,15 @@ async function buildSystemPromptForWidget(userId: number, agentConfig: any): Pro
   let system = `You are ${agentConfig.agentName || "SalesBot"}, an AI sales representative`;
   if (agentConfig.personality) system += ` with a ${agentConfig.personality} personality`;
   system += `. You are chatting with a visitor on the company website. Keep responses concise — 2-3 sentences max. Be helpful and guide the visitor toward taking an action. Never mention you are an AI unless directly asked.\n\n`;
+
+  if (agentConfig.language === "auto") {
+    system += `CRITICAL INSTRUCTION: Automatically detect the language the user is speaking/typing. You MUST reply in the exact same language they used. Do NOT default to English if they speak another language.\n\n`;
+  }
+
+  const scriptRule = buildRomanizedScriptInstruction(agentConfig.language);
+  if (scriptRule) {
+    system += `${scriptRule}\n\n`;
+  }
 
   if (trainingData.length > 0) {
     system += `KNOWLEDGE BASE:\n`;
@@ -63,10 +160,11 @@ router.get("/widget/config/:apiKey", async (req, res) => {
 });
 
 router.post("/widget/chat", async (req, res) => {
-  const { apiKey, message, history } = req.body as {
+  const { apiKey, message, history, includeAudio } = req.body as {
     apiKey: string;
     message: string;
     history?: { role: string; content: string }[];
+    includeAudio?: boolean;
   };
 
   if (!apiKey || !message) {
@@ -113,7 +211,41 @@ router.post("/widget/chat", async (req, res) => {
     billedCostUsd: "0",
   }).catch(() => {});
 
-  res.json({ reply, agentName: agent.agentName });
+  const language = agent.language || "en-US";
+  let audio: string | null = null;
+  let provider: "sarvam" | "openai" | null = null;
+
+  if (includeAudio) {
+    const ttsResult = await synthesizeWidgetTTS(reply, agent.voice || "nova", language);
+    audio = ttsResult.audio;
+    provider = ttsResult.provider;
+  }
+
+  res.json({ reply, agentName: agent.agentName, language, audio, provider });
+});
+
+// Server-side TTS for the Web Widget using OpenAI TTS (Fast, multilingual, high-quality)
+router.post("/widget/tts", async (req, res) => {
+  const { text, apiKey } = req.body as { text?: string; language?: string; apiKey?: string };
+  if (!text) {
+    res.status(400).json({ error: "text is required" });
+    return;
+  }
+  
+  let voice = "nova";
+  let language = "en-US";
+  if (apiKey) {
+    const agent = await getAgentByWidgetKey(apiKey);
+    if (agent?.voice) voice = agent.voice;
+    if (agent?.language) language = agent.language;
+  }
+
+  const ttsResult = await synthesizeWidgetTTS(text, voice, language);
+  if (!ttsResult.audio) {
+    res.status(502).json({ error: "TTS failed" });
+    return;
+  }
+  res.json({ audio: ttsResult.audio, provider: ttsResult.provider, language });
 });
 
 router.get("/widget/loader.js", async (req, res) => {
@@ -171,7 +303,6 @@ router.get("/widget/loader.js", async (req, res) => {
     ".dw-msg.bot{background:rgba(124,58,237,.15);color:#e2d9f3;border-bottom-left-radius:4px;align-self:flex-start;}",
     ".dw-msg.user{background:#7c3aed;color:#fff;border-bottom-right-radius:4px;align-self:flex-end;}",
     ".dw-msg.user.voice{background:linear-gradient(135deg,#7c3aed,#4f46e5);display:flex;align-items:center;gap:6px;}",
-    ".dw-msg.user.voice::before{content:'\\1F3A4';font-size:12px;}",
     "#_dw-form{display:flex;gap:6px;padding:10px 12px;border-top:1px solid rgba(255,255,255,.08);align-items:center;}",
     "#_dw-input{flex:1;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.12);border-radius:8px;padding:8px 10px;color:#fff;font-size:13px;outline:none;}",
     "#_dw-send{background:#7c3aed;border:none;border-radius:8px;width:34px;height:34px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;}",
@@ -242,19 +373,29 @@ router.get("/widget/loader.js", async (req, res) => {
     if (!on && existing) existing.remove();
   }
 
-  function speakReply(text) {
-    if (!window.speechSynthesis) return;
-    window.speechSynthesis.cancel();
-    var utt = new SpeechSynthesisUtterance(text);
-    utt.lang = agentLang;
-    utt.rate = 1.0;
-    utt.pitch = 1.0;
-    var voices = window.speechSynthesis.getVoices();
-    var match = voices.find(function(v){ return v.lang === agentLang || v.lang.startsWith(agentLang.split("-")[0]); });
-    if (match) utt.voice = match;
+  var INDIC_LANGS = ["kn-IN","hi-IN","ta-IN","te-IN","mr-IN"];
+  var currentAudio = null;
+
+  function playReplyAudio(audioBase64) {
+    if (!audioBase64) return;
     speaking = true;
-    utt.onend = utt.onerror = function(){ speaking = false; };
-    window.speechSynthesis.speak(utt);
+    if (currentAudio) { currentAudio.pause(); currentAudio = null; }
+    currentAudio = new Audio("data:audio/mpeg;base64," + audioBase64);
+    currentAudio.onended = currentAudio.onerror = function(){ speaking = false; currentAudio = null; };
+    currentAudio.play().catch(function(){ speaking = false; });
+  }
+
+  function speakReply(text) {
+    speaking = true;
+    fetch(BASE_URL + "/api/widget/tts", {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({ text: text, language: agentLang, apiKey: API_KEY })
+    }).then(function(r){ return r.json(); }).then(function(data) {
+      if (data.audio) {
+        playReplyAudio(data.audio);
+      } else { speaking = false; }
+    }).catch(function(){ speaking = false; });
   }
 
   function sendMessage(msg, isVoice) {
@@ -267,7 +408,7 @@ router.get("/widget/loader.js", async (req, res) => {
     fetch(BASE_URL + "/api/widget/chat", {
       method: "POST",
       headers: {"Content-Type":"application/json"},
-      body: JSON.stringify({apiKey:API_KEY, message:msg, history:history.slice(-6)})
+      body: JSON.stringify({apiKey:API_KEY, message:msg, history:history.slice(-6), includeAudio:isVoice})
     }).then(function(r){
       return r.json().then(function(data) { return { ok: r.ok, status: r.status, data: data }; });
     }).then(function(res){
@@ -280,7 +421,10 @@ router.get("/widget/loader.js", async (req, res) => {
         var reply = res.data.reply || "I\u2019m sorry, I didn\u2019t understand that.";
         addMsg(reply, "bot", false);
         history.push({role:"assistant", content:reply});
-        if (isVoice) speakReply(reply);
+        if (isVoice) {
+          if (res.data.audio) playReplyAudio(res.data.audio);
+          else speakReply(reply);
+        }
       }
     }).catch(function(err){
       setTyping(false);
@@ -301,7 +445,7 @@ router.get("/widget/loader.js", async (req, res) => {
     if (listening) { stopListening(); return; }
     if (window.speechSynthesis) window.speechSynthesis.cancel();
     recognition = new SpeechRecognition();
-    recognition.lang = agentLang;
+    recognition.lang = agentLang === "auto" ? "en-IN" : agentLang;
     recognition.continuous = false;
     recognition.interimResults = false;
     recognition.maxAlternatives = 1;
