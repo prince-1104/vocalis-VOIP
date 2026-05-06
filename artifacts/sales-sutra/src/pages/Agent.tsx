@@ -8,6 +8,7 @@ import { useToast } from "@/hooks/use-toast";
 import { Bot, Phone, Settings2, AlertCircle, Copy, CheckCircle2, Webhook, Cpu, Lock, Ear, Brain, Volume2, Zap, ChevronDown, Play, Square, Languages, Sparkles } from "lucide-react";
 import { useForm } from "react-hook-form";
 import { useAuth } from "@/hooks/use-auth";
+import { Switch } from "@/components/ui/switch";
 
 const INDIAN_LANGUAGES = ["kn-IN", "hi-IN", "ta-IN", "te-IN", "mr-IN"];
 
@@ -253,6 +254,7 @@ export default function AgentSettings() {
   const updateAgent = useUpdateAgentMutation();
   const { toast } = useToast();
   const { isSuperadmin } = useAuth();
+  const [autoAiMode, setAutoAiMode] = useState(false);
 
   const agentAny = agent as any;
 
@@ -288,13 +290,23 @@ export default function AgentSettings() {
         telephonyApiSecret: "",
         telephonyAppId: agentAny?.telephonyAppId || "",
       });
+      setAutoAiMode((agentAny?.language || "en-US") === "auto");
     }
   }, [agent]);
+
+  const handleToggleAutoAiMode = (checked: boolean) => {
+    setAutoAiMode(checked);
+    if (checked) {
+      form.setValue("language", "auto", { shouldDirty: true, shouldValidate: true });
+    }
+  };
 
   const onSubmit = async (data: AgentFormValues) => {
     try {
       const payload: any = {
-        agentName: data.agentName, voice: data.voice, language: data.language,
+        agentName: data.agentName,
+        voice: data.voice,
+        language: autoAiMode ? "auto" : data.language,
         personality: data.personality, aiModel: data.aiModel,
         greeting: data.greeting, voicemailMessage: data.voicemailMessage,
       };
@@ -328,6 +340,28 @@ export default function AgentSettings() {
       </div>
 
       <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-8">
+        <Card className="glass-panel border-fuchsia-500/30 bg-gradient-to-r from-fuchsia-500/10 via-violet-500/5 to-cyan-500/10">
+          <CardHeader>
+            <CardTitle className="flex items-center justify-between gap-3">
+              <span className="flex items-center gap-2">
+                <Sparkles className="w-5 h-5 text-fuchsia-300" />
+                Auto-AI Mode
+                <span className="text-[10px] uppercase tracking-wider text-fuchsia-300/70 font-medium bg-fuchsia-500/10 border border-fuchsia-500/20 rounded-full px-2 py-0.5">
+                  Recommended
+                </span>
+              </span>
+              <Switch
+                checked={autoAiMode}
+                onCheckedChange={handleToggleAutoAiMode}
+                aria-label="Toggle Auto-AI Mode"
+              />
+            </CardTitle>
+            <CardDescription>
+              Automatically detects language and routes LLM + voice pipeline per turn. Turn this off to manually control language, model, and voice behavior.
+            </CardDescription>
+          </CardHeader>
+        </Card>
+
         <Card className="glass-panel border-white/5">
           <CardHeader>
             <CardTitle className="flex items-center gap-2"><Bot className="w-5 h-5 text-primary" /> Persona &amp; Voice</CardTitle>
@@ -337,7 +371,7 @@ export default function AgentSettings() {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div className="space-y-2">
                 <label className="text-sm font-medium">Agent Name</label>
-                <Input {...form.register("agentName")} className="bg-background/50 border-white/10" />
+                <Input {...form.register("agentName")} className="bg-background/50 border-white/10" disabled={autoAiMode} />
               </div>
               <div className="space-y-2">
                 <label className="text-sm font-medium flex items-center gap-1.5">
@@ -348,7 +382,7 @@ export default function AgentSettings() {
                     </span>
                   )}
                 </label>
-                <select {...form.register("language")} className={selectCls}>
+                <select {...form.register("language")} className={selectCls} disabled={autoAiMode}>
                   <optgroup label="Smart">
                     <option value="auto">Auto-Detect (English + Hindi + Kannada + more)</option>
                   </optgroup>
@@ -365,7 +399,7 @@ export default function AgentSettings() {
               <div className="space-y-2">
                 <label className="text-sm font-medium">AI Voice</label>
                 <div className="flex gap-2">
-                  <select {...form.register("voice")} className={selectCls}>
+                  <select {...form.register("voice")} className={selectCls} disabled={autoAiMode}>
                     <option value="alloy">Alloy (Neutral, balanced)</option>
                     <option value="ash">Ash (Soft, clear, gentle)</option>
                     <option value="coral">Coral (Warm, friendly, soft)</option>
@@ -389,7 +423,7 @@ export default function AgentSettings() {
               </div>
               <div className="space-y-2">
                 <label className="text-sm font-medium">Personality</label>
-                <select {...form.register("personality")} className={selectCls}>
+                <select {...form.register("personality")} className={selectCls} disabled={autoAiMode}>
                   <option value="professional">Professional &amp; Direct</option>
                   <option value="friendly">Friendly &amp; Conversational</option>
                   <option value="energetic">Energetic &amp; Enthusiastic</option>
@@ -399,11 +433,11 @@ export default function AgentSettings() {
             </div>
             <div className="space-y-2">
               <label className="text-sm font-medium">Default Greeting</label>
-              <Textarea {...form.register("greeting")} className="bg-background/50 border-white/10 min-h-[100px]" placeholder="Hi, you've reached Dialog. I'm Alex, how can I help you today?" />
+              <Textarea {...form.register("greeting")} className="bg-background/50 border-white/10 min-h-[100px]" placeholder="Hi, you've reached Dialog. I'm Alex, how can I help you today?" disabled={autoAiMode} />
             </div>
             <div className="space-y-2">
               <label className="text-sm font-medium">Voicemail Message</label>
-              <Textarea {...form.register("voicemailMessage")} className="bg-background/50 border-white/10" placeholder="Please leave a message and our team will get back to you." />
+              <Textarea {...form.register("voicemailMessage")} className="bg-background/50 border-white/10" placeholder="Please leave a message and our team will get back to you." disabled={autoAiMode} />
             </div>
           </CardContent>
         </Card>
@@ -416,7 +450,7 @@ export default function AgentSettings() {
           <CardContent className="space-y-4">
             <div className="space-y-2">
               <label className="text-sm font-medium">Conversation Model</label>
-              <select {...form.register("aiModel")} className={selectCls}>
+              <select {...form.register("aiModel")} className={selectCls} disabled={autoAiMode}>
                 {!CURRENT_MODELS.includes(form.watch("aiModel")) && (
                   <option value={form.watch("aiModel")} disabled>Legacy model — please select a new model</option>
                 )}
