@@ -617,7 +617,7 @@ async function callDeepSeekChat(
       body: JSON.stringify({
         model: "deepseek-chat",
         messages: normalizeMessagesForSingleSystem(messages),
-        max_tokens: 140,
+        max_tokens: 110,
         temperature: 0.4,
       }),
     });
@@ -659,7 +659,7 @@ async function callSarvamChat(
       body: JSON.stringify({
         model: "sarvam-m",
         messages: normalizeMessagesForSingleSystem(messages),
-        max_completion_tokens: 140,
+        max_completion_tokens: 110,
       }),
     });
     if (!res.ok) {
@@ -732,7 +732,7 @@ async function generateWidgetReply(
   // --- English (or any fallback): gpt-4o-mini (fast & multilingual) ---
   const completion = await openai.chat.completions.create({
     model: "gpt-4o-mini",
-    max_completion_tokens: 140,
+    max_completion_tokens: 110,
     messages,
   });
   const reply = completion.choices[0]?.message?.content || "I'm sorry, I couldn't process that. Could you try again?";
@@ -1101,19 +1101,100 @@ router.get("/widget/loader.js", async (req, res) => {
     currentAudio.play().catch(function(){ speaking = false; });
   }
 
+  // Split a reply into short utterances on sentence boundaries (Latin and
+  // Devanagari/Indic punctuation). Falls back to a single chunk when there
+  // are no clear breaks.
+  function splitForTTS(text) {
+    if (!text) return [];
+    var raw = String(text).trim();
+    if (!raw) return [];
+    var parts = raw.split(/(?<=[\\.\\?!।॥])\\s+/);
+    var chunks = [];
+    var buf = "";
+    for (var i = 0; i < parts.length; i++) {
+      var p = (parts[i] || "").trim();
+      if (!p) continue;
+      // Glue ultra-short fragments to the previous chunk so we don't waste a
+      // request on "Ok." or "Hi.".
+      if (buf && (p.length < 20 || (buf + " " + p).length < 80)) {
+        buf = (buf + " " + p).trim();
+      } else if (buf) {
+        chunks.push(buf);
+        buf = p;
+      } else {
+        buf = p;
+      }
+    }
+    if (buf) chunks.push(buf);
+    return chunks.length > 0 ? chunks : [raw];
+  }
+
+  // Sentence-parallel TTS: fetch each sentence's audio concurrently and play
+  // in order as soon as each one becomes ready. The first sentence starts
+  // playing in ~1.5-2.5s instead of waiting for the full multi-sentence
+  // synthesis (which used to take 6-10s for long Indic replies).
+  var ttsQueue = [];
+  var ttsPlaying = false;
+  function ttsPlayNext() {
+    if (ttsPlaying) return;
+    if (ttsQueue.length === 0) { speaking = false; return; }
+    var entry = ttsQueue[0];
+    if (!entry.ready) return;
+    ttsQueue.shift();
+    if (!entry.audio) { ttsPlayNext(); return; }
+    ttsPlaying = true;
+    var finalMime = entry.audioMimeType || "audio/mpeg";
+    if (currentAudio) { try { currentAudio.pause(); } catch(e){} }
+    currentAudio = new Audio("data:" + finalMime + ";base64," + entry.audio);
+    currentAudio.onended = currentAudio.onerror = function(){
+      currentAudio = null;
+      ttsPlaying = false;
+      ttsPlayNext();
+    };
+    currentAudio.play().catch(function(){
+      currentAudio = null;
+      ttsPlaying = false;
+      ttsPlayNext();
+    });
+  }
+  function ttsCancelAll() {
+    ttsQueue.length = 0;
+    if (currentAudio) { try { currentAudio.pause(); } catch(e){} }
+    currentAudio = null;
+    ttsPlaying = false;
+    speaking = false;
+  }
   function speakReply(text, langOverride) {
     if (!text) return;
     speaking = true;
+    ttsCancelAll();
+    speaking = true;
     var ttsLang = langOverride || ((configuredLang === "auto") ? sessionLang : agentLang);
-    fetch(BASE_URL + "/api/widget/tts", {
-      method: "POST",
-      headers: {"Content-Type":"application/json"},
-      body: JSON.stringify({ text: text, language: ttsLang, apiKey: API_KEY })
-    }).then(function(r){ return r.json(); }).then(function(data) {
-      if (data.audio) {
-        playReplyAudio(data.audio, data.audioMimeType);
-      } else { speaking = false; }
-    }).catch(function(){ speaking = false; });
+    var chunks = splitForTTS(text);
+    // Pre-allocate slot per chunk so order is preserved even if requests
+    // resolve out-of-order.
+    for (var i = 0; i < chunks.length; i++) {
+      ttsQueue.push({ ready: false, audio: null, audioMimeType: null });
+    }
+    var queueRef = ttsQueue;
+    chunks.forEach(function(chunk, idx) {
+      var slot = queueRef[idx];
+      fetch(BASE_URL + "/api/widget/tts", {
+        method: "POST",
+        headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({ text: chunk, language: ttsLang, apiKey: API_KEY })
+      }).then(function(r){ return r.json(); }).then(function(data) {
+        if (!slot) return;
+        slot.audio = data && data.audio ? data.audio : null;
+        slot.audioMimeType = data && data.audioMimeType ? data.audioMimeType : "audio/mpeg";
+        slot.ready = true;
+        ttsPlayNext();
+      }).catch(function(){
+        if (!slot) return;
+        slot.ready = true;
+        ttsPlayNext();
+      });
+    });
   }
 
   function sendMessage(msg, isVoice) {
