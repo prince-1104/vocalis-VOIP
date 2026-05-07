@@ -325,9 +325,10 @@ async function resolveEffectiveWidgetLanguage(
   message: string,
   history: { role: string; content: string }[],
   sessionLanguage?: string | null,
-): Promise<{ lang: string; source: string }> {
+): Promise<{ lang: LangCode; source: string }> {
   if (configuredLanguage && configuredLanguage !== "auto") {
-    return { lang: configuredLanguage, source: "configured" };
+    const cfg = ALL_LANG_CODES.find(c => c === configuredLanguage);
+    if (cfg) return { lang: cfg, source: "configured" };
   }
 
   const explicit = detectExplicitLanguageRequest(message);
