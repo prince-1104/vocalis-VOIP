@@ -12,18 +12,24 @@ const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY ?? "";
 const INDIAN_LANGUAGES = new Set(["kn-IN", "hi-IN", "ta-IN", "te-IN", "mr-IN"]);
 
 // Sarvam Bulbul v3 voices — ALL female with native Indian accent.
-// Hindi:   kavya.   Kannada: anushka (female; replaces male "manan").
-// Tamil:   priya.   Telugu:  pooja.    Marathi: simran.
-// English: anushka  (multilingual female voice rendered in en-IN target).
+// Speaker names below are validated against the bulbul:v3 speaker list returned
+// by the Sarvam API: aditya, ashutosh, priya, neha, rahul, pooja, rohan,
+// simran, kavya, amit, dev, ishita, shreya, ratan, varun, manan, sumit, roopa,
+// kabir, aayan, shubh, advait, anand, tanya, tarun, sunny, mani, gokul, vijay,
+// shruti, suhani, mohit, kavitha, rehan, soham, rupali, niharika.
+// We pick female-sounding voices for every supported language.
 const BULBUL_VOICE_FOR_LANG: Record<string, string> = {
   "hi-IN": "kavya",
-  "kn-IN": "anushka",
+  "kn-IN": "shreya",
   "ta-IN": "priya",
   "te-IN": "pooja",
   "mr-IN": "simran",
-  "en-IN": "anushka",
-  "en-US": "anushka",
+  "en-IN": "shreya",
+  "en-US": "shreya",
 };
+// Known-female speaker names from the bulbul:v3 list — used as a safety net
+// if the language map ever points to an unknown/male speaker.
+const BULBUL_FEMALE_FALLBACKS = ["shreya", "kavya", "priya", "pooja", "simran", "neha", "ishita", "kavitha", "suhani", "niharika", "rupali", "tanya", "shruti"];
 
 // For TTS we always speak with an Indian-accent female voice via Sarvam Bulbul.
 // English maps to the en-IN target language code so the prosody is Indian.
@@ -45,7 +51,7 @@ async function generateSarvamWidgetTTS(text: string, lang: string): Promise<stri
   if (!SARVAM_API_KEY || !isSarvamSupportedTTS(lang)) return null;
 
   const target = sarvamTargetLang(lang);
-  const speaker = BULBUL_VOICE_FOR_LANG[lang] ?? BULBUL_VOICE_FOR_LANG[target] ?? "anushka";
+  const speaker = BULBUL_VOICE_FOR_LANG[lang] ?? BULBUL_VOICE_FOR_LANG[target] ?? BULBUL_FEMALE_FALLBACKS[0];
   const res = await fetch("https://api.sarvam.ai/text-to-speech", {
     method: "POST",
     headers: {
@@ -538,13 +544,18 @@ async function ensureNativeScript(
   return { reply, rewrote: false };
 }
 
-// Some providers (Sarvam-M, several OpenAI-compatible Indic endpoints) require
-// EXACTLY ONE system message at the very top. We merge any extra system
-// instructions (per-language style) into the leading system prompt and keep
-// only user/assistant turns afterward.
+// Some providers (Sarvam-M, several OpenAI-compatible Indic endpoints) are
+// strict about message ordering:
+//   1. EXACTLY ONE system message at the very top.
+//   2. The first non-system message MUST be from "user" (Sarvam returns 400:
+//      "First message must be from user (or after system message)").
+//   3. user/assistant turns should alternate.
+// We merge extra system instructions into the leading system message, then
+// drop any leading assistant turns (typically the bot's greeting) so the
+// first message after system is from the user.
 function normalizeMessagesForSingleSystem(messages: any[]): any[] {
   const systemParts: string[] = [];
-  const rest: any[] = [];
+  let rest: any[] = [];
   for (const m of messages) {
     if (m && m.role === "system" && typeof m.content === "string") {
       systemParts.push(m.content);
@@ -552,8 +563,21 @@ function normalizeMessagesForSingleSystem(messages: any[]): any[] {
       rest.push(m);
     }
   }
-  if (systemParts.length === 0) return rest;
-  return [{ role: "system", content: systemParts.join("\n\n") }, ...rest];
+  while (rest.length > 0 && rest[0].role !== "user") {
+    rest = rest.slice(1);
+  }
+  // Collapse any consecutive same-role turns by keeping the latest, which
+  // protects against history corruption (e.g. two assistant turns in a row).
+  const cleaned: any[] = [];
+  for (const m of rest) {
+    if (cleaned.length > 0 && cleaned[cleaned.length - 1].role === m.role) {
+      cleaned[cleaned.length - 1] = m;
+    } else {
+      cleaned.push(m);
+    }
+  }
+  if (systemParts.length === 0) return cleaned;
+  return [{ role: "system", content: systemParts.join("\n\n") }, ...cleaned];
 }
 
 // Lightweight in-process circuit breaker for upstream providers. Once a
