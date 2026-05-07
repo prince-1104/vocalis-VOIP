@@ -754,12 +754,17 @@ async function getAgentByWidgetKey(apiKey: string) {
 }
 
 async function buildSystemPromptForWidget(userId: number, agentConfig: any): Promise<string> {
-  const [trainingData, scripts] = await Promise.all([
-    db.select().from(trainingDataTable).where(eq(trainingDataTable.userId, userId)).limit(KB_MAX_ENTRIES),
+  const [trainingDataRaw, scripts] = await Promise.all([
+    db.select().from(trainingDataTable).where(eq(trainingDataTable.userId, userId)).limit(KB_MAX_ENTRIES * 4),
     db.select().from(callingScriptsTable)
       .where(and(eq(callingScriptsTable.userId, userId), eq(callingScriptsTable.isDefault, true)))
       .limit(1),
   ]);
+  // Video-link entries are metadata used for the YouTube suggestion feature —
+  // exclude them from the knowledge-base prompt so they don't pollute it.
+  const trainingData = trainingDataRaw
+    .filter((td: any) => td.type !== "video_link")
+    .slice(0, KB_MAX_ENTRIES);
 
   let system = `You are ${agentConfig.agentName || "SalesBot"}, an AI sales representative`;
   if (agentConfig.personality) system += ` with a ${agentConfig.personality} personality`;
@@ -817,6 +822,136 @@ router.get("/widget/config/:apiKey", async (req, res) => {
     personality: agent.personality,
   });
 });
+
+// ── Video-link suggestion ────────────────────────────────────────────────
+// Tenants can store curated video tutorials by adding training entries with
+// type='video_link'. The `content` column holds JSON like:
+//   { "title": "...", "link_en": "...", "link_kn": "...",
+//     "search_terms": ["how to apply", "ekhata kaise apply", ...] }
+// On every chat turn we score the user's message against these search terms
+// and append the best match (if confidence is high enough) to the reply.
+
+interface VideoLinkEntry {
+  title: string;
+  link_en?: string;
+  link_kn?: string;
+  search_terms?: string[];
+}
+
+interface CachedVideos {
+  fetchedAt: number;
+  videos: VideoLinkEntry[];
+}
+
+const VIDEO_CACHE_TTL_MS = 5 * 60 * 1000;
+const videoCache = new Map<number, CachedVideos>();
+
+async function loadVideoLinks(userId: number): Promise<VideoLinkEntry[]> {
+  const cached = videoCache.get(userId);
+  if (cached && Date.now() - cached.fetchedAt < VIDEO_CACHE_TTL_MS) {
+    return cached.videos;
+  }
+  const rows = await db
+    .select()
+    .from(trainingDataTable)
+    .where(and(eq(trainingDataTable.userId, userId), eq(trainingDataTable.type, "video_link")));
+  const videos: VideoLinkEntry[] = [];
+  for (const r of rows) {
+    try {
+      const parsed = JSON.parse(r.content);
+      if (parsed && typeof parsed.title === "string") {
+        videos.push(parsed);
+      }
+    } catch {
+      // ignore malformed entries
+    }
+  }
+  videoCache.set(userId, { fetchedAt: Date.now(), videos });
+  return videos;
+}
+
+function tokenizeForSearch(text: string): string[] {
+  return text
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .split(/\s+/)
+    .filter(t => t.length > 1);
+}
+
+function scoreVideoMatch(messageTokens: string[], video: VideoLinkEntry): number {
+  if (!messageTokens.length) return 0;
+  const messageSet = new Set(messageTokens);
+  const messageJoined = " " + messageTokens.join(" ") + " ";
+  const candidates: string[] = [video.title, ...(video.search_terms ?? [])];
+  let best = 0;
+  for (const c of candidates) {
+    if (!c) continue;
+    const lc = c.toLowerCase();
+    // Phrase match: very strong signal.
+    if (lc.length > 4 && messageJoined.includes(" " + lc + " ")) {
+      best = Math.max(best, 5 + Math.min(3, Math.floor(lc.length / 8)));
+      continue;
+    }
+    const candTokens = tokenizeForSearch(c);
+    if (!candTokens.length) continue;
+    let overlap = 0;
+    for (const t of candTokens) {
+      if (messageSet.has(t)) overlap += 1;
+    }
+    // Coverage of the candidate's tokens — most of them must be in the
+    // message, otherwise short candidates over-score on common words.
+    const coverage = overlap / candTokens.length;
+    if (overlap >= 2 && coverage >= 0.5) {
+      best = Math.max(best, overlap + coverage);
+    } else if (overlap >= 1 && coverage >= 0.66 && candTokens.length >= 2) {
+      best = Math.max(best, overlap + coverage * 0.5);
+    }
+  }
+  return best;
+}
+
+async function findRelevantVideo(
+  userId: number,
+  message: string,
+): Promise<VideoLinkEntry | null> {
+  const videos = await loadVideoLinks(userId);
+  if (!videos.length) return null;
+  const tokens = tokenizeForSearch(message);
+  if (!tokens.length) return null;
+  let best: { v: VideoLinkEntry; score: number } | null = null;
+  for (const v of videos) {
+    const s = scoreVideoMatch(tokens, v);
+    if (s > 0 && (!best || s > best.score)) best = { v, score: s };
+  }
+  // Threshold: require a meaningful overlap. Tuned so that "how to apply
+  // for ekhata" matches "How to Apply for e-Khata" but a generic greeting
+  // ("hello") never does.
+  if (best && best.score >= 2.5) return best.v;
+  return null;
+}
+
+function pickVideoLink(video: VideoLinkEntry, language: string): string | null {
+  if (language === "kn-IN" && video.link_kn) return video.link_kn;
+  if (video.link_en) return video.link_en;
+  return video.link_kn ?? null;
+}
+
+function videoSuggestionLine(language: string, link: string): string {
+  switch (language) {
+    case "kn-IN":
+      return `\n\n📺 ವಿಡಿಯೋ ನೋಡಿ: ${link}`;
+    case "hi-IN":
+      return `\n\n📺 वीडियो देखें: ${link}`;
+    case "ta-IN":
+      return `\n\n📺 வீடியோ பாருங்கள்: ${link}`;
+    case "te-IN":
+      return `\n\n📺 వీడియో చూడండి: ${link}`;
+    case "mr-IN":
+      return `\n\n📺 व्हिडिओ पहा: ${link}`;
+    default:
+      return `\n\n📺 Watch on YouTube: ${link}`;
+  }
+}
 
 router.post("/widget/chat", async (req, res) => {
   const { apiKey, message, history, includeAudio, sessionLanguage } = req.body as {
@@ -879,19 +1014,39 @@ router.post("/widget/chat", async (req, res) => {
     billedCostUsd: "0",
   }).catch(() => {});
 
+  // Suggest a relevant tutorial video if the user's message matches one of
+  // the curated topics. We append AFTER the LLM reply so the link survives
+  // even when the model is verbose.
+  let suggestedVideo: { title: string; link: string } | null = null;
+  try {
+    const matched = await findRelevantVideo(agent.userId, message);
+    if (matched) {
+      const link = pickVideoLink(matched, effectiveLanguage);
+      if (link) {
+        reply = `${reply.trim()}${videoSuggestionLine(effectiveLanguage, link)}`;
+        suggestedVideo = { title: matched.title, link };
+      }
+    }
+  } catch (e) {
+    console.error("[widget/chat] video match error:", e);
+  }
+
   const language = effectiveLanguage;
   let audio: string | null = null;
   let provider: "sarvam" | "openai" | null = null;
   let audioMimeType = "audio/mpeg";
 
   if (includeAudio) {
-    const ttsResult = await synthesizeWidgetTTS(reply, agent.voice || "nova", language);
+    // Strip the appended video-suggestion line and bare URLs so TTS doesn't
+    // read out "h-t-t-p-s colon slash slash..." in the middle of the reply.
+    const ttsText = reply.split("📺")[0].replace(/https?:\/\/\S+/g, "").trim() || reply;
+    const ttsResult = await synthesizeWidgetTTS(ttsText, agent.voice || "nova", language);
     audio = ttsResult.audio;
     provider = ttsResult.provider;
     audioMimeType = ttsResult.mimeType;
   }
 
-  console.log(`[widget/chat] configured=${agent.language} effective=${language} source=${resolved.source} session=${sessionLanguage ?? "-"} model=${modelUsed} tts=${provider ?? "none"} includeAudio=${!!includeAudio}`);
+  console.log(`[widget/chat] configured=${agent.language} effective=${language} source=${resolved.source} session=${sessionLanguage ?? "-"} model=${modelUsed} tts=${provider ?? "none"} includeAudio=${!!includeAudio} video=${suggestedVideo ? suggestedVideo.title : "none"}`);
 
   res.json({
     reply,
@@ -902,6 +1057,7 @@ router.post("/widget/chat", async (req, res) => {
     modelUsed,
     audio,
     provider,
+    video: suggestedVideo,
     audioMimeType,
   });
 });
@@ -1071,9 +1227,28 @@ router.get("/widget/loader.js", async (req, res) => {
   document.body.appendChild(fab);
   document.body.appendChild(box);
 
+  function escapeHtml(s) {
+    return String(s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+  function linkifyHtml(text) {
+    var safe = escapeHtml(text);
+    return safe.replace(/(https?:\\/\\/[^\\s<]+)/g, function(url) {
+      return '<a href="' + url + '" target="_blank" rel="noopener noreferrer" style="color:#a78bfa;text-decoration:underline;word-break:break-all">' + url + '</a>';
+    });
+  }
   function addMsg(text, who, isVoice) {
     var cls = "dw-msg " + who + (isVoice && who === "user" ? " voice" : "");
-    var m = el("div", {class:cls}, text);
+    var m = el("div", {class:cls});
+    if (who === "bot") {
+      m.innerHTML = linkifyHtml(text).replace(/\\n/g, "<br>");
+    } else {
+      m.textContent = text;
+    }
     msgs.appendChild(m);
     msgs.scrollTop = msgs.scrollHeight;
   }
@@ -1170,7 +1345,13 @@ router.get("/widget/loader.js", async (req, res) => {
     ttsCancelAll();
     speaking = true;
     var ttsLang = langOverride || ((configuredLang === "auto") ? sessionLang : agentLang);
-    var chunks = splitForTTS(text);
+    // Strip any video-suggestion line (📺 ...) and bare URLs so the TTS engine
+    // doesn't read out "h-t-t-p-s colon slash slash..." in the middle of an
+    // otherwise natural reply.
+    var ttsText = text.split("📺")[0].trim();
+    ttsText = ttsText.replace(/https?:\\/\\/\\S+/g, "");
+    if (!ttsText) return;
+    var chunks = splitForTTS(ttsText);
     // Pre-allocate slot per chunk so order is preserved even if requests
     // resolve out-of-order.
     for (var i = 0; i < chunks.length; i++) {
