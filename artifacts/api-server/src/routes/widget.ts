@@ -837,6 +837,10 @@ interface VideoLinkEntry {
   link_kn?: string;
   search_terms?: string[];
 }
+interface VideoCandidate {
+  video: VideoLinkEntry;
+  score: number;
+}
 
 interface CachedVideos {
   fetchedAt: number;
@@ -845,6 +849,32 @@ interface CachedVideos {
 
 const VIDEO_CACHE_TTL_MS = 5 * 60 * 1000;
 const videoCache = new Map<number, CachedVideos>();
+const VIDEO_SUGGESTION_MARKER = "📺";
+const SEARCH_STOPWORDS = new Set([
+  "a", "an", "and", "are", "as", "at", "be", "between", "by", "for", "from", "how",
+  "i", "if", "in", "is", "it", "me", "my", "new", "of", "on", "or", "the", "to",
+  "what", "where", "why", "with", "you", "your",
+  "alli", "dalli", "madhu", "matthu", "iddu", "ide", "enu", "yenu", "hogona",
+  "khata", "e", "ekhata", "bbmp",
+]);
+
+function normalizeSearchText(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/\be[\s-]*khata\b/g, "ekhata")
+    .replace(/\bnew[\s-]*khata\b/g, "newkhata")
+    .replace(/\bkahat\b/g, "khata")
+    .replace(/\bekata\b/g, "ekhata")
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function stripVideoSuggestionText(text: string): string {
+  if (!text) return text;
+  const main = text.split(VIDEO_SUGGESTION_MARKER)[0];
+  return main.replace(/https?:\/\/\S+/g, "").trim();
+}
 
 async function loadVideoLinks(userId: number): Promise<VideoLinkEntry[]> {
   const cached = videoCache.get(userId);
@@ -871,11 +901,10 @@ async function loadVideoLinks(userId: number): Promise<VideoLinkEntry[]> {
 }
 
 function tokenizeForSearch(text: string): string[] {
-  return text
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+  const normalized = normalizeSearchText(text);
+  return normalized
     .split(/\s+/)
-    .filter(t => t.length > 1);
+    .filter(t => t.length > 1 && !SEARCH_STOPWORDS.has(t));
 }
 
 function scoreVideoMatch(messageTokens: string[], video: VideoLinkEntry): number {
@@ -886,7 +915,8 @@ function scoreVideoMatch(messageTokens: string[], video: VideoLinkEntry): number
   let best = 0;
   for (const c of candidates) {
     if (!c) continue;
-    const lc = c.toLowerCase();
+    const lc = normalizeSearchText(c);
+    if (!lc) continue;
     // Phrase match: very strong signal.
     if (lc.length > 4 && messageJoined.includes(" " + lc + " ")) {
       best = Math.max(best, 5 + Math.min(3, Math.floor(lc.length / 8)));
@@ -918,16 +948,58 @@ async function findRelevantVideo(
   if (!videos.length) return null;
   const tokens = tokenizeForSearch(message);
   if (!tokens.length) return null;
-  let best: { v: VideoLinkEntry; score: number } | null = null;
+  const ranked: VideoCandidate[] = [];
   for (const v of videos) {
     const s = scoreVideoMatch(tokens, v);
-    if (s > 0 && (!best || s > best.score)) best = { v, score: s };
+    if (s > 0) ranked.push({ video: v, score: s });
   }
+  ranked.sort((a, b) => b.score - a.score);
+  if (!ranked.length) return null;
+  const best = ranked[0];
   // Threshold: require a meaningful overlap. Tuned so that "how to apply
   // for ekhata" matches "How to Apply for e-Khata" but a generic greeting
   // ("hello") never does.
-  if (best && best.score >= 2.5) return best.v;
-  return null;
+  if (best.score < 2.5) return null;
+
+  // Fast path: clear winner, avoid extra LLM hop.
+  const second = ranked[1];
+  if (!second || best.score - second.score >= 1.2) return best.video;
+
+  // Ambiguous path: rerank top-N with a tiny LLM call.
+  const top = ranked.slice(0, 5);
+  try {
+    const userLine = normalizeSearchText(message).slice(0, 220);
+    const options = top.map((c, i) => ({
+      idx: i + 1,
+      title: c.video.title,
+      terms: (c.video.search_terms ?? []).slice(0, 8),
+    }));
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      max_completion_tokens: 6,
+      temperature: 0,
+      messages: [
+        {
+          role: "system",
+          content:
+            "Pick the single best matching BBMP e-Khata video option for the query. " +
+            "Return ONLY one digit: 0 if none fit, else 1-5.",
+        },
+        {
+          role: "user",
+          content: `Query: ${userLine}\nOptions: ${JSON.stringify(options)}`,
+        },
+      ],
+    });
+    const raw = completion.choices?.[0]?.message?.content?.trim() || "";
+    const n = Number((raw.match(/[0-5]/) || [])[0]);
+    if (Number.isInteger(n) && n >= 1 && n <= top.length) {
+      return top[n - 1].video;
+    }
+  } catch {
+    // fall through to lexical best
+  }
+  return best.video;
 }
 
 function pickVideoLink(video: VideoLinkEntry, language: string): string | null {
@@ -974,10 +1046,16 @@ router.post("/widget/chat", async (req, res) => {
   }
 
   const safeHistory = Array.isArray(history) ? history : [];
+  const normalizedHistory = safeHistory.map((h: any) => ({
+    role: h?.role,
+    content: typeof h?.content === "string"
+      ? (h.role === "assistant" ? stripVideoSuggestionText(h.content) : h.content)
+      : "",
+  }));
   const resolved = await resolveEffectiveWidgetLanguage(
     agent.language,
     message,
-    safeHistory,
+    normalizedHistory,
     sessionLanguage,
   );
   const effectiveLanguage = resolved.lang;
@@ -990,7 +1068,7 @@ router.post("/widget/chat", async (req, res) => {
   try {
     const generation = await generateWidgetReply(
       systemPrompt,
-      safeHistory,
+      normalizedHistory,
       message,
       effectiveLanguage,
     );
@@ -1039,7 +1117,7 @@ router.post("/widget/chat", async (req, res) => {
   if (includeAudio) {
     // Strip the appended video-suggestion line and bare URLs so TTS doesn't
     // read out "h-t-t-p-s colon slash slash..." in the middle of the reply.
-    const ttsText = reply.split("📺")[0].replace(/https?:\/\/\S+/g, "").trim() || reply;
+    const ttsText = stripVideoSuggestionText(reply) || reply;
     const ttsResult = await synthesizeWidgetTTS(ttsText, agent.voice || "nova", language);
     audio = ttsResult.audio;
     provider = ttsResult.provider;

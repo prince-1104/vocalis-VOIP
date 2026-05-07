@@ -49,6 +49,76 @@ async function extractText(file: Express.Multer.File): Promise<string> {
   return file.buffer.toString("utf-8");
 }
 
+type JsonTrainingShape = {
+  type?: string;
+  title?: string;
+  content?: string;
+  queries?: { english?: string[]; hindi?: string[]; kannada?: string[] };
+  answers?: { english?: string; hindi?: string; kannada?: string };
+  videos?: { english_video?: string; kannada_video?: string };
+};
+
+function parseStructuredTrainingJson(jsonText: string, fallbackType: string): Array<{ type: string; title: string; content: string }> | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(jsonText);
+  } catch {
+    return null;
+  }
+
+  const list = Array.isArray(parsed) ? parsed : (parsed && typeof parsed === "object" ? [parsed] : []);
+  if (!list.length) return null;
+
+  const rows: Array<{ type: string; title: string; content: string }> = [];
+  for (const raw of list) {
+    if (!raw || typeof raw !== "object") continue;
+    const item = raw as JsonTrainingShape;
+    const title = (item.title || "").trim();
+    if (!title) continue;
+
+    const type = (item.type || fallbackType || "product_info").trim();
+
+    // Direct format support: [{ type, title, content }]
+    if (typeof item.content === "string" && item.content.trim()) {
+      rows.push({ type, title, content: item.content.trim() });
+      continue;
+    }
+
+    // Rich multilingual format support:
+    // [{ type, title, queries, answers, videos }]
+    const ansEn = (item.answers?.english || "").trim();
+    const ansHi = (item.answers?.hindi || "").trim();
+    const ansKn = (item.answers?.kannada || "").trim();
+    if (!ansEn && !ansHi && !ansKn) continue;
+
+    const qEn = item.queries?.english || [];
+    const qHi = item.queries?.hindi || [];
+    const qKn = item.queries?.kannada || [];
+    const vEn = (item.videos?.english_video || "").trim();
+    const vKn = (item.videos?.kannada_video || "").trim();
+
+    const sections = [
+      ansEn ? `English Answer:\n${ansEn}` : "",
+      ansHi ? `Hindi Answer:\n${ansHi}` : "",
+      ansKn ? `Kannada Answer:\n${ansKn}` : "",
+      qEn.length ? `English Queries:\n${qEn.map(q => `- ${q}`).join("\n")}` : "",
+      qHi.length ? `Hindi Queries:\n${qHi.map(q => `- ${q}`).join("\n")}` : "",
+      qKn.length ? `Kannada Queries:\n${qKn.map(q => `- ${q}`).join("\n")}` : "",
+      vEn ? `Suggested YouTube (English): ${vEn}` : "",
+      vKn ? `Suggested YouTube (Kannada): ${vKn}` : "",
+      "Rule: Suggest at most one best-fit video and never repeat the same link in one reply.",
+    ].filter(Boolean);
+
+    rows.push({
+      type,
+      title,
+      content: sections.join("\n\n").trim(),
+    });
+  }
+
+  return rows.length ? rows : null;
+}
+
 function chunkText(text: string, maxChars = 1500): string[] {
   const paragraphs = text.split(/\n{2,}/).map(p => p.trim()).filter(Boolean);
   const chunks: string[] = [];
@@ -102,6 +172,35 @@ router.post("/training/upload", upload.single("file"), async (req, res) => {
   const file = req.file;
   const overrideType = (req.body.type as string) || inferType(file.originalname);
   const baseName = file.originalname.replace(/\.[^.]+$/, "");
+  const ext = file.originalname.split(".").pop()?.toLowerCase();
+
+  if (file.mimetype === "application/json" || ext === "json") {
+    try {
+      const jsonText = file.buffer.toString("utf-8");
+      const structuredRows = parseStructuredTrainingJson(jsonText, overrideType);
+      if (structuredRows && structuredRows.length) {
+        const insertedRows = await Promise.all(
+          structuredRows.map(row =>
+            db.insert(trainingDataTable).values({
+              userId,
+              type: row.type,
+              title: row.title,
+              content: row.content,
+            }).returning()
+          )
+        );
+        res.status(201).json({
+          created: insertedRows.length,
+          items: insertedRows.map(r => r[0]),
+          message: `Created ${insertedRows.length} knowledge base ${insertedRows.length === 1 ? "entry" : "entries"} from structured JSON "${file.originalname}".`,
+        });
+        return;
+      }
+    } catch (err: any) {
+      res.status(422).json({ error: `Could not parse JSON file: ${err.message}` });
+      return;
+    }
+  }
 
   let rawText: string;
   try {
