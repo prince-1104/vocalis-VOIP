@@ -386,10 +386,51 @@ function normalizeIndicReply(reply: string, language: string): string {
     .trim();
 }
 
+// Some providers (Sarvam-M, several OpenAI-compatible Indic endpoints) require
+// EXACTLY ONE system message at the very top. We merge any extra system
+// instructions (per-language style) into the leading system prompt and keep
+// only user/assistant turns afterward.
+function normalizeMessagesForSingleSystem(messages: any[]): any[] {
+  const systemParts: string[] = [];
+  const rest: any[] = [];
+  for (const m of messages) {
+    if (m && m.role === "system" && typeof m.content === "string") {
+      systemParts.push(m.content);
+    } else if (m && m.role) {
+      rest.push(m);
+    }
+  }
+  if (systemParts.length === 0) return rest;
+  return [{ role: "system", content: systemParts.join("\n\n") }, ...rest];
+}
+
+// Lightweight in-process circuit breaker for upstream providers. Once a
+// provider returns a hard "we are unusable" error (auth/billing), we stop
+// hitting it for `cooldownMs` so we don't spam logs and waste latency on every
+// turn — the fallback chain takes over instantly.
+type BreakerState = { until: number; reason: string };
+const providerBreakers: Record<string, BreakerState> = {};
+function isProviderTripped(name: string): string | null {
+  const b = providerBreakers[name];
+  if (!b) return null;
+  if (Date.now() < b.until) return b.reason;
+  delete providerBreakers[name];
+  return null;
+}
+function tripProvider(name: string, reason: string, cooldownMs: number) {
+  providerBreakers[name] = { until: Date.now() + cooldownMs, reason };
+  console.warn(`[widget/chat] circuit-break ${name} for ${cooldownMs}ms: ${reason}`);
+}
+
 async function callDeepSeekChat(
   messages: any[],
 ): Promise<string | null> {
   if (!DEEPSEEK_API_KEY) return null;
+  const tripped = isProviderTripped("deepseek");
+  if (tripped) {
+    console.log(`[widget/chat] DeepSeek skipped (circuit open: ${tripped})`);
+    return null;
+  }
   try {
     const res = await fetch("https://api.deepseek.com/chat/completions", {
       method: "POST",
@@ -399,13 +440,20 @@ async function callDeepSeekChat(
       },
       body: JSON.stringify({
         model: "deepseek-chat",
-        messages,
+        messages: normalizeMessagesForSingleSystem(messages),
         max_tokens: 140,
         temperature: 0.4,
       }),
     });
     if (!res.ok) {
-      console.error(`[widget/chat] DeepSeek failed: ${res.status} ${await res.text()}`);
+      const body = await res.text();
+      console.error(`[widget/chat] DeepSeek failed: ${res.status} ${body}`);
+      // Insufficient balance / auth → don't hammer the provider for 10 minutes
+      if (res.status === 401 || res.status === 402 || res.status === 403) {
+        tripProvider("deepseek", `${res.status} ${body.slice(0, 120)}`, 10 * 60 * 1000);
+      } else if (res.status === 429) {
+        tripProvider("deepseek", "rate-limit", 60 * 1000);
+      }
       return null;
     }
     const data = await res.json() as any;
@@ -420,6 +468,11 @@ async function callSarvamChat(
   messages: any[],
 ): Promise<string | null> {
   if (!SARVAM_API_KEY) return null;
+  const tripped = isProviderTripped("sarvam-m");
+  if (tripped) {
+    console.log(`[widget/chat] Sarvam-M skipped (circuit open: ${tripped})`);
+    return null;
+  }
   try {
     const res = await fetch("https://api.sarvam.ai/v1/chat/completions", {
       method: "POST",
@@ -429,12 +482,18 @@ async function callSarvamChat(
       },
       body: JSON.stringify({
         model: "sarvam-m",
-        messages,
+        messages: normalizeMessagesForSingleSystem(messages),
         max_completion_tokens: 140,
       }),
     });
     if (!res.ok) {
-      console.error(`[widget/chat] Sarvam-M failed: ${res.status} ${await res.text()}`);
+      const body = await res.text();
+      console.error(`[widget/chat] Sarvam-M failed: ${res.status} ${body}`);
+      if (res.status === 401 || res.status === 402 || res.status === 403) {
+        tripProvider("sarvam-m", `${res.status} ${body.slice(0, 120)}`, 10 * 60 * 1000);
+      } else if (res.status === 429) {
+        tripProvider("sarvam-m", "rate-limit", 60 * 1000);
+      }
       return null;
     }
     const data = await res.json() as any;
