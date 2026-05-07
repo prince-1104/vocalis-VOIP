@@ -96,7 +96,10 @@ const KB_ENTRY_MAX_CHARS = 280;
 const KB_MAX_ENTRIES = 4;
 
 const SUPPORTED_LANGUAGES_LINE =
-  "You support these languages and MUST be able to converse in any of them: English (en-US), Hindi (hi-IN), Kannada (kn-IN), Tamil (ta-IN), Telugu (te-IN), and Marathi (mr-IN). NEVER tell the user you only speak English or Hindi. If the user asks for Kannada / Tamil / Telugu / Marathi, switch to that language immediately and continue the entire conversation in it.";
+  "You support these languages and MUST be able to converse in any of them: English (en-US), Hindi (hi-IN), Kannada (kn-IN), Tamil (ta-IN), Telugu (te-IN), and Marathi (mr-IN). NEVER tell the user you only speak English or Hindi. If the user asks for Kannada / Tamil / Telugu / Marathi (in any script — e.g. 'in kannada', 'kannada me', 'ಕನ್ನಡದಲ್ಲಿ', 'कन्नड में', 'इन कनाडा लैंग्वेज'), switch to that language immediately and continue the entire conversation in it. NEVER ask the user to clarify which language they want when they have already named one.";
+
+const TRANSLITERATION_LINE =
+  "INPUT UNDERSTANDING: Users may transliterate freely — they might write English words using Devanagari/Kannada script (e.g. 'हाउ टू क्रिएट ए न्यू खाता' = 'how to create a new khata'), or write Indic words using Roman letters (e.g. 'nanage khata beku' = Kannada). DECODE their intent across scripts before answering. NEVER reply with a clarification question if the user's intent is reasonably clear — answer the actual question. Only ask for clarification when the message is genuinely empty or nonsensical.";
 
 // IMPORTANT: Indian-language replies MUST be in NATIVE SCRIPT (not romanized).
 // Sarvam Bulbul v3 TTS pronounces native scripts perfectly, but treats romanized
@@ -123,37 +126,117 @@ function buildScriptInstruction(language?: string | null): string {
   return "";
 }
 
+type LangCode = "en-US" | "hi-IN" | "kn-IN" | "ta-IN" | "te-IN" | "mr-IN";
+const ALL_LANG_CODES: LangCode[] = ["en-US", "hi-IN", "kn-IN", "ta-IN", "te-IN", "mr-IN"];
+
 // Detect language from native (Unicode) script ranges. This is the fastest and
 // most reliable signal — far better than guessing from romanized hints.
-function detectNativeScriptLanguage(text: string): "hi-IN" | "kn-IN" | "ta-IN" | "te-IN" | "mr-IN" | null {
-  if (/[\u0C80-\u0CFF]/.test(text)) return "kn-IN"; // Kannada
-  if (/[\u0B80-\u0BFF]/.test(text)) return "ta-IN"; // Tamil
-  if (/[\u0C00-\u0C7F]/.test(text)) return "te-IN"; // Telugu
-  // Devanagari is shared by Hindi & Marathi. Strong Marathi-specific words first.
-  if (/[\u0900-\u097F]/.test(text)) {
-    if (/(आहे|नाही|पाहिजे|तुम्ही|मला|करतो|कसा)/.test(text)) return "mr-IN";
-    return "hi-IN";
+// Returns the dominant script if it covers a meaningful portion of the message;
+// short stray characters (e.g. "ಕನ್ನಡ" inside an English sentence) shouldn't flip
+// the whole conversation.
+function detectNativeScriptLanguage(text: string): { lang: LangCode; coverage: number } | null {
+  const ranges: Array<{ re: RegExp; lang: LangCode }> = [
+    { re: /[\u0C80-\u0CFF]/g, lang: "kn-IN" },
+    { re: /[\u0B80-\u0BFF]/g, lang: "ta-IN" },
+    { re: /[\u0C00-\u0C7F]/g, lang: "te-IN" },
+    { re: /[\u0900-\u097F]/g, lang: "hi-IN" }, // shared with Marathi
+  ];
+  let best: { lang: LangCode; count: number } | null = null;
+  for (const r of ranges) {
+    const matches = text.match(r.re);
+    const count = matches ? matches.length : 0;
+    if (count > 0 && (!best || count > best.count)) best = { lang: r.lang, count };
+  }
+  if (!best) return null;
+  // Marathi disambiguation in Devanagari range
+  if (best.lang === "hi-IN" && /(आहे|नाही|पाहिजे|तुम्ही|मला|करतो|करते|कसा|कसे|माझ्या|तुझ्या)/.test(text)) {
+    return { lang: "mr-IN", coverage: best.count / Math.max(1, text.length) };
+  }
+  return { lang: best.lang, coverage: best.count / Math.max(1, text.length) };
+}
+
+// Detect an EXPLICIT request to switch language. Works regardless of the script
+// the request itself is written in (e.g. "explain in kannada", "कन्नड में बताओ",
+// "ಕನ್ನಡದಲ್ಲಿ ಹೇಳಿ", "हिंदी में जवाब दो", "इन कनाडा लैंग्वेज", "speak english").
+// Requires both a language name AND a switch-intent cue nearby to avoid false
+// positives like a passing reference to a language.
+function detectExplicitLanguageRequest(text: string): LangCode | null {
+  const t = text;
+  const lower = t.toLowerCase();
+
+  const langPatterns: Array<{ lang: LangCode; res: RegExp[] }> = [
+    {
+      lang: "kn-IN",
+      res: [
+        /\b(kannada|kanada|kannad|kanad)\b/i,
+        /ಕನ್ನಡ/,
+        /कन्नड|कन्नडा|कन्नड़|कनाडा/,
+      ],
+    },
+    {
+      lang: "hi-IN",
+      res: [
+        /\b(hindi|hinglish|hindee)\b/i,
+        /हिन्दी|हिंदी/,
+        /ಹಿಂದಿ/,
+      ],
+    },
+    {
+      lang: "ta-IN",
+      res: [/\b(tamil|tamizh)\b/i, /தமிழ்/, /तमिल/, /ತಮಿಳು/],
+    },
+    {
+      lang: "te-IN",
+      res: [/\b(telugu)\b/i, /తెలుగు/, /तेलुगू|तेलुगु/, /ತೆಲುಗು/],
+    },
+    {
+      lang: "mr-IN",
+      res: [/\b(marathi)\b/i, /मराठी/, /ಮರಾಠಿ/, /மராத்தி/],
+    },
+    {
+      lang: "en-US",
+      res: [
+        /\b(english|englis|inglish|angrezi|angreji|englsh)\b/i,
+        /अंग्रे(जी|ज़ी)|इंग्लिश|इंग्ल/,
+        /ಇಂಗ್ಲಿಷ್|ಆಂಗ್ಲ/,
+        /ஆங்கில|இங்கிலீஷ்/,
+      ],
+    },
+  ];
+
+  // Switch-intent cues across scripts/languages — must appear somewhere in the
+  // message alongside a language name for us to treat it as a real request.
+  const intentRe = new RegExp(
+    [
+      // English/Romanized
+      "\\b(in|into|to|reply|answer|speak|talk|switch|change|use|explain|tell|say|translate|please|me|mein|me\\s+samjhao|me\\s+bata|dalli|language|lang)\\b",
+      // Hindi/Devanagari
+      "में|मे|में\\s|बताओ|समझाओ|बोलो|बोल|जवाब|दो|करो|कीजिए|भाषा|लैंग्वेज|बात",
+      // Kannada
+      "ದಲ್ಲಿ|ಹೇಳಿ|ಹೇಳು|ಮಾತಾಡಿ|ಮಾತು|ಭಾಷೆ|ಬದಲಿಸಿ",
+      // Tamil
+      "மொழி|பேசு|சொல்",
+      // Telugu
+      "భాష|మాట్లాడు|చెప్పు",
+      // Marathi
+      "मध्ये|बोला|भाषा|सांगा",
+    ].join("|"),
+    "i",
+  );
+
+  // First, very explicit phrases like "in <language>" / "<language> me".
+  for (const { lang, res } of langPatterns) {
+    for (const re of res) {
+      if (re.test(t) || re.test(lower)) {
+        if (intentRe.test(t) || intentRe.test(lower)) return lang;
+      }
+    }
   }
   return null;
 }
 
-function detectRomanizedIndicLanguage(text: string): "hi-IN" | "kn-IN" | "ta-IN" | "te-IN" | "mr-IN" | null {
-  const native = detectNativeScriptLanguage(text);
-  if (native) return native;
-
+function detectRomanizedHints(text: string): { lang: LangCode; score: number } | null {
   const lower = text.toLowerCase();
-
-  const explicitMentions: Array<[RegExp, "hi-IN" | "kn-IN" | "ta-IN" | "te-IN" | "mr-IN"]> = [
-    [/\b(kannada|kanada)\b/, "kn-IN"],
-    [/\b(hindi|hindii)\b/, "hi-IN"],
-    [/\b(tamil|tamizh)\b/, "ta-IN"],
-    [/\b(telugu)\b/, "te-IN"],
-    [/\b(marathi)\b/, "mr-IN"],
-  ];
-  for (const [pattern, lang] of explicitMentions) {
-    if (pattern.test(lower)) return lang;
-  }
-
   const kannadaHints = [
     "nanag", "nanage", "nanu", "nanna", "beku", "bekagittu", "bagge", "yaake", "yake",
     "yenu", "ide", "illa", "kodti", "kodutte", "heli", "tilsi", "saku",
@@ -163,47 +246,131 @@ function detectRomanizedIndicLanguage(text: string): "hi-IN" | "kn-IN" | "ta-IN"
   const hindiHints = [
     "mujhe", "mujh", "aap", "kya", "kaise", "hai", "hain", "nahi", "chahiye", "karna",
     "meri", "mera", "hum", "batao", "samjhao", "kar sakte", "ke baare", "thoda",
+    "bata", "bataa", "samajh", "krpya", "kripya",
   ];
   const tamilHints = ["enna", "yenna", "naan", "naangal", "ennoda", "konjam", "vendam", "venum", "irukku", "panra", "panren"];
   const teluguHints = ["nenu", "meeru", "enti", "emi", "kavali", "kavalsina", "chestunna", "chestunnaru", "ela"];
   const marathiHints = ["mala", "tula", "tumhi", "kasa", "kase", "ahe", "pahije", "karto", "kartoy"];
 
   const score = (hints: string[]) => hints.reduce((acc, token) => acc + (lower.includes(token) ? 1 : 0), 0);
-  const knScore = score(kannadaHints);
-  const hiScore = score(hindiHints);
-  const taScore = score(tamilHints);
-  const teScore = score(teluguHints);
-  const mrScore = score(marathiHints);
-
-  const ranked = [
-    { lang: "kn-IN" as const, s: knScore },
-    { lang: "hi-IN" as const, s: hiScore },
-    { lang: "ta-IN" as const, s: taScore },
-    { lang: "te-IN" as const, s: teScore },
-    { lang: "mr-IN" as const, s: mrScore },
+  const ranked: Array<{ lang: LangCode; s: number }> = [
+    { lang: "kn-IN", s: score(kannadaHints) },
+    { lang: "hi-IN", s: score(hindiHints) },
+    { lang: "ta-IN", s: score(tamilHints) },
+    { lang: "te-IN", s: score(teluguHints) },
+    { lang: "mr-IN", s: score(marathiHints) },
   ].sort((a, b) => b.s - a.s);
-
-  if (ranked[0].s >= 2) return ranked[0].lang;
+  if (ranked[0].s >= 2) return { lang: ranked[0].lang, score: ranked[0].s };
   return null;
 }
 
-function resolveEffectiveWidgetLanguage(
+// Use a tiny, fast LLM call to arbitrate ambiguous cases (e.g. user writing in
+// Devanagari but explicitly asking for Kannada, or mixed transliteration). The
+// model is constrained to output ONLY a BCP-47 code, so the latency hit is
+// minimal (~one token) and the accuracy is high.
+async function llmResolveLanguage(
+  message: string,
+  history: { role: string; content: string }[],
+  sessionLanguage: string | null,
+): Promise<LangCode | null> {
+  try {
+    const recent = history
+      .slice(-4)
+      .map(h => `${h.role === "assistant" ? "BOT" : "USER"}: ${(h.content || "").slice(0, 200)}`)
+      .join("\n");
+    const sys = [
+      "You are a language router. Output EXACTLY one BCP-47 code from this set and NOTHING else:",
+      "en-US, hi-IN, kn-IN, ta-IN, te-IN, mr-IN.",
+      "Decide which language the assistant should reply in for the LATEST user message.",
+      "Rules (in priority order):",
+      "1. If the user explicitly asks to switch language (e.g. 'in kannada', 'reply in hindi', 'कन्नड में बताओ', 'ಕನ್ನಡದಲ್ಲಿ ಹೇಳಿ', 'इन कनाडा लैंग्वेज', 'english me'), output that language. Cross-script mentions count.",
+      "2. Otherwise mirror the language the user is writing in (Devanagari → hi-IN unless clearly Marathi; Kannada script → kn-IN; Tamil → ta-IN; Telugu → te-IN).",
+      "3. Romanized Indic with strong markers: nanu/maadi/beku → kn-IN, mujhe/aap/kya → hi-IN, naan/enna → ta-IN, nenu/meeru → te-IN, mala/tumhi → mr-IN.",
+      "4. If the user writes plain English with no switch request, keep the previous session language when known.",
+      "5. Default en-US only when nothing else applies.",
+      sessionLanguage ? `Previous session language was: ${sessionLanguage}.` : "",
+      "Output the code only. No quotes. No explanation.",
+    ].filter(Boolean).join("\n");
+    const userBlock = `${recent ? recent + "\n" : ""}USER (latest): ${message.slice(0, 500)}`;
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      max_completion_tokens: 6,
+      temperature: 0,
+      messages: [
+        { role: "system", content: sys },
+        { role: "user", content: userBlock },
+      ],
+    });
+    const raw = (completion.choices[0]?.message?.content || "").trim();
+    const code = raw.replace(/[^a-zA-Z-]/g, "");
+    const found = ALL_LANG_CODES.find(c => c.toLowerCase() === code.toLowerCase());
+    return found ?? null;
+  } catch (err) {
+    console.error("[widget/lang] LLM resolve failed:", err);
+    return null;
+  }
+}
+
+// Resolve effective language with a layered, intelligent strategy:
+//   (a) Configured language (non-auto) wins always.
+//   (b) Explicit cross-script switch request in the latest message wins next.
+//   (c) Strong native-script signal in the latest message.
+//   (d) Romanized hints with score ≥ 2.
+//   (e) Sticky session language (last assistant reply / client-tracked).
+//   (f) Last user-detected language in history.
+//   (g) LLM arbiter for any remaining ambiguity / mixed-script content.
+//   (h) Fall back to en-US.
+async function resolveEffectiveWidgetLanguage(
   configuredLanguage: string | null | undefined,
   message: string,
   history: { role: string; content: string }[],
-): string {
-  if (configuredLanguage && configuredLanguage !== "auto") return configuredLanguage;
-  const fromMessage = detectRomanizedIndicLanguage(message);
-  if (fromMessage) return fromMessage;
+  sessionLanguage?: string | null,
+): Promise<{ lang: string; source: string }> {
+  if (configuredLanguage && configuredLanguage !== "auto") {
+    return { lang: configuredLanguage, source: "configured" };
+  }
+
+  const explicit = detectExplicitLanguageRequest(message);
+  if (explicit) return { lang: explicit, source: "explicit-request" };
+
+  const native = detectNativeScriptLanguage(message);
+  // Strong native script signal: at least 4 native-script chars OR coverage > 30%.
+  const nativeCharCount = (message.match(/[\u0900-\u097F\u0980-\u09FF\u0A80-\u0AFF\u0B80-\u0BFF\u0C00-\u0C7F\u0C80-\u0CFF\u0D00-\u0D7F]/g) || []).length;
+  if (native && (nativeCharCount >= 4 || (native.coverage ?? 0) > 0.3)) {
+    return { lang: native.lang, source: "native-script" };
+  }
+
+  const romanized = detectRomanizedHints(message);
+  if (romanized && romanized.score >= 3) {
+    return { lang: romanized.lang, source: "romanized-strong" };
+  }
+
+  // Mixed-script / ambiguous case → consult LLM arbiter (fast, ~1 token out).
+  // This catches the "user writes in Devanagari but asks for Kannada" bug.
+  if (native || romanized || nativeCharCount > 0 || /\b(language|lang|me|mein|in)\b/i.test(message)) {
+    const arbiter = await llmResolveLanguage(message, history, sessionLanguage ?? null);
+    if (arbiter) return { lang: arbiter, source: "llm-arbiter" };
+  }
+
+  if (native) return { lang: native.lang, source: "native-script-weak" };
+  if (romanized) return { lang: romanized.lang, source: "romanized-weak" };
+
+  // Sticky session: keep the previously established language so a quick
+  // English-looking confirmation ("ok", "yes") doesn't flip the conversation.
+  if (sessionLanguage && sessionLanguage !== "auto" && ALL_LANG_CODES.includes(sessionLanguage as LangCode)) {
+    return { lang: sessionLanguage, source: "session-sticky" };
+  }
 
   for (let i = history.length - 1; i >= 0; i--) {
     const turn = history[i];
     if (turn.role !== "user") continue;
-    const detected = detectRomanizedIndicLanguage(turn.content || "");
-    if (detected) return detected;
+    const h = detectNativeScriptLanguage(turn.content || "");
+    if (h) return { lang: h.lang, source: "history-native" };
+    const r = detectRomanizedHints(turn.content || "");
+    if (r) return { lang: r.lang, source: "history-romanized" };
   }
 
-  return "en-US";
+  return { lang: "en-US", source: "default" };
 }
 
 // Strip stray romanization the LLM might still output (e.g. "Namaskara"
@@ -305,7 +472,7 @@ async function generateWidgetReply(
 
   // --- Hindi: prefer DeepSeek V3 (best Hinglish + Devanagari accuracy) ---
   if (normalizedLanguage === "hi-IN" && DEEPSEEK_API_KEY) {
-    const styleSystem = `Reply ONLY in natural Hindi written in NATIVE Devanagari script (देवनागरी). Never use romanized/Hinglish letters. Keep replies under 2 sentences.`;
+    const styleSystem = `Reply ONLY in natural Hindi written in NATIVE Devanagari script (देवनागरी). Never use romanized/Hinglish letters. Keep replies under 2 sentences. The user's input may mix scripts or use transliteration — understand their intent and ANSWER the question. NEVER reply with a clarification question if the intent is clear.`;
     const reply = await callDeepSeekChat([{ role: "system", content: styleSystem }, ...messages]);
     if (reply) return { reply: normalizeIndicReply(reply, normalizedLanguage), modelUsed: "deepseek-chat" };
   }
@@ -313,7 +480,7 @@ async function generateWidgetReply(
   // --- Kannada/Tamil/Telugu/Marathi: prefer Sarvam-M (Indic-native) ---
   const langInfo = NATIVE_LANG_NAMES[normalizedLanguage];
   if (langInfo && normalizedLanguage !== "hi-IN" && SARVAM_API_KEY) {
-    const styleSystem = `Reply ONLY in natural ${langInfo.name} written in NATIVE ${langInfo.script}. Do not romanize. Do not switch to Hindi/English except for unavoidable brand names like "BBMP" or "e-Khata". Keep replies under 2 sentences. Never refuse to reply in ${langInfo.name}.`;
+    const styleSystem = `Reply ONLY in natural ${langInfo.name} written in NATIVE ${langInfo.script}. Do not romanize. Do not switch to Hindi/English except for unavoidable brand names like "BBMP" or "e-Khata". Keep replies under 2 sentences. Never refuse to reply in ${langInfo.name}. The user's input may be transliterated (e.g. English words written in Devanagari, or ${langInfo.name} words written in Roman letters) — understand the intent and ANSWER the question directly. NEVER respond with a clarification request when the user has already asked something specific.`;
     const reply = await callSarvamChat([{ role: "system", content: styleSystem }, ...messages]);
     if (reply) return { reply: normalizeIndicReply(reply, normalizedLanguage), modelUsed: "sarvam-m" };
   }
@@ -347,9 +514,10 @@ async function buildSystemPromptForWidget(userId: number, agentConfig: any): Pro
   system += `. You are chatting with a visitor on the company website. Keep responses concise — 2 short sentences max. Be helpful and guide the visitor toward taking an action. Never mention you are an AI unless directly asked.\n\n`;
 
   system += `${SUPPORTED_LANGUAGES_LINE}\n\n`;
+  system += `${TRANSLITERATION_LINE}\n\n`;
 
   if (agentConfig.language === "auto") {
-    system += `CRITICAL INSTRUCTION: Automatically detect the language the user is typing or speaking. You MUST reply in the exact same language they used. Do NOT default to English if they speak another language.\n\n`;
+    system += `CRITICAL INSTRUCTION: Automatically detect the language the user wants. If they explicitly request a language ("in kannada", "हिंदी में", "ಕನ್ನಡದಲ್ಲಿ", etc.) — even if they typed the request in a DIFFERENT script — reply in the REQUESTED language. Otherwise mirror the language they are writing in. Do NOT default to English if they speak another language.\n\n`;
   }
 
   const scriptRule = buildScriptInstruction(agentConfig.language);
@@ -393,11 +561,12 @@ router.get("/widget/config/:apiKey", async (req, res) => {
 });
 
 router.post("/widget/chat", async (req, res) => {
-  const { apiKey, message, history, includeAudio } = req.body as {
+  const { apiKey, message, history, includeAudio, sessionLanguage } = req.body as {
     apiKey: string;
     message: string;
     history?: { role: string; content: string }[];
     includeAudio?: boolean;
+    sessionLanguage?: string;
   };
 
   if (!apiKey || !message) {
@@ -412,7 +581,13 @@ router.post("/widget/chat", async (req, res) => {
   }
 
   const safeHistory = Array.isArray(history) ? history : [];
-  const effectiveLanguage = resolveEffectiveWidgetLanguage(agent.language, message, safeHistory);
+  const resolved = await resolveEffectiveWidgetLanguage(
+    agent.language,
+    message,
+    safeHistory,
+    sessionLanguage,
+  );
+  const effectiveLanguage = resolved.lang;
   const systemPrompt = await buildSystemPromptForWidget(agent.userId, {
     ...agent,
     language: effectiveLanguage,
@@ -458,7 +633,7 @@ router.post("/widget/chat", async (req, res) => {
     audioMimeType = ttsResult.mimeType;
   }
 
-  console.log(`[widget/chat] configured=${agent.language} effective=${language} model=${modelUsed} tts=${provider ?? "none"} includeAudio=${!!includeAudio}`);
+  console.log(`[widget/chat] configured=${agent.language} effective=${language} source=${resolved.source} session=${sessionLanguage ?? "-"} model=${modelUsed} tts=${provider ?? "none"} includeAudio=${!!includeAudio}`);
 
   res.json({
     reply,
@@ -540,12 +715,26 @@ router.get("/widget/loader.js", async (req, res) => {
     {re: /[\u0C00-\u0C7F]/, lang: "te-IN"},
     {re: /[\u0900-\u097F]/, lang: "hi-IN"}
   ];
+  function detectExplicitSwitch(t) {
+    if (!t) return null;
+    var hasIntent = /\\b(in|reply|speak|talk|switch|change|use|explain|tell|translate|please|me|mein|dalli|language|lang)\\b|में|मे|बताओ|समझाओ|बोलो|जवाब|भाषा|लैंग्वेज|ದಲ್ಲಿ|ಹೇಳಿ|ಭಾಷೆ|மொழி|భాష|मध्ये|भाषा/i.test(t);
+    if (!hasIntent) return null;
+    if (/\\b(kannada|kanada|kannad)\\b/i.test(t) || /ಕನ್ನಡ/.test(t) || /कन्नड|कन्नडा|कन्नड़|कनाडा/.test(t)) return "kn-IN";
+    if (/\\b(hindi|hinglish|hindee)\\b/i.test(t) || /हिन्दी|हिंदी/.test(t) || /ಹಿಂದಿ/.test(t)) return "hi-IN";
+    if (/\\b(tamil|tamizh)\\b/i.test(t) || /தமிழ்/.test(t)) return "ta-IN";
+    if (/\\b(telugu)\\b/i.test(t) || /తెలుగు/.test(t)) return "te-IN";
+    if (/\\b(marathi)\\b/i.test(t) || /मराठी/.test(t)) return "mr-IN";
+    if (/\\b(english|englis|inglish|angrezi|angreji)\\b/i.test(t) || /अंग्रेजी|इंग्लिश/.test(t) || /ಇಂಗ್ಲಿಷ್/.test(t)) return "en-US";
+    return null;
+  }
   function detectLangFromText(t) {
     if (!t) return null;
+    var sw = detectExplicitSwitch(t);
+    if (sw) return sw;
     for (var i=0;i<INDIC_RANGES.length;i++){ if (INDIC_RANGES[i].re.test(t)) return INDIC_RANGES[i].lang; }
     var l = (t||"").toLowerCase();
-    if (/\b(namaskara|hege|maadi|maadu|nanage|nanu|beku|swalpa|thumba)\b/.test(l)) return "kn-IN";
-    if (/\b(kya|kaise|nahi|chahiye|mujhe|aap|hai|hain|bataao|samjhao)\b/.test(l)) return "hi-IN";
+    if (/\\b(namaskara|hege|maadi|maadu|nanage|nanu|beku|swalpa|thumba)\\b/.test(l)) return "kn-IN";
+    if (/\\b(kya|kaise|nahi|chahiye|mujhe|aap|hai|hain|bataao|samjhao)\\b/.test(l)) return "hi-IN";
     return null;
   }
 
@@ -682,7 +871,13 @@ router.get("/widget/loader.js", async (req, res) => {
     fetch(BASE_URL + "/api/widget/chat", {
       method: "POST",
       headers: {"Content-Type":"application/json"},
-      body: JSON.stringify({apiKey:API_KEY, message:msg, history:history.slice(-6), includeAudio:isVoice})
+      body: JSON.stringify({
+        apiKey: API_KEY,
+        message: msg,
+        history: history.slice(-6),
+        includeAudio: isVoice,
+        sessionLanguage: sessionLang
+      })
     }).then(function(r){
       return r.json().then(function(data) { return { ok: r.ok, status: r.status, data: data }; });
     }).then(function(res){
