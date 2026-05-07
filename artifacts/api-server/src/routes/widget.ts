@@ -406,8 +406,14 @@ async function resolveEffectiveWidgetLanguage(
     return { lang: romanized.lang, source: "romanized-strong" };
   }
 
-  // Mixed-script / ambiguous case → consult LLM arbiter (fast, ~1 token out).
-  if (native || romanized || hasNativeChars || /\b(language|lang|me|mein|in)\b/i.test(message)) {
+  // Truly ambiguous: only call the LLM arbiter when heuristics conflict, NOT
+  // for every message. This was previously firing on common English words
+  // ("in", "me") and adding 400–800ms to every turn.
+  const conflictingSignals =
+    (native && romanized && native.lang !== romanized.lang) ||
+    (hasNativeChars && eng.ratio >= 0.35) ||
+    (romanized && eng.ratio >= 0.2 && eng.ratio < 0.4);
+  if (conflictingSignals) {
     const arbiter = await llmResolveLanguage(message, history, sessionLanguage ?? null);
     if (arbiter) return { lang: arbiter, source: "llm-arbiter" };
   }
@@ -449,6 +455,87 @@ function normalizeIndicReply(reply: string, language: string): string {
     .replace(/^(Hi|Hello|Hey)[!,.]?\s*/i, "")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+const NATIVE_SCRIPT_REGEX_FOR_LANG: Record<string, RegExp> = {
+  "hi-IN": /[\u0900-\u097F]/g,
+  "mr-IN": /[\u0900-\u097F]/g,
+  "kn-IN": /[\u0C80-\u0CFF]/g,
+  "ta-IN": /[\u0B80-\u0BFF]/g,
+  "te-IN": /[\u0C00-\u0C7F]/g,
+};
+
+// Detect when an Indic-language reply is mostly Latin (romanized) instead of
+// the required native script. Brand terms (BBMP, e-Khata, ePID, URLs) and
+// digits/punctuation are excluded from the calculation so they don't penalise
+// otherwise-good native-script replies.
+function isIndicReplyRomanized(reply: string, language: string): boolean {
+  const nativeRe = NATIVE_SCRIPT_REGEX_FOR_LANG[language];
+  if (!nativeRe) return false;
+  const cleaned = reply
+    .replace(/\b(BBMP|e-?Khata|ePID|PID|API|URL|GST|PAN)\b/gi, "")
+    .replace(/https?:\/\/\S+|www\.\S+/gi, "")
+    .replace(/\[[^\]]+\]\([^)]+\)/g, "");
+  const latinChars = (cleaned.match(/[a-zA-Z]/g) || []).length;
+  const nativeChars = (cleaned.match(nativeRe) || []).length;
+  // Need a meaningful sample. If reply has very few alphabetic chars overall,
+  // assume it's fine (e.g. "ok!" or short brand-only response).
+  if (latinChars + nativeChars < 10) return false;
+  // Romanized if > 40% of alphabetic content is Latin AND native is < 50%.
+  const latinRatio = latinChars / (latinChars + nativeChars);
+  return latinRatio > 0.4;
+}
+
+// Rewrite a romanized Indic reply to native script using gpt-4o-mini. This is
+// only invoked as a corrective step when the primary model returns the wrong
+// script. Adds ~600ms to the slow path but preserves the conversation quality.
+async function rewriteToNativeScript(
+  reply: string,
+  language: string,
+): Promise<string | null> {
+  const langInfo: Record<string, { name: string; script: string; example: string }> = {
+    "hi-IN": { name: "Hindi", script: "Devanagari (देवनागरी)", example: "नमस्ते! मैं आपकी मदद कर सकता हूं।" },
+    "kn-IN": { name: "Kannada", script: "Kannada script (ಕನ್ನಡ ಲಿಪಿ)", example: "ನಮಸ್ಕಾರ! ನಾನು ನಿಮಗೆ ಸಹಾಯ ಮಾಡುತ್ತೇನೆ." },
+    "ta-IN": { name: "Tamil", script: "Tamil script (தமிழ்)", example: "வணக்கம்! நான் உங்களுக்கு உதவுகிறேன்." },
+    "te-IN": { name: "Telugu", script: "Telugu script (తెలుగు)", example: "నమస్కారం! నేను మీకు సహాయం చేస్తాను." },
+    "mr-IN": { name: "Marathi", script: "Devanagari (देवनागरी)", example: "नमस्कार! मी तुम्हाला मदत करतो." },
+  };
+  const info = langInfo[language];
+  if (!info) return null;
+  try {
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      max_completion_tokens: 200,
+      temperature: 0.2,
+      messages: [
+        {
+          role: "system",
+          content: `You are a transliteration assistant. Rewrite the user's text in NATIVE ${info.script}. Preserve the meaning and tone EXACTLY — do not add, remove or summarise. Keep brand names like BBMP, e-Khata, ePID, PID and URLs in their original Latin form. Output only the rewritten text. Example: ${info.example}`,
+        },
+        { role: "user", content: reply },
+      ],
+    });
+    const rewritten = completion.choices[0]?.message?.content?.trim();
+    if (!rewritten) return null;
+    // Sanity check — make sure the rewrite is actually in native script now.
+    if (isIndicReplyRomanized(rewritten, language)) return null;
+    return rewritten;
+  } catch (err) {
+    console.error("[widget/chat] rewrite-to-native failed:", err);
+    return null;
+  }
+}
+
+async function ensureNativeScript(
+  reply: string,
+  language: string,
+): Promise<{ reply: string; rewrote: boolean }> {
+  if (!isIndianLanguage(language)) return { reply, rewrote: false };
+  if (!isIndicReplyRomanized(reply, language)) return { reply, rewrote: false };
+  console.warn(`[widget/chat] romanized output detected for ${language}, rewriting…`);
+  const rewritten = await rewriteToNativeScript(reply, language);
+  if (rewritten) return { reply: rewritten, rewrote: true };
+  return { reply, rewrote: false };
 }
 
 // Some providers (Sarvam-M, several OpenAI-compatible Indic endpoints) require
@@ -599,15 +686,23 @@ async function generateWidgetReply(
   if (normalizedLanguage === "hi-IN" && DEEPSEEK_API_KEY) {
     const styleSystem = `Reply ONLY in natural Hindi written in NATIVE Devanagari script (देवनागरी). Never use romanized/Hinglish letters. Keep replies under 2 sentences. The user's input may mix scripts or use transliteration — understand their intent and ANSWER the question. NEVER reply with a clarification question if the intent is clear.`;
     const reply = await callDeepSeekChat([{ role: "system", content: styleSystem }, ...messages]);
-    if (reply) return { reply: normalizeIndicReply(reply, normalizedLanguage), modelUsed: "deepseek-chat" };
+    if (reply) {
+      const normalized = normalizeIndicReply(reply, normalizedLanguage);
+      const fixed = await ensureNativeScript(normalized, normalizedLanguage);
+      return { reply: fixed.reply, modelUsed: fixed.rewrote ? "deepseek-chat+rewrite" : "deepseek-chat" };
+    }
   }
 
   // --- Kannada/Tamil/Telugu/Marathi: prefer Sarvam-M (Indic-native) ---
   const langInfo = NATIVE_LANG_NAMES[normalizedLanguage];
   if (langInfo && normalizedLanguage !== "hi-IN" && SARVAM_API_KEY) {
-    const styleSystem = `Reply ONLY in natural ${langInfo.name} written in NATIVE ${langInfo.script}. Do not romanize. Do not switch to Hindi/English except for unavoidable brand names like "BBMP" or "e-Khata". Keep replies under 2 sentences. Never refuse to reply in ${langInfo.name}. The user's input may be transliterated (e.g. English words written in Devanagari, or ${langInfo.name} words written in Roman letters) — understand the intent and ANSWER the question directly. NEVER respond with a clarification request when the user has already asked something specific.`;
+    const styleSystem = `Reply ONLY in natural ${langInfo.name} written in NATIVE ${langInfo.script}. Output MUST be in ${langInfo.script}. NEVER romanize. NEVER use Latin/English letters except for brand names like "BBMP", "e-Khata", "ePID" or URLs. If you cannot produce native script, output nothing. Keep replies under 2 sentences. The user's input may be transliterated (e.g. English words in Devanagari, or ${langInfo.name} words in Roman letters) — understand the intent and ANSWER the question directly. NEVER respond with a clarification request when the user has already asked something specific.`;
     const reply = await callSarvamChat([{ role: "system", content: styleSystem }, ...messages]);
-    if (reply) return { reply: normalizeIndicReply(reply, normalizedLanguage), modelUsed: "sarvam-m" };
+    if (reply) {
+      const normalized = normalizeIndicReply(reply, normalizedLanguage);
+      const fixed = await ensureNativeScript(normalized, normalizedLanguage);
+      return { reply: fixed.reply, modelUsed: fixed.rewrote ? "sarvam-m+rewrite" : "sarvam-m" };
+    }
   }
 
   // --- English (or any fallback): gpt-4o-mini (fast & multilingual) ---
@@ -617,7 +712,10 @@ async function generateWidgetReply(
     messages,
   });
   const reply = completion.choices[0]?.message?.content || "I'm sorry, I couldn't process that. Could you try again?";
-  return { reply: normalizeIndicReply(reply, normalizedLanguage), modelUsed: "gpt-4o-mini" };
+  const normalized = normalizeIndicReply(reply, normalizedLanguage);
+  // gpt-4o-mini occasionally drifts to Latin for Indic — re-check & rewrite.
+  const fixed = await ensureNativeScript(normalized, normalizedLanguage);
+  return { reply: fixed.reply, modelUsed: fixed.rewrote ? "gpt-4o-mini+rewrite" : "gpt-4o-mini" };
 }
 
 async function getAgentByWidgetKey(apiKey: string) {
