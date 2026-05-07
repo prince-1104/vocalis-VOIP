@@ -737,7 +737,12 @@ async function generateWidgetReply(
   });
   const reply = completion.choices[0]?.message?.content || "I'm sorry, I couldn't process that. Could you try again?";
   const normalized = normalizeIndicReply(reply, normalizedLanguage);
-  // gpt-4o-mini occasionally drifts to Latin for Indic — re-check & rewrite.
+  // gpt-4o-mini reliably produces native script for Indic; only run the
+  // ensureNativeScript safety net when the language is non-English to keep
+  // the English fast-path latency-free.
+  if (!isIndianLanguage(normalizedLanguage)) {
+    return { reply: normalized, modelUsed: "gpt-4o-mini" };
+  }
   const fixed = await ensureNativeScript(normalized, normalizedLanguage);
   return { reply: fixed.reply, modelUsed: fixed.rewrote ? "gpt-4o-mini+rewrite" : "gpt-4o-mini" };
 }
@@ -1096,9 +1101,10 @@ router.get("/widget/loader.js", async (req, res) => {
     currentAudio.play().catch(function(){ speaking = false; });
   }
 
-  function speakReply(text) {
+  function speakReply(text, langOverride) {
+    if (!text) return;
     speaking = true;
-    var ttsLang = (configuredLang === "auto") ? sessionLang : agentLang;
+    var ttsLang = langOverride || ((configuredLang === "auto") ? sessionLang : agentLang);
     fetch(BASE_URL + "/api/widget/tts", {
       method: "POST",
       headers: {"Content-Type":"application/json"},
@@ -1128,7 +1134,10 @@ router.get("/widget/loader.js", async (req, res) => {
         apiKey: API_KEY,
         message: msg,
         history: history.slice(-6),
-        includeAudio: isVoice,
+        // Decoupled TTS: never bundle audio in the chat response — the LLM
+        // alone is fast (~1–3s), TTS for long Indic replies is 3–6s. By fetching
+        // TTS separately AFTER the text arrives we cut perceived latency in half.
+        includeAudio: false,
         sessionLanguage: sessionLang
       })
     }).then(function(r){
@@ -1145,8 +1154,10 @@ router.get("/widget/loader.js", async (req, res) => {
         history.push({role:"assistant", content:reply});
         if (res.data.detectedLanguage) sessionLang = res.data.detectedLanguage;
         if (isVoice) {
+          // Server returns text immediately; fetch TTS separately so audio
+          // plays as soon as it arrives without blocking the visible reply.
           if (res.data.audio) playReplyAudio(res.data.audio, res.data.audioMimeType);
-          else speakReply(reply);
+          else speakReply(reply, res.data.detectedLanguage || sessionLang);
         }
       }
     }).catch(function(err){
