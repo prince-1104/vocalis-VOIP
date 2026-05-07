@@ -11,26 +11,41 @@ const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY ?? "";
 
 const INDIAN_LANGUAGES = new Set(["kn-IN", "hi-IN", "ta-IN", "te-IN", "mr-IN"]);
 
-// Sarvam Bulbul v3 voices, matched per-language for natural prosody.
-// Kannada: "manan" (Sarvam-recommended, conversational, consistent).
-// Hindi:   "kavya" (clear female Hindi voice).
-// Tamil:   "priya". Telugu: "pooja". Marathi: "simran".
+// Sarvam Bulbul v3 voices — ALL female with native Indian accent.
+// Hindi:   kavya.   Kannada: anushka (female; replaces male "manan").
+// Tamil:   priya.   Telugu:  pooja.    Marathi: simran.
+// English: anushka  (multilingual female voice rendered in en-IN target).
 const BULBUL_VOICE_FOR_LANG: Record<string, string> = {
   "hi-IN": "kavya",
-  "kn-IN": "manan",
+  "kn-IN": "anushka",
   "ta-IN": "priya",
   "te-IN": "pooja",
   "mr-IN": "simran",
+  "en-IN": "anushka",
+  "en-US": "anushka",
 };
+
+// For TTS we always speak with an Indian-accent female voice via Sarvam Bulbul.
+// English maps to the en-IN target language code so the prosody is Indian.
+function sarvamTargetLang(lang: string): string {
+  if (lang === "en-US" || lang === "en-IN") return "en-IN";
+  return lang;
+}
 
 function isIndianLanguage(lang?: string | null): boolean {
   return INDIAN_LANGUAGES.has(lang ?? "");
 }
 
-async function generateSarvamWidgetTTS(text: string, lang: string): Promise<string | null> {
-  if (!SARVAM_API_KEY || !isIndianLanguage(lang)) return null;
+function isSarvamSupportedTTS(lang?: string | null): boolean {
+  if (!lang) return false;
+  return INDIAN_LANGUAGES.has(lang) || lang === "en-IN" || lang === "en-US";
+}
 
-  const speaker = BULBUL_VOICE_FOR_LANG[lang] ?? "manan";
+async function generateSarvamWidgetTTS(text: string, lang: string): Promise<string | null> {
+  if (!SARVAM_API_KEY || !isSarvamSupportedTTS(lang)) return null;
+
+  const target = sarvamTargetLang(lang);
+  const speaker = BULBUL_VOICE_FOR_LANG[lang] ?? BULBUL_VOICE_FOR_LANG[target] ?? "anushka";
   const res = await fetch("https://api.sarvam.ai/text-to-speech", {
     method: "POST",
     headers: {
@@ -39,10 +54,9 @@ async function generateSarvamWidgetTTS(text: string, lang: string): Promise<stri
     },
     body: JSON.stringify({
       inputs: [text],
-      target_language_code: lang,
+      target_language_code: target,
       speaker,
       model: "bulbul:v3",
-      // Lower temperature → more deterministic, cleaner pronunciation.
       temperature: 0.4,
       pace: 1.0,
       enable_preprocessing: true,
@@ -74,7 +88,9 @@ async function synthesizeWidgetTTS(
   voice: string,
   language: string,
 ): Promise<{ audio: string | null; provider: "sarvam" | "openai" | null; mimeType: string }> {
-  if (isIndianLanguage(language)) {
+  // Voice policy: ALWAYS female + Indian accent. Route every supported
+  // language (including English) through Sarvam Bulbul v3 first.
+  if (isSarvamSupportedTTS(language)) {
     try {
       const sarvamAudio = await generateSarvamWidgetTTS(text, language);
       if (sarvamAudio) return { audio: sarvamAudio, provider: "sarvam", mimeType: "audio/wav" };
@@ -83,8 +99,10 @@ async function synthesizeWidgetTTS(
     }
   }
 
+  // OpenAI fallback only used if Sarvam is unavailable. Keep a female voice.
   try {
-    const openAiAudio = await generateOpenAIWidgetTTS(text, voice);
+    const fallbackVoice = ["nova", "shimmer", "coral", "sage"].includes(voice) ? voice : "nova";
+    const openAiAudio = await generateOpenAIWidgetTTS(text, fallbackVoice);
     return { audio: openAiAudio, provider: "openai", mimeType: "audio/mpeg" };
   } catch (openAiErr) {
     console.error("[widget/tts] OpenAI TTS error:", openAiErr);
@@ -235,13 +253,41 @@ function detectExplicitLanguageRequest(text: string): LangCode | null {
   return null;
 }
 
+// Common English function/content words. Used to confidently identify English
+// even when a message contains domain terms (e.g. "ekhata", "BBMP", "ePID")
+// that previously caused false positives in the Indic hint scorer.
+const ENGLISH_COMMON_WORDS = new Set([
+  "the","a","an","is","are","was","were","be","been","being","am",
+  "i","you","he","she","it","we","they","me","my","your","our","their","us","him","her",
+  "and","or","but","if","then","else","not","no","yes","ok","okay",
+  "to","of","in","on","at","for","with","by","from","about","over","under","into","onto",
+  "what","when","where","why","how","who","which","whom","whose",
+  "can","could","would","should","do","does","did","done","have","has","had","will","may","might","must","shall",
+  "tell","show","help","know","want","need","get","give","make","go","see","say","said","find","take","put","let",
+  "this","that","these","those","there","here","very","more","some","any","all","every","each","such","other","another",
+  "please","thanks","thank","sorry","hi","hello","hey","yes","no","please","good","fine","sure",
+  "abot","abt","u","r","ur","pls","plz","thx","ty",
+]);
+
+function englishWordRatio(text: string): { ratio: number; words: number } {
+  const cleaned = text.toLowerCase().replace(/[^a-z\s]/g, " ");
+  const words = cleaned.split(/\s+/).filter(w => w.length >= 1);
+  if (words.length === 0) return { ratio: 0, words: 0 };
+  const matched = words.filter(w => ENGLISH_COMMON_WORDS.has(w)).length;
+  return { ratio: matched / words.length, words: words.length };
+}
+
 function detectRomanizedHints(text: string): { lang: LangCode; score: number } | null {
   const lower = text.toLowerCase();
+  // NOTE: domain terms like "khata" / "ekhata" are intentionally NOT in the
+  // Kannada list — they are language-neutral (used freely in English/Hindi too)
+  // and were causing English questions like "tell me about ekhata" to be
+  // misrouted as Kannada.
   const kannadaHints = [
     "nanag", "nanage", "nanu", "nanna", "beku", "bekagittu", "bagge", "yaake", "yake",
     "yenu", "ide", "illa", "kodti", "kodutte", "heli", "tilsi", "saku",
     "namaskara", "hege", "yelli", "yaaru", "maadi", "maadu", "maadta", "maaduttare",
-    "swalpa", "thumba", "barbeku", "barthini", "khata", "ekhata",
+    "swalpa", "thumba",
   ];
   const hindiHints = [
     "mujhe", "mujh", "aap", "kya", "kaise", "hai", "hain", "nahi", "chahiye", "karna",
@@ -253,13 +299,13 @@ function detectRomanizedHints(text: string): { lang: LangCode; score: number } |
   const marathiHints = ["mala", "tula", "tumhi", "kasa", "kase", "ahe", "pahije", "karto", "kartoy"];
 
   const score = (hints: string[]) => hints.reduce((acc, token) => acc + (lower.includes(token) ? 1 : 0), 0);
-  const ranked: Array<{ lang: LangCode; s: number }> = [
-    { lang: "kn-IN", s: score(kannadaHints) },
-    { lang: "hi-IN", s: score(hindiHints) },
-    { lang: "ta-IN", s: score(tamilHints) },
-    { lang: "te-IN", s: score(teluguHints) },
-    { lang: "mr-IN", s: score(marathiHints) },
-  ].sort((a, b) => b.s - a.s);
+  const ranked = ([
+    { lang: "kn-IN" as LangCode, s: score(kannadaHints) },
+    { lang: "hi-IN" as LangCode, s: score(hindiHints) },
+    { lang: "ta-IN" as LangCode, s: score(tamilHints) },
+    { lang: "te-IN" as LangCode, s: score(teluguHints) },
+    { lang: "mr-IN" as LangCode, s: score(marathiHints) },
+  ] as Array<{ lang: LangCode; s: number }>).sort((a, b) => b.s - a.s);
   if (ranked[0].s >= 2) return { lang: ranked[0].lang, score: ranked[0].s };
   return null;
 }
@@ -286,8 +332,9 @@ async function llmResolveLanguage(
       "1. If the user explicitly asks to switch language (e.g. 'in kannada', 'reply in hindi', 'कन्नड में बताओ', 'ಕನ್ನಡದಲ್ಲಿ ಹೇಳಿ', 'इन कनाडा लैंग्वेज', 'english me'), output that language. Cross-script mentions count.",
       "2. Otherwise mirror the language the user is writing in (Devanagari → hi-IN unless clearly Marathi; Kannada script → kn-IN; Tamil → ta-IN; Telugu → te-IN).",
       "3. Romanized Indic with strong markers: nanu/maadi/beku → kn-IN, mujhe/aap/kya → hi-IN, naan/enna → ta-IN, nenu/meeru → te-IN, mala/tumhi → mr-IN.",
-      "4. If the user writes plain English with no switch request, keep the previous session language when known.",
-      "5. Default en-US only when nothing else applies.",
+      "4. Domain terms like 'BBMP', 'e-Khata', 'ekhata', 'khata', 'ePID', 'PID', 'amalgamation' are LANGUAGE-NEUTRAL — used freely in English, Hindi and Kannada. Do NOT use them as language signals.",
+      "5. If the user writes plainly in English (e.g. 'can you tell me about ekhata', 'how do I apply') reply in en-US — even if the prior turn was Indic. The user is switching back.",
+      "6. Default en-US only when nothing else applies.",
       sessionLanguage ? `Previous session language was: ${sessionLanguage}.` : "",
       "Output the code only. No quotes. No explanation.",
     ].filter(Boolean).join("\n");
@@ -341,25 +388,43 @@ async function resolveEffectiveWidgetLanguage(
     return { lang: native.lang, source: "native-script" };
   }
 
+  // Strong English signal — message is plainly English ASCII with common
+  // English words and no native script. This must beat romanized Indic hints
+  // and sticky session language so the user can switch back to English at any
+  // turn (e.g. "can u tell me about ekhata" must NOT be routed as Kannada).
+  const eng = englishWordRatio(message);
+  const hasNativeChars = nativeCharCount > 0;
+  const isPlainlyEnglish =
+    !hasNativeChars && eng.words >= 2 && (eng.ratio >= 0.4 || (eng.ratio >= 0.25 && eng.words >= 5));
+  if (isPlainlyEnglish) {
+    return { lang: "en-US", source: "english-words" };
+  }
+
   const romanized = detectRomanizedHints(message);
-  if (romanized && romanized.score >= 3) {
+  // Romanized-strong only fires when there's no competing English signal.
+  if (romanized && romanized.score >= 3 && eng.ratio < 0.3) {
     return { lang: romanized.lang, source: "romanized-strong" };
   }
 
   // Mixed-script / ambiguous case → consult LLM arbiter (fast, ~1 token out).
-  // This catches the "user writes in Devanagari but asks for Kannada" bug.
-  if (native || romanized || nativeCharCount > 0 || /\b(language|lang|me|mein|in)\b/i.test(message)) {
+  if (native || romanized || hasNativeChars || /\b(language|lang|me|mein|in)\b/i.test(message)) {
     const arbiter = await llmResolveLanguage(message, history, sessionLanguage ?? null);
     if (arbiter) return { lang: arbiter, source: "llm-arbiter" };
   }
 
   if (native) return { lang: native.lang, source: "native-script-weak" };
-  if (romanized) return { lang: romanized.lang, source: "romanized-weak" };
+  if (romanized && eng.ratio < 0.3) return { lang: romanized.lang, source: "romanized-weak" };
 
   // Sticky session: keep the previously established language so a quick
-  // English-looking confirmation ("ok", "yes") doesn't flip the conversation.
+  // confirmation ("ok", "yes") doesn't flip the conversation. We only stick
+  // when the current message had no clear language signal at all.
   if (sessionLanguage && sessionLanguage !== "auto" && ALL_LANG_CODES.includes(sessionLanguage as LangCode)) {
-    return { lang: sessionLanguage, source: "session-sticky" };
+    // But if the current message is mostly ASCII English-looking, prefer English
+    // over a sticky Indic session — this is what enables real-time switching.
+    if (!hasNativeChars && eng.ratio >= 0.25) {
+      return { lang: "en-US", source: "english-override" };
+    }
+    return { lang: sessionLanguage as LangCode, source: "session-sticky" };
   }
 
   for (let i = history.length - 1; i >= 0; i--) {
@@ -577,7 +642,13 @@ async function buildSystemPromptForWidget(userId: number, agentConfig: any): Pro
   system += `${TRANSLITERATION_LINE}\n\n`;
 
   if (agentConfig.language === "auto") {
-    system += `CRITICAL INSTRUCTION: Automatically detect the language the user wants. If they explicitly request a language ("in kannada", "हिंदी में", "ಕನ್ನಡದಲ್ಲಿ", etc.) — even if they typed the request in a DIFFERENT script — reply in the REQUESTED language. Otherwise mirror the language they are writing in. Do NOT default to English if they speak another language.\n\n`;
+    system += `CRITICAL INSTRUCTION: Mirror the user's CURRENT message language on every turn — not the previous turn's language.\n` +
+      `• User writes in English → reply in English.\n` +
+      `• User writes in Hindi (Devanagari or romanized "mujhe/aap/kya") → reply in Hindi (Devanagari).\n` +
+      `• User writes in Kannada (Kannada script or romanized "nanu/maadi/beku") → reply in Kannada (Kannada script).\n` +
+      `• If the user explicitly requests a language ("in kannada", "हिंदी में", "ಕನ್ನಡದಲ್ಲಿ") — even in a different script — switch to the REQUESTED language.\n` +
+      `• Domain terms like BBMP / e-Khata / ekhata / ePID / PID / amalgamation are LANGUAGE-NEUTRAL — do not use them to guess the language.\n` +
+      `• Real-time switching: if the user goes back to English (or any other language) on a turn, switch back immediately.\n\n`;
   }
 
   const scriptRule = buildScriptInstruction(agentConfig.language);
