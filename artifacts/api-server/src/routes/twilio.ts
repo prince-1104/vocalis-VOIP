@@ -55,8 +55,8 @@ function getBaseUrl(req: any): string {
   return `https://${host}`;
 }
 
-const KB_ENTRY_MAX_CHARS = 300;
-const KB_MAX_ENTRIES = 6;
+const KB_ENTRY_MAX_CHARS = 500;
+const KB_MAX_ENTRIES = 20;
 
 const SUPPORTED_LANGUAGES_LINE =
   "You support these languages and MUST be able to converse in any of them: English (en-US), Hindi (hi-IN), Kannada (kn-IN), Tamil (ta-IN), Telugu (te-IN), and Marathi (mr-IN). NEVER tell the caller you only speak English or Hindi. If the caller asks for Kannada / Tamil / Telugu / Marathi, switch to that language immediately and continue the entire conversation in it.";

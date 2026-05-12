@@ -116,8 +116,8 @@ async function synthesizeWidgetTTS(
   }
 }
 
-const KB_ENTRY_MAX_CHARS = 280;
-const KB_MAX_ENTRIES = 4;
+const KB_ENTRY_MAX_CHARS = 500;
+const KB_MAX_ENTRIES = 20;
 
 const SUPPORTED_LANGUAGES_LINE =
   "You support these languages and MUST be able to converse in any of them: English (en-US), Hindi (hi-IN), Kannada (kn-IN), Tamil (ta-IN), Telugu (te-IN), and Marathi (mr-IN). NEVER tell the user you only speak English or Hindi. If the user asks for Kannada / Tamil / Telugu / Marathi (in any script — e.g. 'in kannada', 'kannada me', 'ಕನ್ನಡದಲ್ಲಿ', 'कन्नड में', 'इन कनाडा लैंग्वेज'), switch to that language immediately and continue the entire conversation in it. NEVER ask the user to clarify which language they want when they have already named one.";
@@ -753,18 +753,74 @@ async function getAgentByWidgetKey(apiKey: string) {
   });
 }
 
-async function buildSystemPromptForWidget(userId: number, agentConfig: any): Promise<string> {
+// ── Lightweight per-message KB relevance scoring ─────────────────────────
+// Instead of dumping ALL KB entries into the system prompt (which leads to
+// truncation and irrelevant context), score each entry against the user's
+// current message and pick the top-K most relevant ones.
+function scoreKBRelevance(entry: { title: string; content: string; type: string }, messageTokens: string[], messageJoined: string): number {
+  if (!messageTokens.length) return 0;
+  const messageSet = new Set(messageTokens);
+  // Score against title
+  const titleNorm = normalizeSearchText(entry.title);
+  const titleTokens = titleNorm.split(/\s+/).filter(t => t.length > 1);
+  let titleOverlap = 0;
+  for (const t of titleTokens) {
+    if (messageSet.has(t)) titleOverlap++;
+  }
+  // Phrase match on title — very strong signal
+  if (titleNorm.length > 4 && messageJoined.includes(" " + titleNorm + " ")) {
+    return 10;
+  }
+  // Score against content (first 500 chars)
+  const contentSnippet = normalizeSearchText(entry.content.slice(0, 500));
+  const contentTokens = contentSnippet.split(/\s+/).filter(t => t.length > 1);
+  const contentSet = new Set(contentTokens);
+  let contentOverlap = 0;
+  for (const t of messageTokens) {
+    if (contentSet.has(t)) contentOverlap++;
+  }
+  // Weighted: title matches are 3× more valuable than content matches
+  return titleOverlap * 3 + contentOverlap;
+}
+
+function selectRelevantKBEntries(
+  allEntries: any[],
+  userMessage: string | undefined,
+  maxEntries: number,
+): any[] {
+  if (!userMessage || !userMessage.trim()) {
+    return allEntries.slice(0, maxEntries);
+  }
+  const tokens = tokenizeForSearch(userMessage);
+  if (!tokens.length) return allEntries.slice(0, maxEntries);
+  const joined = " " + tokens.join(" ") + " ";
+
+  const scored = allEntries.map(entry => ({
+    entry,
+    score: scoreKBRelevance(entry, tokens, joined),
+  }));
+  scored.sort((a, b) => b.score - a.score);
+
+  // Always include entries with score > 0 up to maxEntries, then fill
+  // remaining slots with unseen entries to provide general context.
+  const relevant = scored.filter(s => s.score > 0).slice(0, maxEntries);
+  const relevantIds = new Set(relevant.map(s => s.entry.id));
+  const filler = scored.filter(s => !relevantIds.has(s.entry.id)).slice(0, Math.max(0, maxEntries - relevant.length));
+  return [...relevant.map(s => s.entry), ...filler.map(s => s.entry)];
+}
+
+async function buildSystemPromptForWidget(userId: number, agentConfig: any, userMessage?: string): Promise<string> {
   const [trainingDataRaw, scripts] = await Promise.all([
-    db.select().from(trainingDataTable).where(eq(trainingDataTable.userId, userId)).limit(KB_MAX_ENTRIES * 4),
+    db.select().from(trainingDataTable).where(eq(trainingDataTable.userId, userId)).limit(200),
     db.select().from(callingScriptsTable)
       .where(and(eq(callingScriptsTable.userId, userId), eq(callingScriptsTable.isDefault, true)))
       .limit(1),
   ]);
   // Video-link entries are metadata used for the YouTube suggestion feature —
   // exclude them from the knowledge-base prompt so they don't pollute it.
-  const trainingData = trainingDataRaw
-    .filter((td: any) => td.type !== "video_link")
-    .slice(0, KB_MAX_ENTRIES);
+  const kbCandidates = trainingDataRaw.filter((td: any) => td.type !== "video_link");
+  // Use per-message relevance scoring to pick the most relevant KB entries
+  const trainingData = selectRelevantKBEntries(kbCandidates, userMessage, KB_MAX_ENTRIES);
 
   let system = `You are ${agentConfig.agentName || "SalesBot"}, an AI sales representative`;
   if (agentConfig.personality) system += ` with a ${agentConfig.personality} personality`;
@@ -1062,7 +1118,7 @@ router.post("/widget/chat", async (req, res) => {
   const systemPrompt = await buildSystemPromptForWidget(agent.userId, {
     ...agent,
     language: effectiveLanguage,
-  });
+  }, message);
   let reply: string;
   let modelUsed = "gpt-4o-mini";
   try {

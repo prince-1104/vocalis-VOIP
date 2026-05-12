@@ -114,6 +114,33 @@ function parseStructuredTrainingJson(jsonText: string, fallbackType: string): Ar
       title,
       content: sections.join("\n\n").trim(),
     });
+
+    // ── Auto-extract video_link entries ──────────────────────────────
+    // The widget's video suggestion engine (findRelevantVideo) looks
+    // ONLY for type='video_link' rows with a specific JSON structure.
+    // When the uploaded JSON contains a `videos` field, we create a
+    // separate video_link row so the widget can surface the YT link.
+    if (vEn || vKn) {
+      const searchTerms: string[] = [];
+      // Include all multilingual query variants as search terms so the
+      // video matcher works for English, Hindi AND Kannada queries.
+      for (const q of qEn) { const t = q.trim().toLowerCase(); if (t) searchTerms.push(t); }
+      for (const q of qHi) { const t = q.trim(); if (t) searchTerms.push(t); }
+      for (const q of qKn) { const t = q.trim(); if (t) searchTerms.push(t); }
+      // Add the FAQ title itself as a search term
+      searchTerms.push(title.toLowerCase());
+
+      rows.push({
+        type: "video_link",
+        title: `Video: ${title}`,
+        content: JSON.stringify({
+          title,
+          link_en: vEn || "",
+          link_kn: vKn || "",
+          search_terms: [...new Set(searchTerms)],
+        }),
+      });
+    }
   }
 
   return rows.length ? rows : null;
