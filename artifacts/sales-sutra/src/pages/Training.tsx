@@ -1,5 +1,5 @@
 import React, { useState, useRef, useCallback } from "react";
-import { useTrainingList, useAddTrainingDataMutation, useDeleteTrainingDataMutation } from "@/hooks/use-training";
+import { useTrainingList, useAddTrainingDataMutation, useDeleteTrainingDataMutation, useDeleteAllTrainingDataMutation } from "@/hooks/use-training";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -7,7 +7,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
-import { Trash2, Plus, BrainCircuit, FileText, Upload, Loader2, CheckCircle2, FileJson, File, Eye, ExternalLink, Video } from "lucide-react";
+import { Trash2, Plus, BrainCircuit, FileText, Upload, Loader2, CheckCircle2, FileJson, File, Eye, ExternalLink, Video, AlertTriangle } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { format } from "date-fns";
 import { useQueryClient } from "@tanstack/react-query";
@@ -203,10 +203,16 @@ export default function Training() {
   const { data: trainingData, isLoading } = useTrainingList();
   const addTraining = useAddTrainingDataMutation();
   const deleteTraining = useDeleteTrainingDataMutation();
+  const deleteAll = useDeleteAllTrainingDataMutation();
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [viewItem, setViewItem] = useState<any | null>(null);
+  const [isDeleteAllOpen, setIsDeleteAllOpen] = useState(false);
+  const [deleteConfirmText, setDeleteConfirmText] = useState("");
+
+  const CONFIRM_PHRASE = "delete all training data";
+  const canConfirmDelete = deleteConfirmText.trim().toLowerCase() === CONFIRM_PHRASE;
 
   const [formData, setFormData] = useState({
     type: "product_info",
@@ -237,7 +243,17 @@ export default function Training() {
           <h1 className="text-3xl font-display font-bold">Knowledge Base</h1>
           <p className="text-muted-foreground mt-1">Train your AI agent on your products, FAQs, and handling objections.</p>
         </div>
-        <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
+        <div className="flex items-center gap-3">
+          {trainingData && trainingData.length > 0 && (
+            <Button
+              variant="outline"
+              className="border-rose-500/30 text-rose-400 hover:bg-rose-500/10 hover:text-rose-300"
+              onClick={() => { setDeleteConfirmText(""); setIsDeleteAllOpen(true); }}
+            >
+              <Trash2 className="w-4 h-4 mr-2" /> Delete All ({trainingData.length})
+            </Button>
+          )}
+          <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
           <DialogTrigger asChild>
             <Button className="bg-primary hover:bg-primary/90 text-white shadow-lg shadow-primary/25">
               <Plus className="w-4 h-4 mr-2" /> Add Manually
@@ -290,6 +306,7 @@ export default function Training() {
             </form>
           </DialogContent>
         </Dialog>
+        </div>
       </div>
 
       <UploadZone onUploaded={handleUploaded} />
@@ -388,6 +405,80 @@ export default function Training() {
           </div>
         </Card>
       )}
+      {/* ── Delete All Confirmation (GitHub-style) ────────────────────── */}
+      <Dialog open={isDeleteAllOpen} onOpenChange={setIsDeleteAllOpen}>
+        <DialogContent className="glass-panel sm:max-w-[480px] border-rose-500/20">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-rose-400">
+              <AlertTriangle className="w-5 h-5" />
+              Delete all training data
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 mt-2">
+            <div className="rounded-lg bg-rose-500/10 border border-rose-500/20 p-3">
+              <p className="text-sm text-rose-300 font-medium">
+                This action cannot be undone. This will permanently delete{" "}
+                <span className="font-bold text-rose-200">
+                  {trainingData?.length ?? 0} training {(trainingData?.length ?? 0) === 1 ? "entry" : "entries"}
+                </span>{" "}
+                including all FAQs, video links, and knowledge base content.
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-sm text-muted-foreground">
+                To confirm, type <span className="font-mono font-bold text-foreground">delete all training data</span> below:
+              </label>
+              <Input
+                value={deleteConfirmText}
+                onChange={(e) => setDeleteConfirmText(e.target.value)}
+                placeholder="delete all training data"
+                className="border-white/10 bg-background/50 font-mono text-sm"
+                autoComplete="off"
+                spellCheck={false}
+              />
+            </div>
+
+            <div className="flex justify-end gap-3 pt-2">
+              <Button
+                variant="outline"
+                className="border-white/10"
+                onClick={() => setIsDeleteAllOpen(false)}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="destructive"
+                disabled={!canConfirmDelete || deleteAll.isPending}
+                className={!canConfirmDelete ? "opacity-50 cursor-not-allowed" : ""}
+                onClick={async () => {
+                  try {
+                    const result = await deleteAll.mutateAsync();
+                    toast({
+                      title: "All training data deleted",
+                      description: `Removed ${result.deleted} entries.`,
+                    });
+                    setIsDeleteAllOpen(false);
+                    setDeleteConfirmText("");
+                  } catch (err: any) {
+                    toast({
+                      title: "Error",
+                      description: err.message,
+                      variant: "destructive",
+                    });
+                  }
+                }}
+              >
+                {deleteAll.isPending ? (
+                  <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Deleting...</>
+                ) : (
+                  <><Trash2 className="w-4 h-4 mr-2" /> Delete all training data</>
+                )}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       {/* ── Detail View Modal ────────────────────────────────────── */}
       <Dialog open={!!viewItem} onOpenChange={(open) => { if (!open) setViewItem(null); }}>

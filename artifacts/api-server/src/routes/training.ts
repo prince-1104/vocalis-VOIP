@@ -2,7 +2,6 @@ import { Router, type IRouter } from "express";
 import { db, trainingDataTable } from "@workspace/db";
 import { eq, and } from "drizzle-orm";
 import multer from "multer";
-import pdfParse from "pdf-parse";
 import mammoth from "mammoth";
 
 const router: IRouter = Router();
@@ -10,45 +9,35 @@ const router: IRouter = Router();
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 20 * 1024 * 1024 },
-  fileFilter: (_req, file, cb) => {
-    const allowed = [
-      "application/pdf",
-      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-      "application/json",
-      "text/plain",
-    ];
-    if (allowed.includes(file.mimetype) || file.originalname.match(/\.(pdf|docx|json|txt)$/i)) {
-      cb(null, true);
-    } else {
-      cb(new Error("Only PDF, DOCX, JSON, and TXT files are supported."));
-    }
-  },
 });
 
 async function extractText(file: Express.Multer.File): Promise<string> {
   const ext = file.originalname.split(".").pop()?.toLowerCase();
 
-  if (file.mimetype === "application/pdf" || ext === "pdf") {
-    const parsed = await pdfParse(file.buffer);
-    return parsed.text;
+  if (ext === "txt" || file.mimetype === "text/plain") {
+    return file.buffer.toString("utf-8");
   }
 
-  if (
-    file.mimetype === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
-    ext === "docx"
-  ) {
+  if (ext === "json" || file.mimetype === "application/json") {
+    const data = JSON.parse(file.buffer.toString("utf-8"));
+    return typeof data === "string" ? data : JSON.stringify(data, null, 2);
+  }
+
+  if (ext === "docx" || file.mimetype === "application/vnd.openxmlformats-officedocument.wordprocessingml.document") {
     const result = await mammoth.extractRawText({ buffer: file.buffer });
     return result.value;
   }
 
-  if (file.mimetype === "application/json" || ext === "json") {
-    const obj = JSON.parse(file.buffer.toString("utf-8"));
-    return JSON.stringify(obj, null, 2);
+  if (ext === "pdf" || file.mimetype === "application/pdf") {
+    const pdfParse = (await import("pdf-parse")).default;
+    const parsed = await pdfParse(file.buffer);
+    return parsed.text;
   }
 
-  return file.buffer.toString("utf-8");
+  throw new Error(`Unsupported file type: .${ext}`);
 }
 
+// ── Types for structured multilingual JSON ──────────────────────────────
 type JsonTrainingShape = {
   type?: string;
   title?: string;
@@ -97,37 +86,68 @@ function parseStructuredTrainingJson(jsonText: string, fallbackType: string): Ar
     const vEn = (item.videos?.english_video || "").trim();
     const vKn = (item.videos?.kannada_video || "").trim();
 
-    const sections = [
-      ansEn ? `English Answer:\n${ansEn}` : "",
-      ansHi ? `Hindi Answer:\n${ansHi}` : "",
-      ansKn ? `Kannada Answer:\n${ansKn}` : "",
-      qEn.length ? `English Queries:\n${qEn.map(q => `- ${q}`).join("\n")}` : "",
-      qHi.length ? `Hindi Queries:\n${qHi.map(q => `- ${q}`).join("\n")}` : "",
-      qKn.length ? `Kannada Queries:\n${qKn.map(q => `- ${q}`).join("\n")}` : "",
-      vEn ? `Suggested YouTube (English): ${vEn}` : "",
-      vKn ? `Suggested YouTube (Kannada): ${vKn}` : "",
-      "Rule: Suggest at most one best-fit video and never repeat the same link in one reply.",
-    ].filter(Boolean);
+    // ── Create SEPARATE entries per language ─────────────────────────
+    // Each language gets its own KB entry so the LLM receives clean,
+    // focused content. This ensures Hindi and Kannada entries are
+    // properly stored and retrievable instead of being truncated
+    // when all 3 languages are crammed into one giant entry.
 
-    rows.push({
-      type,
-      title,
-      content: sections.join("\n\n").trim(),
-    });
+    if (ansEn) {
+      const sections = [
+        `Language: English (en-US)`,
+        `Answer:\n${ansEn}`,
+        qEn.length ? `Common Queries:\n${qEn.map(q => `- ${q}`).join("\n")}` : "",
+        vEn ? `Suggested YouTube (English): ${vEn}` : "",
+        vKn ? `Suggested YouTube (Kannada): ${vKn}` : "",
+      ].filter(Boolean);
+
+      rows.push({
+        type,
+        title: `${title} [English]`,
+        content: sections.join("\n\n").trim(),
+      });
+    }
+
+    if (ansHi) {
+      const sections = [
+        `भाषा: हिंदी — देवनागरी`,
+        `उत्तर:\n${ansHi}`,
+        qHi.length ? `सामान्य प्रश्न:\n${qHi.map(q => `- ${q}`).join("\n")}` : "",
+        vEn ? `YouTube (English): ${vEn}` : "",
+        vKn ? `YouTube (Kannada): ${vKn}` : "",
+      ].filter(Boolean);
+
+      rows.push({
+        type,
+        title: `${title} [Hindi Native]`,
+        content: sections.join("\n\n").trim(),
+      });
+    }
+
+    if (ansKn) {
+      const sections = [
+        `ಭಾಷೆ: ಕನ್ನಡ`,
+        `ಉತ್ತರ:\n${ansKn}`,
+        qKn.length ? `ಸಾಮಾನ್ಯ ಪ್ರಶ್ನೆಗಳು:\n${qKn.map(q => `- ${q}`).join("\n")}` : "",
+        vEn ? `YouTube (English): ${vEn}` : "",
+        vKn ? `YouTube (ಕನ್ನಡ): ${vKn}` : "",
+      ].filter(Boolean);
+
+      rows.push({
+        type,
+        title: `${title} [Kannada Native]`,
+        content: sections.join("\n\n").trim(),
+      });
+    }
 
     // ── Auto-extract video_link entries ──────────────────────────────
     // The widget's video suggestion engine (findRelevantVideo) looks
     // ONLY for type='video_link' rows with a specific JSON structure.
-    // When the uploaded JSON contains a `videos` field, we create a
-    // separate video_link row so the widget can surface the YT link.
     if (vEn || vKn) {
       const searchTerms: string[] = [];
-      // Include all multilingual query variants as search terms so the
-      // video matcher works for English, Hindi AND Kannada queries.
       for (const q of qEn) { const t = q.trim().toLowerCase(); if (t) searchTerms.push(t); }
       for (const q of qHi) { const t = q.trim(); if (t) searchTerms.push(t); }
       for (const q of qKn) { const t = q.trim(); if (t) searchTerms.push(t); }
-      // Add the FAQ title itself as a search term
       searchTerms.push(title.toLowerCase());
 
       rows.push({
@@ -268,12 +288,22 @@ router.post("/training/upload", upload.single("file"), async (req, res) => {
   });
 });
 
+// Delete a single training entry
 router.delete("/training/:id", async (req, res) => {
   const userId = req.userId!;
   await db.delete(trainingDataTable).where(
     and(eq(trainingDataTable.id, parseInt(req.params.id)), eq(trainingDataTable.userId, userId))
   );
   res.status(204).send();
+});
+
+// Delete ALL training entries for the current tenant
+router.delete("/training", async (req, res) => {
+  const userId = req.userId!;
+  const deleted = await db.delete(trainingDataTable)
+    .where(eq(trainingDataTable.userId, userId))
+    .returning({ id: trainingDataTable.id });
+  res.json({ deleted: deleted.length, message: `Deleted ${deleted.length} training entries.` });
 });
 
 export default router;

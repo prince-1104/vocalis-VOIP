@@ -1,4 +1,4 @@
-import { useQueryClient } from "@tanstack/react-query";
+import { useQueryClient, useMutation } from "@tanstack/react-query";
 import {
   useListTrainingData,
   useAddTrainingData,
@@ -37,3 +37,22 @@ export function useDeleteTrainingDataMutation() {
     }
   };
 }
+
+export function useDeleteAllTrainingDataMutation() {
+  const queryClient = useQueryClient();
+  const mutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch("/api/training", {
+        method: "DELETE",
+        credentials: "include",
+      });
+      if (!res.ok) throw new Error("Failed to delete all training data");
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: getListTrainingDataQueryKey() });
+    },
+  });
+  return mutation;
+}
+
