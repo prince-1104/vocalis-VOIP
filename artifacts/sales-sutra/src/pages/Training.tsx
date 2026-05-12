@@ -211,7 +211,7 @@ export default function Training() {
   const [isDeleteAllOpen, setIsDeleteAllOpen] = useState(false);
   const [deleteConfirmText, setDeleteConfirmText] = useState("");
 
-  const CONFIRM_PHRASE = "delete all training data";
+  const CONFIRM_PHRASE = "delete all";
   const canConfirmDelete = deleteConfirmText.trim().toLowerCase() === CONFIRM_PHRASE;
 
   const [formData, setFormData] = useState({
@@ -427,12 +427,12 @@ export default function Training() {
 
             <div className="space-y-2">
               <label className="text-sm text-muted-foreground">
-                To confirm, type <span className="font-mono font-bold text-foreground">delete all training data</span> below:
+                To confirm, type <span className="font-mono font-bold text-foreground bg-white/10 px-1 py-0.5 rounded">delete all</span> below:
               </label>
               <Input
                 value={deleteConfirmText}
                 onChange={(e) => setDeleteConfirmText(e.target.value)}
-                placeholder="delete all training data"
+                placeholder="delete all"
                 className="border-white/10 bg-background/50 font-mono text-sm"
                 autoComplete="off"
                 spellCheck={false}
@@ -472,7 +472,7 @@ export default function Training() {
                 {deleteAll.isPending ? (
                   <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Deleting...</>
                 ) : (
-                  <><Trash2 className="w-4 h-4 mr-2" /> Delete all training data</>
+                  <><Trash2 className="w-4 h-4 mr-2" /> Delete All</>
                 )}
               </Button>
             </div>
@@ -506,7 +506,7 @@ export default function Training() {
                   </DialogTitle>
                 </DialogHeader>
 
-                <ScrollArea className="flex-1 min-h-0 -mx-6 px-6">
+                <ScrollArea className="flex-1 min-h-[100px] max-h-[60vh] -mx-6 px-6 mt-4">
                   <div className="space-y-4 pb-4">
                     {/* Video Link detail view */}
                     {isVideoLink && videoLinkData && (
