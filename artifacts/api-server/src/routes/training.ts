@@ -86,11 +86,15 @@ function parseStructuredTrainingJson(jsonText: string, fallbackType: string): Ar
     const vEn = (item.videos?.english_video || "").trim();
     const vKn = (item.videos?.kannada_video || "").trim();
 
-    // ── Create SEPARATE entries per language ─────────────────────────
-    // Each language gets its own KB entry so the LLM receives clean,
-    // focused content. This ensures Hindi and Kannada entries are
-    // properly stored and retrievable instead of being truncated
-    // when all 3 languages are crammed into one giant entry.
+    // Build a combined query variations block with ALL languages.
+    // This is the KEY to multilingual matching: by embedding Hindi
+    // and Kannada queries inside the English entry (and vice versa),
+    // the relevance scorer can match ANY query variant regardless
+    // of which language the user types in.
+    const allQueries = [...qEn, ...qHi, ...qKn].filter(q => q.trim());
+    const queryBlock = allQueries.length
+      ? `--- Query Variations (${allQueries.length}) ---\n${allQueries.map(q => `• ${q}`).join("\n")}`
+      : "";
 
     if (ansEn) {
       const sections = [
@@ -99,6 +103,7 @@ function parseStructuredTrainingJson(jsonText: string, fallbackType: string): Ar
         qEn.length ? `Common Queries:\n${qEn.map(q => `- ${q}`).join("\n")}` : "",
         vEn ? `Suggested YouTube (English): ${vEn}` : "",
         vKn ? `Suggested YouTube (Kannada): ${vKn}` : "",
+        queryBlock,
       ].filter(Boolean);
 
       rows.push({
@@ -115,6 +120,7 @@ function parseStructuredTrainingJson(jsonText: string, fallbackType: string): Ar
         qHi.length ? `सामान्य प्रश्न:\n${qHi.map(q => `- ${q}`).join("\n")}` : "",
         vEn ? `YouTube (English): ${vEn}` : "",
         vKn ? `YouTube (Kannada): ${vKn}` : "",
+        queryBlock,
       ].filter(Boolean);
 
       rows.push({
@@ -131,6 +137,7 @@ function parseStructuredTrainingJson(jsonText: string, fallbackType: string): Ar
         qKn.length ? `ಸಾಮಾನ್ಯ ಪ್ರಶ್ನೆಗಳು:\n${qKn.map(q => `- ${q}`).join("\n")}` : "",
         vEn ? `YouTube (English): ${vEn}` : "",
         vKn ? `YouTube (ಕನ್ನಡ): ${vKn}` : "",
+        queryBlock,
       ].filter(Boolean);
 
       rows.push({

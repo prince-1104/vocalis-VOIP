@@ -753,14 +753,36 @@ async function getAgentByWidgetKey(apiKey: string) {
   });
 }
 
-// ── Lightweight per-message KB relevance scoring ─────────────────────────
-// Instead of dumping ALL KB entries into the system prompt (which leads to
-// truncation and irrelevant context), score each entry against the user's
-// current message and pick the top-K most relevant ones.
-function scoreKBRelevance(entry: { title: string; content: string; type: string }, messageTokens: string[], messageJoined: string): number {
+// ── Intelligent per-message KB relevance scoring ────────────────────────
+// Scores each KB entry against the user's message using:
+// 1. Title token overlap (3× weight)
+// 2. Query variation matching (highest signal — matches the "many ways to ask")
+// 3. Content token overlap (1× weight)
+// 4. Native-script substring matching (Devanagari, Kannada)
+
+// Extract query variation lines from content (lines starting with •)
+function extractQueryVariations(content: string): string[] {
+  const queries: string[] = [];
+  const marker = "--- Query Variations";
+  const idx = content.indexOf(marker);
+  if (idx === -1) return queries;
+  const block = content.slice(idx);
+  const lines = block.split("\n");
+  for (const line of lines) {
+    const trimmed = line.replace(/^[•\-]\s*/, "").trim();
+    if (trimmed && !trimmed.startsWith("---")) {
+      queries.push(trimmed);
+    }
+  }
+  return queries;
+}
+
+function scoreKBRelevance(entry: { title: string; content: string; type: string }, messageTokens: string[], messageJoined: string, rawMessage: string): number {
   if (!messageTokens.length) return 0;
   const messageSet = new Set(messageTokens);
-  // Score against title
+  const msgLower = rawMessage.toLowerCase();
+
+  // 1. Score against title
   const titleNorm = normalizeSearchText(entry.title);
   const titleTokens = titleNorm.split(/\s+/).filter(t => t.length > 1);
   let titleOverlap = 0;
@@ -769,18 +791,83 @@ function scoreKBRelevance(entry: { title: string; content: string; type: string 
   }
   // Phrase match on title — very strong signal
   if (titleNorm.length > 4 && messageJoined.includes(" " + titleNorm + " ")) {
-    return 10;
+    return 15;
   }
-  // Score against content (first 500 chars)
-  const contentSnippet = normalizeSearchText(entry.content.slice(0, 500));
+
+  // 2. Score against query variations — THIS IS THE KEY SIGNAL
+  // Each entry has embedded "--- Query Variations ---" with all possible
+  // ways someone might ask this question (EN, HI, KN, transliterated).
+  const queryVars = extractQueryVariations(entry.content);
+  let bestQueryScore = 0;
+  for (const q of queryVars) {
+    const qNorm = normalizeSearchText(q);
+    const qTokens = tokenizeForSearch(q);
+
+    // Exact phrase match in normalized form (strongest)
+    if (qNorm.length > 4 && messageJoined.includes(" " + qNorm + " ")) {
+      bestQueryScore = Math.max(bestQueryScore, 12);
+      continue;
+    }
+
+    // Native-script substring match (handles Devanagari/Kannada)
+    // e.g., user types "ई खाता के लिए जरूरी दस्तावेज" → matches embedded query
+    const qTrimmed = q.trim();
+    if (qTrimmed.length > 5 && (
+      msgLower.includes(qTrimmed.toLowerCase()) ||
+      qTrimmed.toLowerCase().includes(msgLower)
+    )) {
+      bestQueryScore = Math.max(bestQueryScore, 12);
+      continue;
+    }
+
+    // Token coverage match (handles partial/fuzzy matching)
+    if (qTokens.length > 0) {
+      let overlap = 0;
+      for (const t of qTokens) {
+        if (messageSet.has(t)) overlap++;
+      }
+      const coverage = overlap / qTokens.length;
+      // High coverage of query tokens = strong match
+      if (overlap >= 2 && coverage >= 0.5) {
+        bestQueryScore = Math.max(bestQueryScore, 5 + overlap + coverage * 2);
+      } else if (overlap >= 1 && coverage >= 0.4 && qTokens.length >= 2) {
+        bestQueryScore = Math.max(bestQueryScore, 3 + overlap + coverage);
+      }
+    }
+  }
+
+  // 3. Score against content body (scan more to reach query block)
+  const contentSnippet = normalizeSearchText(entry.content.slice(0, 2000));
   const contentTokens = contentSnippet.split(/\s+/).filter(t => t.length > 1);
   const contentSet = new Set(contentTokens);
   let contentOverlap = 0;
   for (const t of messageTokens) {
     if (contentSet.has(t)) contentOverlap++;
   }
-  // Weighted: title matches are 3× more valuable than content matches
-  return titleOverlap * 3 + contentOverlap;
+
+  // 4. Native-script substring match on full content
+  // Handles cases where user types full native-script text
+  const hasNativeScript = /[\u0900-\u097F\u0C80-\u0CFF]/.test(rawMessage);
+  let nativeBonus = 0;
+  if (hasNativeScript && rawMessage.trim().length > 5) {
+    if (entry.content.includes(rawMessage.trim())) {
+      nativeBonus = 10;
+    } else {
+      // Check partial containment of message words in native script
+      const nativeWords = rawMessage.trim().split(/\s+/).filter(w => w.length > 2);
+      let nativeHits = 0;
+      for (const w of nativeWords) {
+        if (entry.content.includes(w)) nativeHits++;
+      }
+      if (nativeWords.length > 0) {
+        const nativeCoverage = nativeHits / nativeWords.length;
+        if (nativeCoverage >= 0.5) nativeBonus = Math.round(nativeCoverage * 8);
+      }
+    }
+  }
+
+  // Weighted combination: query vars are most important
+  return Math.max(bestQueryScore, titleOverlap * 3 + contentOverlap) + nativeBonus;
 }
 
 function selectRelevantKBEntries(
@@ -797,7 +884,7 @@ function selectRelevantKBEntries(
 
   const scored = allEntries.map(entry => ({
     entry,
-    score: scoreKBRelevance(entry, tokens, joined),
+    score: scoreKBRelevance(entry, tokens, joined, userMessage),
   }));
   scored.sort((a, b) => b.score - a.score);
 
@@ -907,10 +994,18 @@ const VIDEO_CACHE_TTL_MS = 5 * 60 * 1000;
 const videoCache = new Map<number, CachedVideos>();
 const VIDEO_SUGGESTION_MARKER = "📺";
 const SEARCH_STOPWORDS = new Set([
+  // English
   "a", "an", "and", "are", "as", "at", "be", "between", "by", "for", "from", "how",
   "i", "if", "in", "is", "it", "me", "my", "new", "of", "on", "or", "the", "to",
-  "what", "where", "why", "with", "you", "your",
+  "what", "where", "why", "with", "you", "your", "do", "does", "can", "will",
+  "need", "want", "please", "tell", "about", "which", "this", "that",
+  // Romanized Hindi stopwords
+  "kya", "hai", "ke", "ka", "ki", "ko", "se", "me", "mein", "ye", "wo", "aur",
+  "liye", "kaise", "kahan", "kaun", "kab", "kitna", "kitne", "nahi",
+  // Romanized Kannada stopwords
   "alli", "dalli", "madhu", "matthu", "iddu", "ide", "enu", "yenu", "hogona",
+  "ge", "hegidhe", "yavudu", "yavu", "beku", "bekada", "yavavu",
+  // Common terms that appear in most entries (too broad to score on)
   "khata", "e", "ekhata", "bbmp",
 ]);
 
