@@ -14,5 +14,6 @@ export const CreateTrainingDataRequestType = {
   faq: "faq",
   objection_handling: "objection_handling",
   competitor_info: "competitor_info",
+  video_link: "video_link",
   custom: "custom",
 } as const;
