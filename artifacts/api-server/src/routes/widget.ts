@@ -464,10 +464,12 @@ async function resolveEffectiveWidgetLanguage(
 // Strip stray romanization the LLM might still output (e.g. "Namaskara"
 // appearing inside Devanagari text) and trim to a single short reply.
 function normalizeIndicReply(reply: string, language: string): string {
-  const trimmed = reply.trim();
-  if (!isIndianLanguage(language)) return trimmed;
+  // Strip <think> tags that DeepSeek/other models might generate
+  let cleaned = reply.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
+  
+  if (!isIndianLanguage(language)) return cleaned;
   // Replace English greetings the model occasionally code-switches into.
-  return trimmed
+  return cleaned
     .replace(/^(Hi|Hello|Hey)[!,.]?\s*/i, "")
     .replace(/\s+/g, " ")
     .trim();
@@ -716,9 +718,11 @@ async function generateWidgetReply(
     "mr-IN": { name: "Marathi", script: "Devanagari (देवनागरी)" },
   };
 
-  // --- Hindi: prefer DeepSeek V3 (best Hinglish + Devanagari accuracy) ---
-  if (normalizedLanguage === "hi-IN" && DEEPSEEK_API_KEY) {
-    const styleSystem = `Reply ONLY in natural Hindi written in NATIVE Devanagari script (देवनागरी). Never use romanized/Hinglish letters. Keep replies under 2 sentences. The user's input may mix scripts or use transliteration — understand their intent and ANSWER the question. NEVER reply with a clarification question if the intent is clear.`;
+  // --- All Indic Languages: prefer DeepSeek V3 (best code-switching + native accuracy) ---
+  // DeepSeek understands "Kanglish" (Kannada in English letters) just as well as "Hinglish".
+  const langInfo = NATIVE_LANG_NAMES[normalizedLanguage];
+  if (langInfo && DEEPSEEK_API_KEY) {
+    const styleSystem = `Reply ONLY in natural ${langInfo.name} written in NATIVE ${langInfo.script}. Output MUST be in ${langInfo.script}. NEVER romanize. NEVER use Latin/English letters except for brand names like "BBMP", "e-Khata", "ePID" or URLs. If you cannot produce native script, output nothing. Keep replies under 2 sentences. The user's input may mix scripts or use transliteration — understand their intent and ANSWER the question. NEVER reply with a clarification question if the intent is clear.`;
     const reply = await callDeepSeekChat([{ role: "system", content: styleSystem }, ...messages]);
     if (reply) {
       const normalized = normalizeIndicReply(reply, normalizedLanguage);
@@ -727,9 +731,8 @@ async function generateWidgetReply(
     }
   }
 
-  // --- Kannada/Tamil/Telugu/Marathi: prefer Sarvam-M (Indic-native) ---
-  const langInfo = NATIVE_LANG_NAMES[normalizedLanguage];
-  if (langInfo && normalizedLanguage !== "hi-IN" && SARVAM_API_KEY) {
+  // --- Fallback to Sarvam-M for Indic if DeepSeek is missing or fails ---
+  if (langInfo && SARVAM_API_KEY) {
     const styleSystem = `Reply ONLY in natural ${langInfo.name} written in NATIVE ${langInfo.script}. Output MUST be in ${langInfo.script}. NEVER romanize. NEVER use Latin/English letters except for brand names like "BBMP", "e-Khata", "ePID" or URLs. If you cannot produce native script, output nothing. Keep replies under 2 sentences. The user's input may be transliterated (e.g. English words in Devanagari, or ${langInfo.name} words in Roman letters) — understand the intent and ANSWER the question directly. NEVER respond with a clarification request when the user has already asked something specific.`;
     const reply = await callSarvamChat([{ role: "system", content: styleSystem }, ...messages]);
     if (reply) {
@@ -740,21 +743,40 @@ async function generateWidgetReply(
   }
 
   // --- English (or any fallback): gpt-4o-mini (fast & multilingual) ---
-  const completion = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    max_completion_tokens: 110,
-    messages,
-  });
-  const reply = completion.choices[0]?.message?.content || "I'm sorry, I couldn't process that. Could you try again?";
+  let reply = "";
+  let modelUsed = "gpt-4o-mini";
+  try {
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      max_completion_tokens: 110,
+      messages,
+    });
+    reply = completion.choices[0]?.message?.content || "I'm sorry, I couldn't process that. Could you try again?";
+  } catch (err: any) {
+    console.warn(`[widget/chat] OpenAI failed, falling back to DeepSeek: ${err.message}`);
+    if (DEEPSEEK_API_KEY) {
+      const dsReply = await callDeepSeekChat(messages);
+      if (dsReply) {
+        reply = dsReply;
+        modelUsed = "deepseek-chat";
+      } else {
+        throw err;
+      }
+    } else {
+      throw err;
+    }
+  }
+  
   const normalized = normalizeIndicReply(reply, normalizedLanguage);
-  // gpt-4o-mini reliably produces native script for Indic; only run the
+  
+  // gpt-4o-mini/DeepSeek reliably produce native script for Indic; only run the
   // ensureNativeScript safety net when the language is non-English to keep
   // the English fast-path latency-free.
   if (!isIndianLanguage(normalizedLanguage)) {
-    return { reply: normalized, modelUsed: "gpt-4o-mini" };
+    return { reply: normalized, modelUsed };
   }
   const fixed = await ensureNativeScript(normalized, normalizedLanguage);
-  return { reply: fixed.reply, modelUsed: fixed.rewrote ? "gpt-4o-mini+rewrite" : "gpt-4o-mini" };
+  return { reply: fixed.reply, modelUsed: fixed.rewrote ? `${modelUsed}+rewrite` : modelUsed };
 }
 
 async function getAgentByWidgetKey(apiKey: string) {
