@@ -293,16 +293,21 @@ function detectRomanizedHints(text: string): { lang: LangCode; score: number } |
     "nanag", "nanage", "nanu", "nanna", "beku", "bekagittu", "bagge", "yaake", "yake",
     "yenu", "ide", "illa", "kodti", "kodutte", "heli", "tilsi", "saku",
     "namaskara", "hege", "yelli", "yaaru", "maadi", "maadu", "maadta", "maaduttare",
-    "swalpa", "thumba",
+    "swalpa", "thumba", 
+    // Added to catch Voice transcription phonetics (e.g., Whisper translating 
+    // "bekada dakhalegalu" as "bekadar Aakhri Guru"):
+    "bekad", "bekada", "dakhale", "dakhal", "arji", "araji", "hesaru", "badalavane", 
+    "aasti", "asti", "nondani", "madoke", "madodu", "kodi", "kodu", "galu", "galannu"
   ];
   const hindiHints = [
     "mujhe", "mujh", "aap", "kya", "kaise", "hai", "hain", "nahi", "chahiye", "karna",
     "meri", "mera", "hum", "batao", "samjhao", "kar sakte", "ke baare", "thoda",
     "bata", "bataa", "samajh", "krpya", "kripya",
+    "dastavez", "kagaz", "jankari", "naam", "badal", "kaha", "kahan", "nyayalay", "aadesh"
   ];
-  const tamilHints = ["enna", "yenna", "naan", "naangal", "ennoda", "konjam", "vendam", "venum", "irukku", "panra", "panren"];
-  const teluguHints = ["nenu", "meeru", "enti", "emi", "kavali", "kavalsina", "chestunna", "chestunnaru", "ela"];
-  const marathiHints = ["mala", "tula", "tumhi", "kasa", "kase", "ahe", "pahije", "karto", "kartoy"];
+  const tamilHints = ["enna", "yenna", "naan", "naangal", "ennoda", "konjam", "vendam", "venum", "irukku", "panra", "panren", "aavanam"];
+  const teluguHints = ["nenu", "meeru", "enti", "emi", "kavali", "kavalsina", "chestunna", "chestunnaru", "ela", "patralu"];
+  const marathiHints = ["mala", "tula", "tumhi", "kasa", "kase", "ahe", "pahije", "karto", "kartoy", "kagad"];
 
   const score = (hints: string[]) => hints.reduce((acc, token) => acc + (lower.includes(token) ? 1 : 0), 0);
   const ranked = ([
@@ -312,7 +317,9 @@ function detectRomanizedHints(text: string): { lang: LangCode; score: number } |
     { lang: "te-IN" as LangCode, s: score(teluguHints) },
     { lang: "mr-IN" as LangCode, s: score(marathiHints) },
   ] as Array<{ lang: LangCode; s: number }>).sort((a, b) => b.s - a.s);
-  if (ranked[0].s >= 2) return { lang: ranked[0].lang, score: ranked[0].s };
+  
+  // Return even weak signals (score 1) so the arbitrator can decide if needed
+  if (ranked[0].s >= 1) return { lang: ranked[0].lang, score: ranked[0].s };
   return null;
 }
 
@@ -337,10 +344,11 @@ async function llmResolveLanguage(
       "Rules (in priority order):",
       "1. If the user explicitly asks to switch language (e.g. 'in kannada', 'reply in hindi', 'कन्नड में बताओ', 'ಕನ್ನಡದಲ್ಲಿ ಹೇಳಿ', 'इन कनाडा लैंग्वेज', 'english me'), output that language. Cross-script mentions count.",
       "2. Otherwise mirror the language the user is writing in (Devanagari → hi-IN unless clearly Marathi; Kannada script → kn-IN; Tamil → ta-IN; Telugu → te-IN).",
-      "3. Romanized Indic with strong markers: nanu/maadi/beku → kn-IN, mujhe/aap/kya → hi-IN, naan/enna → ta-IN, nenu/meeru → te-IN, mala/tumhi → mr-IN.",
-      "4. Domain terms like 'BBMP', 'e-Khata', 'ekhata', 'khata', 'ePID', 'PID', 'amalgamation' are LANGUAGE-NEUTRAL — used freely in English, Hindi and Kannada. Do NOT use them as language signals.",
-      "5. If the user writes plainly in English (e.g. 'can you tell me about ekhata', 'how do I apply') reply in en-US — even if the prior turn was Indic. The user is switching back.",
-      "6. Default en-US only when nothing else applies.",
+      "3. Romanized Indic with strong markers: nanu/maadi/beku/bekada/arji/dakhale → kn-IN, mujhe/aap/kya/dastavez → hi-IN, naan/enna → ta-IN, nenu/meeru → te-IN, mala/tumhi → mr-IN.",
+      "4. Voice Transcription Artifacts: Sometimes English voice models aggressively mis-transcribe Kannada into Hindi/English-sounding words (e.g., 'bekadar' for bekada, 'Aakhri Guru' for dakhalegalu, 'nyayalay Aadesh'). If it looks like butchered Kannada phonetics about eKhata, route to kn-IN.",
+      "5. Domain terms like 'BBMP', 'e-Khata', 'ekhata', 'khata', 'ePID', 'PID', 'amalgamation' are LANGUAGE-NEUTRAL — used freely in English, Hindi and Kannada. Do NOT use them as language signals.",
+      "6. If the user writes plainly in English (e.g. 'can you tell me about ekhata', 'how do I apply') reply in en-US — even if the prior turn was Indic. The user is switching back.",
+      "7. Default en-US only when nothing else applies.",
       sessionLanguage ? `Previous session language was: ${sessionLanguage}.` : "",
       "Output the code only. No quotes. No explanation.",
     ].filter(Boolean).join("\n");
@@ -408,7 +416,7 @@ async function resolveEffectiveWidgetLanguage(
 
   const romanized = detectRomanizedHints(message);
   // Romanized-strong only fires when there's no competing English signal.
-  if (romanized && romanized.score >= 3 && eng.ratio < 0.3) {
+  if (romanized && romanized.score >= 2 && eng.ratio < 0.3) {
     return { lang: romanized.lang, source: "romanized-strong" };
   }
 
@@ -418,14 +426,16 @@ async function resolveEffectiveWidgetLanguage(
   const conflictingSignals =
     (native && romanized && native.lang !== romanized.lang) ||
     (hasNativeChars && eng.ratio >= 0.35) ||
-    (romanized && eng.ratio >= 0.2 && eng.ratio < 0.4);
+    (romanized && eng.ratio >= 0.2 && eng.ratio < 0.4) ||
+    (romanized && romanized.score === 1 && eng.words === 0); // Whisper phonetic artifact
+    
   if (conflictingSignals) {
     const arbiter = await llmResolveLanguage(message, history, sessionLanguage ?? null);
     if (arbiter) return { lang: arbiter, source: "llm-arbiter" };
   }
 
   if (native) return { lang: native.lang, source: "native-script-weak" };
-  if (romanized && eng.ratio < 0.3) return { lang: romanized.lang, source: "romanized-weak" };
+  if (romanized && romanized.score >= 2 && eng.ratio < 0.3) return { lang: romanized.lang, source: "romanized-weak" };
 
   // Sticky session: keep the previously established language so a quick
   // confirmation ("ok", "yes") doesn't flip the conversation. We only stick
