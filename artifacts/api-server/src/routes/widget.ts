@@ -1059,6 +1059,37 @@ function stripVideoSuggestionText(text: string): string {
   return main.replace(/https?:\/\/\S+/g, "").trim();
 }
 
+// Server-side TTS chunking — splits text into sentence-level chunks for
+// parallel synthesis. Uses relaxed thresholds compared to the old client-side
+// splitForTTS (which over-merged sentences into 150+ char blobs, defeating
+// the parallelism benefit). Each chunk stays small enough for fast Sarvam
+// synthesis (~120 chars max) while still merging truly tiny fragments.
+function splitIntoTTSChunks(text: string): string[] {
+  const stripped = stripVideoSuggestionText(text).replace(/https?:\/\/\S+/g, "").trim();
+  if (!stripped) return [];
+  // Split on sentence boundaries including Indic punctuation (purna viram, etc.)
+  const parts = stripped.split(/(?<=[.?!।॥])\s+/);
+  const chunks: string[] = [];
+  let buf = "";
+  for (const p of parts) {
+    const trimmed = p.trim();
+    if (!trimmed) continue;
+    // Merge ultra-short fragments (< 20 chars like "Ok." or "Hi.") into the
+    // previous buffer, but cap the combined chunk at 120 chars so Sarvam
+    // synthesizes each in < 2s.
+    if (buf && (trimmed.length < 20 || (buf + " " + trimmed).length < 120)) {
+      buf = (buf + " " + trimmed).trim();
+    } else if (buf) {
+      chunks.push(buf);
+      buf = trimmed;
+    } else {
+      buf = trimmed;
+    }
+  }
+  if (buf) chunks.push(buf);
+  return chunks.length > 0 ? chunks : [stripped];
+}
+
 async function loadVideoLinks(userId: number): Promise<VideoLinkEntry[]> {
   const cached = videoCache.get(userId);
   if (cached && Date.now() - cached.fetchedAt < VIDEO_CACHE_TTL_MS) {
@@ -1209,11 +1240,12 @@ function videoSuggestionLine(language: string, link: string): string {
 }
 
 router.post("/widget/chat", async (req, res) => {
-  const { apiKey, message, history, includeAudio, sessionLanguage } = req.body as {
+  const { apiKey, message, history, includeAudio, isVoiceRequest, sessionLanguage } = req.body as {
     apiKey: string;
     message: string;
     history?: { role: string; content: string }[];
     includeAudio?: boolean;
+    isVoiceRequest?: boolean;
     sessionLanguage?: string;
   };
 
@@ -1297,9 +1329,39 @@ router.post("/widget/chat", async (req, res) => {
   let provider: "sarvam" | "openai" | null = null;
   let audioMimeType = "audio/mpeg";
 
-  if (includeAudio) {
-    // Strip the appended video-suggestion line and bare URLs so TTS doesn't
-    // read out "h-t-t-p-s colon slash slash..." in the middle of the reply.
+  // ── Parallel server-side TTS (voice requests) ────────────────────────
+  // When the client signals isVoiceRequest, we split the reply into sentence
+  // chunks, fire ALL Sarvam/OpenAI TTS calls in parallel, and bundle every
+  // audio chunk in the response. This eliminates the extra client→server→Sarvam
+  // round-trip that used to add 4-8s of latency.
+  let audioChunks: Array<{ audio: string | null; mimeType: string }> | null = null;
+
+  if (isVoiceRequest) {
+    const ttsChunks = splitIntoTTSChunks(reply);
+    if (ttsChunks.length > 0) {
+      const ttsStart = Date.now();
+      const chunkResults = await Promise.allSettled(
+        ttsChunks.map(chunk =>
+          synthesizeWidgetTTS(chunk, agent.voice || "nova", language)
+        )
+      );
+      audioChunks = chunkResults.map(r =>
+        r.status === "fulfilled"
+          ? { audio: r.value.audio, mimeType: r.value.mimeType }
+          : { audio: null, mimeType: "audio/wav" }
+      );
+      // Determine the provider from the first successful chunk for logging
+      for (const r of chunkResults) {
+        if (r.status === "fulfilled" && r.value.provider) {
+          provider = r.value.provider;
+          break;
+        }
+      }
+      audioMimeType = audioChunks[0]?.mimeType || "audio/wav";
+      console.log(`[widget/chat] parallel TTS: ${ttsChunks.length} chunks in ${Date.now() - ttsStart}ms`);
+    }
+  } else if (includeAudio) {
+    // Legacy path: single monolithic TTS (for backward compatibility)
     const ttsText = stripVideoSuggestionText(reply) || reply;
     const ttsResult = await synthesizeWidgetTTS(ttsText, agent.voice || "nova", language);
     audio = ttsResult.audio;
@@ -1307,7 +1369,7 @@ router.post("/widget/chat", async (req, res) => {
     audioMimeType = ttsResult.mimeType;
   }
 
-  console.log(`[widget/chat] configured=${agent.language} effective=${language} source=${resolved.source} session=${sessionLanguage ?? "-"} model=${modelUsed} tts=${provider ?? "none"} includeAudio=${!!includeAudio} video=${suggestedVideo ? suggestedVideo.title : "none"}`);
+  console.log(`[widget/chat] configured=${agent.language} effective=${language} source=${resolved.source} session=${sessionLanguage ?? "-"} model=${modelUsed} tts=${provider ?? "none"} voice=${!!isVoiceRequest} chunks=${audioChunks?.length ?? 0} video=${suggestedVideo ? suggestedVideo.title : "none"}`);
 
   res.json({
     reply,
@@ -1317,6 +1379,7 @@ router.post("/widget/chat", async (req, res) => {
     configuredLanguage: agent.language,
     modelUsed,
     audio,
+    audioChunks,
     provider,
     video: suggestedVideo,
     audioMimeType,
@@ -1657,10 +1720,8 @@ router.get("/widget/loader.js", async (req, res) => {
         apiKey: API_KEY,
         message: msg,
         history: history.slice(-6),
-        // Decoupled TTS: never bundle audio in the chat response — the LLM
-        // alone is fast (~1–3s), TTS for long Indic replies is 3–6s. By fetching
-        // TTS separately AFTER the text arrives we cut perceived latency in half.
         includeAudio: false,
+        isVoiceRequest: isVoice,
         sessionLanguage: sessionLang
       })
     }).then(function(r){
@@ -1677,10 +1738,27 @@ router.get("/widget/loader.js", async (req, res) => {
         history.push({role:"assistant", content:reply});
         if (res.data.detectedLanguage) sessionLang = res.data.detectedLanguage;
         if (isVoice) {
-          // Server returns text immediately; fetch TTS separately so audio
-          // plays as soon as it arrives without blocking the visible reply.
-          if (res.data.audio) playReplyAudio(res.data.audio, res.data.audioMimeType);
-          else speakReply(reply, res.data.detectedLanguage || sessionLang);
+          // Server pre-generated TTS chunks in parallel — play them directly
+          // without any extra fetch calls. This eliminates the N×RTT overhead
+          // that used to add 4-8s of latency.
+          if (res.data.audioChunks && res.data.audioChunks.length > 0) {
+            ttsCancelAll();
+            speaking = true;
+            for (var ci = 0; ci < res.data.audioChunks.length; ci++) {
+              ttsQueue.push({
+                ready: true,
+                audio: res.data.audioChunks[ci].audio,
+                audioMimeType: res.data.audioChunks[ci].mimeType || "audio/wav"
+              });
+            }
+            ttsPlayNext();
+          } else if (res.data.audio) {
+            // Legacy: monolithic audio from includeAudio=true
+            playReplyAudio(res.data.audio, res.data.audioMimeType);
+          } else {
+            // Fallback: old client-side chunked fetch path
+            speakReply(reply, res.data.detectedLanguage || sessionLang);
+          }
         }
       }
     }).catch(function(err){
