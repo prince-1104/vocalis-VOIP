@@ -93,20 +93,22 @@ router.get("/superadmin/dashboard", async (_req, res) => {
   weekStart.setDate(weekStart.getDate() - 7);
 
   // Active tenants this month (at least 1 call)
-  const [activeRes] = await db.execute(sql`
+  const activeResult = await db.execute(sql`
     SELECT COUNT(DISTINCT tenant_id) as active_count
     FROM api_cost_logs
     WHERE created_at >= ${monthStart}
   `);
-  const activeThisMonth = parseInt((activeRes as any).active_count ?? "0", 10);
+  const activeRows = (activeResult as any).rows || activeResult;
+  const activeThisMonth = parseInt(activeRows[0]?.active_count ?? "0", 10);
 
   // Platform API Cost this month
-  const [costRes] = await db.execute(sql`
+  const costResult = await db.execute(sql`
     SELECT coalesce(sum(cost_usd::numeric), 0) as total_cost
     FROM api_cost_logs
     WHERE created_at >= ${monthStart}
   `);
-  const platformCost = parseFloat((costRes as any).total_cost ?? "0");
+  const costRows = (costResult as any).rows || costResult;
+  const platformCost = parseFloat(costRows[0]?.total_cost ?? "0");
 
   // Limits and revenue
   const limits = await db.select().from(tenantLimitsTable);
@@ -134,7 +136,7 @@ router.get("/superadmin/dashboard", async (_req, res) => {
   const estimatedMargin = totalRevenue - platformCost;
 
   // Recent Alerts
-  const recentAlerts = await db.execute(sql`
+  const recentAlertsResult = await db.execute(sql`
     SELECT tl.tenant_id as "tenantId", t.name as "tenantName", tl.limit_alert_sent_at as "timestamp"
     FROM tenant_limits tl
     JOIN tenants t ON tl.tenant_id = t.id
@@ -142,9 +144,10 @@ router.get("/superadmin/dashboard", async (_req, res) => {
     ORDER BY tl.limit_alert_sent_at DESC
     LIMIT 5
   `);
+  const recentAlerts = (recentAlertsResult as any).rows || recentAlertsResult;
 
   // Top Consumers
-  const topConsumers = await db.execute(sql`
+  const topConsumersResult = await db.execute(sql`
     SELECT a.tenant_id as "tenantId", t.name as "tenantName", sum(a.cost_usd::numeric) as "cost"
     FROM api_cost_logs a
     JOIN tenants t ON a.tenant_id = t.id
@@ -153,10 +156,11 @@ router.get("/superadmin/dashboard", async (_req, res) => {
     ORDER BY sum(a.cost_usd::numeric) DESC
     LIMIT 5
   `);
+  const topConsumers = (topConsumersResult as any).rows || topConsumersResult;
 
   // Chart Data (Breakdown by LLM/TTS/STT across last 7 days vs month can be derived or aggregated)
   // Let's do a daily aggregation for the current month
-  const chartData = await db.execute(sql`
+  const chartDataResult = await db.execute(sql`
     SELECT 
       DATE(created_at) as date,
       sum(case when api_provider like 'llm:%' then cost_usd::numeric else 0 end) as llm_cost,
@@ -167,6 +171,7 @@ router.get("/superadmin/dashboard", async (_req, res) => {
     GROUP BY DATE(created_at)
     ORDER BY DATE(created_at) ASC
   `);
+  const chartData = (chartDataResult as any).rows || chartDataResult;
 
   res.json({
     summary: {
