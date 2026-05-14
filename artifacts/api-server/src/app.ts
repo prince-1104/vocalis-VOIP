@@ -16,6 +16,7 @@ import analyticsRouter from "./routes/analytics";
 import twilioRouter from "./routes/twilio";
 import dialRouter from "./routes/dial";
 import adminRouter from "./routes/admin";
+import adminCostsRouter from "./routes/admin-costs";
 import invoicesRouter, { checkAndMarkOverdueInvoices } from "./routes/invoices";
 import widgetRouter from "./routes/widget";
 
@@ -65,6 +66,7 @@ app.use("/api", requireRole("admin"), scriptsRouter);
 app.use("/api", requireRole("admin"), dialRouter);
 
 app.use("/api", requireSuperadmin, adminRouter);
+app.use("/api", requireSuperadmin, adminCostsRouter);
 
 app.use("/api", invoicesRouter);
 

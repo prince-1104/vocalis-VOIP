@@ -20,6 +20,7 @@ import AdminOverview from "@/pages/admin/AdminOverview";
 import AdminTenants from "@/pages/admin/AdminTenants";
 import AdminTenantDetail from "@/pages/admin/AdminTenantDetail";
 import AdminInvoices from "@/pages/admin/AdminInvoices";
+import AdminCosts from "@/pages/admin/AdminCosts";
 import Billing from "@/pages/Billing";
 import NotFound from "@/pages/not-found";
 import WidgetTest from "@/pages/WidgetTest";
@@ -96,6 +97,13 @@ function Router() {
         <AdminGuard>
           <AdminLayout>
             <AdminInvoices />
+          </AdminLayout>
+        </AdminGuard>
+      </Route>
+      <Route path="/admin/costs">
+        <AdminGuard>
+          <AdminLayout>
+            <AdminCosts />
           </AdminLayout>
         </AdminGuard>
       </Route>

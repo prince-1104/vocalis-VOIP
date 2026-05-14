@@ -3,6 +3,7 @@ import { db, agentConfigsTable, callLogsTable, trainingDataTable, callingScripts
 import { eq, and } from "drizzle-orm";
 import { openai } from "@workspace/integrations-openai-ai-server";
 import { randomUUID } from "crypto";
+import { logLLMCost, logTTSCost, resolveTenantIdForOwner } from "../lib/cost-logger";
 
 const router: IRouter = Router();
 
@@ -1307,6 +1308,28 @@ router.post("/widget/chat", async (req, res) => {
     billedCostUsd: "0",
   }).catch(() => {});
 
+  // ── Fire-and-forget cost logging ──────────────────────────────────────
+  // Estimate token counts from text length (rough: ~4 chars per token for
+  // English, ~2 for Indic scripts). We don't get exact counts from DeepSeek
+  // or Sarvam-M, so this is a reasonable approximation.
+  resolveTenantIdForOwner(agent.userId).then(tenantId => {
+    if (!tenantId) return;
+    const charsPerToken = isIndianLanguage(effectiveLanguage) ? 2 : 4;
+    const inputChars = message.length + (systemPrompt?.length ?? 0);
+    const outputChars = reply.length;
+    const estInputTokens = Math.ceil(inputChars / charsPerToken);
+    const estOutputTokens = Math.ceil(outputChars / charsPerToken);
+    const baseModel = modelUsed.replace(/\+rewrite$/, "");
+    logLLMCost({
+      tenantId,
+      userId: agent.userId,
+      provider: baseModel,
+      inputTokens: estInputTokens,
+      outputTokens: estOutputTokens,
+      context: "widget-chat",
+    });
+  }).catch(() => {});
+
   // Suggest a relevant tutorial video if the user's message matches one of
   // the curated topics. We append AFTER the LLM reply so the link survives
   // even when the model is verbose.
@@ -1359,6 +1382,19 @@ router.post("/widget/chat", async (req, res) => {
       }
       audioMimeType = audioChunks[0]?.mimeType || "audio/wav";
       console.log(`[widget/chat] parallel TTS: ${ttsChunks.length} chunks in ${Date.now() - ttsStart}ms`);
+
+      // Log TTS cost (fire-and-forget)
+      resolveTenantIdForOwner(agent.userId).then(tenantId => {
+        if (!tenantId) return;
+        const totalChars = ttsChunks.reduce((s, c) => s + c.length, 0);
+        logTTSCost({
+          tenantId,
+          userId: agent.userId,
+          provider: provider === "openai" ? "openai" : "sarvam",
+          characters: totalChars,
+          context: "widget-tts-parallel",
+        });
+      }).catch(() => {});
     }
   } else if (includeAudio) {
     // Legacy path: single monolithic TTS (for backward compatibility)
@@ -1411,6 +1447,23 @@ router.post("/widget/tts", async (req, res) => {
   }
   console.log(`[widget/tts] lang=${language} provider=${ttsResult.provider ?? "none"} mime=${ttsResult.mimeType}`);
   res.json({ audio: ttsResult.audio, provider: ttsResult.provider, language, audioMimeType: ttsResult.mimeType });
+
+  // Fire-and-forget TTS cost logging for standalone endpoint
+  if (apiKey && ttsResult.provider) {
+    const agent = await getAgentByWidgetKey(apiKey);
+    if (agent) {
+      resolveTenantIdForOwner(agent.userId).then(tenantId => {
+        if (!tenantId) return;
+        logTTSCost({
+          tenantId,
+          userId: agent.userId,
+          provider: ttsResult.provider === "openai" ? "openai" : "sarvam",
+          characters: text.length,
+          context: "widget-tts-standalone",
+        });
+      }).catch(() => {});
+    }
+  }
 });
 
 router.get("/widget/loader.js", async (req, res) => {

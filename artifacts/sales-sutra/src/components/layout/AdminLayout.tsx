@@ -9,6 +9,7 @@ import { useQueryClient } from "@tanstack/react-query";
 const ADMIN_NAV = [
   { href: "/admin", label: "Overview", icon: LayoutDashboard, exact: true },
   { href: "/admin/tenants", label: "Tenants", icon: Building2, exact: false },
+  { href: "/admin/costs", label: "API Costs", icon: Receipt, exact: false },
   { href: "/admin/invoices", label: "Invoices", icon: Receipt, exact: false },
 ];
 
