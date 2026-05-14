@@ -10,7 +10,7 @@ import { useQueryClient } from "@tanstack/react-query";
 
 export default function Login() {
   const [, navigate] = useLocation();
-  const { isAuthenticated, isLoading: authLoading } = useAuth();
+  const { isAuthenticated, isLoading: authLoading, isSuperadmin } = useAuth();
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [email, setEmail] = useState("");
@@ -20,7 +20,7 @@ export default function Login() {
   const [submitting, setSubmitting] = useState(false);
 
   if (!authLoading && isAuthenticated) {
-    return <Redirect to="/" />;
+    return <Redirect to={isSuperadmin ? "/superadmin" : "/"} />;
   }
 
   async function handleSubmit(e: React.FormEvent) {

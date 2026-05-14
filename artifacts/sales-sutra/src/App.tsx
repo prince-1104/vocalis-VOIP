@@ -1,4 +1,4 @@
-import { Switch, Route, Router as WouterRouter, Redirect } from "wouter";
+import { Switch, Route, Router as WouterRouter, Redirect, useLocation } from "wouter";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -52,10 +52,12 @@ function AdminGuard({ children }: { children: React.ReactNode }) {
 }
 
 function AuthGuard({ children }: { children: React.ReactNode }) {
-  const { isLoading, isAuthenticated, isSuspended, suspensionInvoiceId, suspensionAmountDue } = useAuth();
+  const { isLoading, isAuthenticated, isSuspended, suspensionInvoiceId, suspensionAmountDue, isSuperadmin } = useAuth();
+  const [location] = useLocation();
   if (isLoading) return null;
   if (isSuspended) return <SuspensionNotice invoiceId={suspensionInvoiceId} amountDue={suspensionAmountDue} />;
   if (!isAuthenticated) return <Redirect to="/login" />;
+  if (isSuperadmin && location === "/") return <Redirect to="/superadmin" />;
   return <>{children}</>;
 }
 
