@@ -1,5 +1,5 @@
 import { Router, type IRouter } from "express";
-import { db, callLogsTable } from "@workspace/db";
+import { db, callLogsTable, apiCostLogsTable } from "@workspace/db";
 import { eq, and, gte } from "drizzle-orm";
 
 const router: IRouter = Router();
@@ -65,16 +65,26 @@ router.get("/analytics/summary", async (req, res) => {
     percentage: totalCalls > 0 ? (count / totalCalls) * 100 : 0,
   }));
 
-  const totalCostUsd = allCalls.reduce((sum, c) => sum + parseFloat(c.estimatedCostUsd || "0"), 0);
-  const totalTwilioCostUsd = allCalls.reduce((sum, c) => sum + parseFloat(c.twilioCostUsd || "0"), 0);
-  const totalOpenaiCostUsd = allCalls.reduce((sum, c) => sum + parseFloat(c.openaiCostUsd || "0"), 0);
-  const callsWithCost = allCalls.filter(c => parseFloat(c.estimatedCostUsd || "0") > 0);
+  const apiConditions: any[] = [eq(apiCostLogsTable.userId, userId)];
+  if (period !== "all") apiConditions.push(gte(apiCostLogsTable.createdAt, since));
+  const allApiCosts = await db.select().from(apiCostLogsTable).where(and(...apiConditions));
+  
+  const twilioCostSum = allCalls.reduce((sum, c) => sum + parseFloat(c.twilioCostUsd || "0"), 0);
+  const apiCostSum = allApiCosts.reduce((sum, c) => sum + parseFloat(c.costUsd || "0"), 0);
+  const totalCostUsd = twilioCostSum + apiCostSum;
+  
+  const totalTwilioCostUsd = twilioCostSum;
+  const totalOpenaiCostUsd = apiCostSum; // LLM + TTS + STT
+  const callsWithCost = allCalls.filter(c => parseFloat(c.twilioCostUsd || "0") > 0 || c.direction === "widget");
   const avgCostPerCall = callsWithCost.length > 0 ? totalCostUsd / callsWithCost.length : 0;
 
   const costByDay = Array.from(callsByDayMap.entries()).map(([date]) => {
     const dayCalls = allCalls.filter(c => c.startedAt.toISOString().split("T")[0] === date);
-    const dayCost = dayCalls.reduce((sum, c) => sum + parseFloat(c.estimatedCostUsd || "0"), 0);
-    return { date, cost: parseFloat(dayCost.toFixed(4)) };
+    const dayApiCosts = allApiCosts.filter(c => c.createdAt.toISOString().split("T")[0] === date);
+    
+    const dayTwilioCost = dayCalls.reduce((sum, c) => sum + parseFloat(c.twilioCostUsd || "0"), 0);
+    const dayApiCost = dayApiCosts.reduce((sum, c) => sum + parseFloat(c.costUsd || "0"), 0);
+    return { date, cost: parseFloat((dayTwilioCost + dayApiCost).toFixed(4)) };
   });
 
   res.json({

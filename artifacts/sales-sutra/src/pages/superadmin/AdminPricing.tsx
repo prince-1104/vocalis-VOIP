@@ -71,15 +71,15 @@ export default function AdminPricing() {
   }
 
   const rateConfig = [
-    { key: "gpt-4o-mini-input", label: "gpt-4o-mini input", unit: "per 1M tokens" },
-    { key: "gpt-4o-mini-output", label: "gpt-4o-mini output", unit: "per 1M tokens" },
-    { key: "deepseek-chat-input", label: "deepseek-chat input", unit: "per 1M tokens" },
-    { key: "deepseek-chat-output", label: "deepseek-chat output", unit: "per 1M tokens" },
-    { key: "sarvam-m-input", label: "sarvam-m input", unit: "per 1M tokens" },
-    { key: "sarvam-m-output", label: "sarvam-m output", unit: "per 1M tokens" },
-    { key: "sarvam-tts", label: "Sarvam TTS (Bulbul v3)", unit: "per 1M chars" },
-    { key: "openai-tts", label: "OpenAI TTS", unit: "per 1M chars" },
-    { key: "stt-whisper", label: "STT (Whisper)", unit: "per minute" },
+    { key: "llm:gpt-4o-mini:input", label: "gpt-4o-mini input", unit: "per 1M tokens" },
+    { key: "llm:gpt-4o-mini:output", label: "gpt-4o-mini output", unit: "per 1M tokens" },
+    { key: "llm:deepseek-chat:input", label: "deepseek-chat input", unit: "per 1M tokens" },
+    { key: "llm:deepseek-chat:output", label: "deepseek-chat output", unit: "per 1M tokens" },
+    { key: "llm:sarvam-m:input", label: "sarvam-m input", unit: "per 1M tokens" },
+    { key: "llm:sarvam-m:output", label: "sarvam-m output", unit: "per 1M tokens" },
+    { key: "tts:sarvam", label: "Sarvam TTS (Bulbul v3)", unit: "per 1M chars" },
+    { key: "tts:openai", label: "OpenAI TTS", unit: "per 1M chars" },
+    { key: "stt:whisper", label: "STT (Whisper)", unit: "per minute" },
   ];
 
   return (
