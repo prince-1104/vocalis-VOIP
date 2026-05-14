@@ -188,6 +188,48 @@ router.get("/superadmin/dashboard", async (_req, res) => {
   });
 });
 
+// ── GET /admin/costs/rates — Current API pricing rates ──────────────────
+router.get("/superadmin/costs/rates", async (_req, res) => {
+  const rows = await db.select().from(platformSettingsTable);
+  const rates = { ...DEFAULT_API_RATES };
+  for (const row of rows) {
+    if (row.key.startsWith("rate:")) {
+      const rateKey = row.key.slice(5);
+      const val = parseFloat(row.value);
+      if (!isNaN(val)) rates[rateKey] = val;
+    }
+  }
+  res.json(rates);
+});
+
+// ── PATCH /admin/costs/rates — Update API pricing rates ──────────────────
+router.patch("/superadmin/costs/rates", async (req, res) => {
+  const updates = req.body as Record<string, number>;
+  const allowedKeys = new Set(Object.keys(DEFAULT_API_RATES));
+
+  for (const [key, value] of Object.entries(updates)) {
+    if (!allowedKeys.has(key)) continue;
+    await db.insert(platformSettingsTable)
+      .values({ key: `rate:${key}`, value: String(value) })
+      .onConflictDoUpdate({
+        target: platformSettingsTable.key,
+        set: { value: String(value), updatedAt: new Date() },
+      });
+  }
+
+  // Return updated rates
+  const rows = await db.select().from(platformSettingsTable);
+  const rates = { ...DEFAULT_API_RATES };
+  for (const row of rows) {
+    if (row.key.startsWith("rate:")) {
+      const rateKey = row.key.slice(5);
+      const val = parseFloat(row.value);
+      if (!isNaN(val)) rates[rateKey] = val;
+    }
+  }
+  res.json(rates);
+});
+
 // ── GET /admin/costs/:tenantId — Detailed tenant cost breakdown ──────────
 router.get("/superadmin/costs/:tenantId", async (req, res) => {
   const tenantId = parseInt(req.params.tenantId, 10);
@@ -345,48 +387,6 @@ router.post("/superadmin/costs/:tenantId/send-alert", async (req, res) => {
   console.log(`[admin/costs] Alert sent to tenant ${tenant.name} (id=${tenantId}) for ${currentMonth}`);
 
   res.json({ success: true, alertSentAt: new Date().toISOString(), month: currentMonth });
-});
-
-// ── GET /admin/costs/rates — Current API pricing rates ──────────────────
-router.get("/superadmin/costs/rates", async (_req, res) => {
-  const rows = await db.select().from(platformSettingsTable);
-  const rates = { ...DEFAULT_API_RATES };
-  for (const row of rows) {
-    if (row.key.startsWith("rate:")) {
-      const rateKey = row.key.slice(5);
-      const val = parseFloat(row.value);
-      if (!isNaN(val)) rates[rateKey] = val;
-    }
-  }
-  res.json(rates);
-});
-
-// ── PATCH /admin/costs/rates — Update API pricing rates ──────────────────
-router.patch("/superadmin/costs/rates", async (req, res) => {
-  const updates = req.body as Record<string, number>;
-  const allowedKeys = new Set(Object.keys(DEFAULT_API_RATES));
-
-  for (const [key, value] of Object.entries(updates)) {
-    if (!allowedKeys.has(key)) continue;
-    await db.insert(platformSettingsTable)
-      .values({ key: `rate:${key}`, value: String(value) })
-      .onConflictDoUpdate({
-        target: platformSettingsTable.key,
-        set: { value: String(value), updatedAt: new Date() },
-      });
-  }
-
-  // Return updated rates
-  const rows = await db.select().from(platformSettingsTable);
-  const rates = { ...DEFAULT_API_RATES };
-  for (const row of rows) {
-    if (row.key.startsWith("rate:")) {
-      const rateKey = row.key.slice(5);
-      const val = parseFloat(row.value);
-      if (!isNaN(val)) rates[rateKey] = val;
-    }
-  }
-  res.json(rates);
 });
 
 export default router;
