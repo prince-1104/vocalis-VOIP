@@ -24,7 +24,7 @@ async function getTenantMonthStats(ownerId: number) {
   };
 }
 
-router.get("/admin/tenants", async (req, res) => {
+router.get("/superadmin/tenants", async (req, res) => {
   const tenants = await db.select().from(tenantsTable).orderBy(tenantsTable.createdAt);
 
   const results = await Promise.all(tenants.map(async (tenant) => {
@@ -58,7 +58,7 @@ router.get("/admin/tenants", async (req, res) => {
   res.json(results);
 });
 
-router.post("/admin/tenants", async (req, res) => {
+router.post("/superadmin/tenants", async (req, res) => {
   const { name, slug, commissionPct, paymentTermsDays } = req.body as {
     name?: string; slug?: string; commissionPct?: string; paymentTermsDays?: number;
   };
@@ -102,7 +102,7 @@ router.post("/admin/tenants", async (req, res) => {
   res.json(tenant);
 });
 
-router.get("/admin/tenants/:id", async (req, res) => {
+router.get("/superadmin/tenants/:id", async (req, res) => {
   const tenantId = parseInt(req.params.id, 10);
 
   const tenant = await db.query.tenantsTable.findFirst({ where: eq(tenantsTable.id, tenantId) });
@@ -143,7 +143,7 @@ router.get("/admin/tenants/:id", async (req, res) => {
   });
 });
 
-router.get("/admin/tenants/:id/stats", async (req, res) => {
+router.get("/superadmin/tenants/:id/stats", async (req, res) => {
   const tenantId = parseInt(req.params.id, 10);
 
   const tenant = await db.query.tenantsTable.findFirst({ where: eq(tenantsTable.id, tenantId) });
@@ -165,7 +165,7 @@ router.get("/admin/tenants/:id/stats", async (req, res) => {
   });
 });
 
-router.patch("/admin/tenants/:id", async (req, res) => {
+router.patch("/superadmin/tenants/:id", async (req, res) => {
   const tenantId = parseInt(req.params.id, 10);
   const { name, status, commissionPct, paymentTermsDays } = req.body as {
     name?: string; status?: string; commissionPct?: string; paymentTermsDays?: number;
@@ -199,7 +199,7 @@ router.patch("/admin/tenants/:id", async (req, res) => {
   res.json(updated);
 });
 
-router.get("/admin/tenants/:id/users", async (req, res) => {
+router.get("/superadmin/tenants/:id/users", async (req, res) => {
   const tenantId = parseInt(req.params.id, 10);
   const users = await db.select({
     id: tenantUsersTable.id,
@@ -212,7 +212,7 @@ router.get("/admin/tenants/:id/users", async (req, res) => {
   res.json(users);
 });
 
-router.post("/admin/tenants/:id/users", async (req, res) => {
+router.post("/superadmin/tenants/:id/users", async (req, res) => {
   const tenantId = parseInt(req.params.id, 10);
   const { email, name, role, password } = req.body as {
     email?: string; name?: string; role?: string; password?: string;
@@ -256,7 +256,7 @@ router.post("/admin/tenants/:id/users", async (req, res) => {
   });
 });
 
-router.patch("/admin/tenants/:id/users/:uid", async (req, res) => {
+router.patch("/superadmin/tenants/:id/users/:uid", async (req, res) => {
   const tenantId = parseInt(req.params.id, 10);
   const userId = parseInt(req.params.uid, 10);
   const { isActive, role, name } = req.body as { isActive?: boolean; role?: string; name?: string };
@@ -276,7 +276,7 @@ router.patch("/admin/tenants/:id/users/:uid", async (req, res) => {
   res.json({ id: updated.id, email: updated.email, name: updated.name, role: updated.role, isActive: updated.isActive });
 });
 
-router.put("/admin/tenants/:id/telephony", async (req, res) => {
+router.put("/superadmin/tenants/:id/telephony", async (req, res) => {
   const tenantId = parseInt(req.params.id, 10);
   const { twilioAccountSid, twilioAuthToken, phoneNumber } = req.body as {
     twilioAccountSid?: string; twilioAuthToken?: string; phoneNumber?: string;
@@ -301,14 +301,14 @@ router.put("/admin/tenants/:id/telephony", async (req, res) => {
 });
 
 // Platform-wide settings (global defaults for commission, payment terms, etc.)
-router.get("/admin/settings", async (_req, res) => {
+router.get("/superadmin/settings", async (_req, res) => {
   const rows = await db.select().from(platformSettingsTable);
   const settings: Record<string, string> = {};
   for (const row of rows) settings[row.key] = row.value;
   res.json(settings);
 });
 
-router.patch("/admin/settings", async (req, res) => {
+router.patch("/superadmin/settings", async (req, res) => {
   const updates = req.body as Record<string, string>;
   const ALLOWED_KEYS = new Set(["defaultCommissionPct", "defaultPaymentTermsDays", "platformName"]);
 

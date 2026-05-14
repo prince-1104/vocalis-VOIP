@@ -3,7 +3,7 @@ import { Link } from "wouter";
 import {
   DollarSign, AlertTriangle, TrendingUp, Building2, ChevronRight,
   Loader2, Shield, ShieldAlert, ShieldCheck, Send, Save, ArrowLeft,
-  BarChart3, Cpu, Volume2, Mic,
+  BarChart3, Cpu, Volume2, Mic, Download, Layers
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -74,11 +74,12 @@ export default function AdminCosts() {
   const [editingLimit, setEditingLimit] = useState<{ id: number; value: string; hardLimit: boolean } | null>(null);
   const [saving, setSaving] = useState(false);
   const [sendingAlert, setSendingAlert] = useState<number | null>(null);
+  const [selectedTenants, setSelectedTenants] = useState<number[]>([]);
   const { toast } = useToast();
 
   const fetchOverview = useCallback(async () => {
     try {
-      const res = await fetch("/api/admin/costs", { headers: adminAuthHeaders() });
+      const res = await fetch("/api/superadmin/costs", { headers: adminAuthHeaders() });
       if (res.ok) {
         const data = await res.json();
         setSummary(data.summary);
@@ -95,7 +96,7 @@ export default function AdminCosts() {
     setDetailLoading(true);
     setSelectedTenant(tenantId);
     try {
-      const res = await fetch(`/api/admin/costs/${tenantId}`, { headers: adminAuthHeaders() });
+      const res = await fetch(`/api/superadmin/costs/${tenantId}`, { headers: adminAuthHeaders() });
       if (res.ok) setDetail(await res.json());
     } finally {
       setDetailLoading(false);
@@ -106,7 +107,7 @@ export default function AdminCosts() {
     if (!editingLimit) return;
     setSaving(true);
     try {
-      const res = await fetch(`/api/admin/costs/${editingLimit.id}/limit`, {
+      const res = await fetch(`/api/superadmin/costs/${editingLimit.id}/limit`, {
         method: "PATCH",
         headers: { ...adminAuthHeaders(), "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -130,7 +131,7 @@ export default function AdminCosts() {
   async function sendAlert(tenantId: number) {
     setSendingAlert(tenantId);
     try {
-      const res = await fetch(`/api/admin/costs/${tenantId}/send-alert`, {
+      const res = await fetch(`/api/superadmin/costs/${tenantId}/send-alert`, {
         method: "POST",
         headers: adminAuthHeaders(),
       });
@@ -142,6 +143,41 @@ export default function AdminCosts() {
       toast({ title: "Failed to send alert", variant: "destructive" });
     } finally {
       setSendingAlert(null);
+    }
+  }
+
+  function handleExportCsv() {
+    const header = "Tenant Name,Slug,Calls,Total Cost USD,Monthly Limit USD,Usage %,Status\n";
+    const csv = filtered.map(t => 
+      `${t.tenantName},${t.tenantSlug},${t.apiCalls},${t.totalCostUsd},${t.monthlyLimitUsd},${t.usagePercent.toFixed(1)},${t.status}`
+    ).join("\n");
+    const blob = new Blob([header + csv], { type: 'text/csv' });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `tenant-costs-${new Date().toISOString().slice(0,10)}.csv`;
+    a.click();
+  }
+
+  async function handleBulkLimit() {
+    const val = prompt("Enter new monthly limit (USD) for selected tenants:");
+    if (!val || isNaN(parseFloat(val))) return;
+    setSaving(true);
+    try {
+      await Promise.all(selectedTenants.map(id =>
+        fetch(`/api/superadmin/costs/${id}/limit`, {
+          method: "PATCH",
+          headers: { ...adminAuthHeaders(), "Content-Type": "application/json" },
+          body: JSON.stringify({ monthlyLimitUsd: parseFloat(val) }),
+        })
+      ));
+      toast({ title: `Updated limits for ${selectedTenants.length} tenants` });
+      setSelectedTenants([]);
+      await fetchOverview();
+    } catch {
+      toast({ title: "Bulk update failed", variant: "destructive" });
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -193,19 +229,31 @@ export default function AdminCosts() {
         </div>
       )}
 
-      {/* Filter Buttons */}
-      <div className="flex gap-2 flex-wrap">
-        {(["all", "warning", "over_limit", "under_50"] as FilterMode[]).map(f => (
-          <Button
-            key={f}
-            size="sm"
-            variant={filter === f ? "default" : "outline"}
-            onClick={() => setFilter(f)}
-            className={filter === f ? "" : "border-white/10 text-muted-foreground hover:text-foreground"}
-          >
-            {f === "all" ? "All" : f === "warning" ? "⚠ Warning" : f === "over_limit" ? "🔴 Over Limit" : "Under 50%"}
+      {/* Filter Buttons & Actions */}
+      <div className="flex flex-col sm:flex-row gap-4 justify-between items-start sm:items-center">
+        <div className="flex gap-2 flex-wrap">
+          {(["all", "warning", "over_limit", "under_50"] as FilterMode[]).map(f => (
+            <Button
+              key={f}
+              size="sm"
+              variant={filter === f ? "default" : "outline"}
+              onClick={() => setFilter(f)}
+              className={filter === f ? "" : "border-white/10 text-muted-foreground hover:text-foreground"}
+            >
+              {f === "all" ? "All" : f === "warning" ? "⚠ Warning" : f === "over_limit" ? "🔴 Over Limit" : "Under 50%"}
+            </Button>
+          ))}
+        </div>
+        <div className="flex gap-2">
+          {selectedTenants.length > 0 && (
+            <Button size="sm" variant="secondary" onClick={handleBulkLimit} disabled={saving} className="gap-2">
+              <Layers className="w-4 h-4" /> Bulk Set Limit ({selectedTenants.length})
+            </Button>
+          )}
+          <Button size="sm" variant="outline" onClick={handleExportCsv} className="gap-2 border-white/10">
+            <Download className="w-4 h-4" /> Export CSV
           </Button>
-        ))}
+        </div>
       </div>
 
       {/* Tenant Cost Table */}
@@ -217,7 +265,15 @@ export default function AdminCosts() {
         </div>
 
         {/* Header */}
-        <div className="hidden md:grid grid-cols-[1fr_100px_120px_80px_100px_140px] gap-2 px-6 py-3 text-xs text-muted-foreground border-b border-white/5 font-medium">
+        <div className="hidden md:grid grid-cols-[40px_1fr_100px_120px_80px_100px_140px] gap-2 px-6 py-3 text-xs text-muted-foreground border-b border-white/5 font-medium">
+          <div className="flex items-center">
+            <input 
+              type="checkbox" 
+              className="rounded bg-white/5 border-white/10"
+              checked={selectedTenants.length === filtered.length && filtered.length > 0}
+              onChange={e => setSelectedTenants(e.target.checked ? filtered.map(t => t.tenantId) : [])}
+            />
+          </div>
           <span>Tenant</span>
           <span className="text-right">Limit</span>
           <span className="text-right">This Month</span>
@@ -228,7 +284,20 @@ export default function AdminCosts() {
 
         <div className="divide-y divide-white/5">
           {filtered.map(t => (
-            <div key={t.tenantId} className="grid grid-cols-1 md:grid-cols-[1fr_100px_120px_80px_100px_140px] gap-2 px-6 py-4 items-center hover:bg-white/[0.02] transition-colors">
+            <div key={t.tenantId} className="grid grid-cols-1 md:grid-cols-[40px_1fr_100px_120px_80px_100px_140px] gap-2 px-6 py-4 items-center hover:bg-white/[0.02] transition-colors">
+              {/* Checkbox */}
+              <div className="flex items-center">
+                <input 
+                  type="checkbox" 
+                  className="rounded bg-white/5 border-white/10"
+                  checked={selectedTenants.includes(t.tenantId)}
+                  onChange={e => {
+                    if (e.target.checked) setSelectedTenants([...selectedTenants, t.tenantId]);
+                    else setSelectedTenants(selectedTenants.filter(id => id !== t.tenantId));
+                  }}
+                />
+              </div>
+
               {/* Tenant Name */}
               <div className="flex items-center gap-3">
                 <div className="w-9 h-9 rounded-lg bg-primary/10 border border-primary/20 flex items-center justify-center text-sm font-bold text-primary">

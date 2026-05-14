@@ -1,16 +1,19 @@
 import React from "react";
 import { Link, useLocation } from "wouter";
-import { Building2, LayoutDashboard, ChevronLeft, LogOut, Receipt } from "lucide-react";
+import { Building2, LayoutDashboard, ChevronLeft, LogOut, Receipt, BarChart3, BellRing, DollarSign, Settings } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { clearStoredToken } from "@/hooks/use-auth";
 import { useQueryClient } from "@tanstack/react-query";
 
 const ADMIN_NAV = [
-  { href: "/admin", label: "Overview", icon: LayoutDashboard, exact: true },
-  { href: "/admin/tenants", label: "Tenants", icon: Building2, exact: false },
-  { href: "/admin/costs", label: "API Costs", icon: Receipt, exact: false },
-  { href: "/admin/invoices", label: "Invoices", icon: Receipt, exact: false },
+  { href: "/superadmin", label: "Dashboard", icon: LayoutDashboard, exact: true },
+  { href: "/superadmin/tenants", label: "Tenant Management", icon: Building2, exact: false },
+  { href: "/superadmin/costs", label: "Cost & Billing", icon: Receipt, exact: false },
+  { href: "/superadmin/analytics", label: "Analytics", icon: BarChart3, exact: false },
+  { href: "/superadmin/alerts", label: "Alerts", icon: BellRing, exact: false },
+  { href: "/superadmin/pricing", label: "Pricing Config", icon: DollarSign, exact: false },
+  { href: "/superadmin/settings", label: "System Settings", icon: Settings, exact: false },
 ];
 
 export function AdminLayout({ children }: { children: React.ReactNode }) {

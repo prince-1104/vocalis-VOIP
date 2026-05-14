@@ -38,7 +38,7 @@ function useTenants() {
       const token = localStorage.getItem("ss_auth_token");
       const headers: Record<string, string> = { "Content-Type": "application/json" };
       if (token) headers["Authorization"] = `Bearer ${token}`;
-      const res = await fetch("/api/admin/tenants", { headers });
+      const res = await fetch("/api/superadmin/tenants", { headers });
       if (!res.ok) throw new Error(await res.text());
       setData(await res.json());
     } catch (e: unknown) {
@@ -75,7 +75,7 @@ export default function AdminTenants() {
       const token = localStorage.getItem("ss_auth_token");
       const headers: Record<string, string> = {};
       if (token) headers["Authorization"] = `Bearer ${token}`;
-      const res = await fetch("/api/admin/settings", { headers });
+      const res = await fetch("/api/superadmin/settings", { headers });
       if (res.ok) {
         const settings = await res.json() as Record<string, string>;
         setForm(prev => ({
@@ -91,7 +91,7 @@ export default function AdminTenants() {
     e.preventDefault();
     setCreating(true);
     try {
-      await apiPost("/api/admin/tenants", {
+      await apiPost("/api/superadmin/tenants", {
         name: form.name,
         slug: form.slug,
         commissionPct: form.commissionPct,
@@ -138,7 +138,7 @@ export default function AdminTenants() {
 
       <div className="grid gap-4">
         {tenants?.map((tenant) => (
-          <Link key={tenant.id} href={`/admin/tenants/${tenant.id}`}>
+          <Link key={tenant.id} href={`/superadmin/tenants/${tenant.id}`}>
             <div className="glass-panel rounded-xl p-5 border border-white/5 hover:border-primary/30 transition-all duration-200 cursor-pointer group">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-4">

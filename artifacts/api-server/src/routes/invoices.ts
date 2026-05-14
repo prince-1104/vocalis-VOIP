@@ -35,7 +35,7 @@ export async function checkAndMarkOverdueInvoices(): Promise<void> {
 
 router.use(resolveUser);
 
-router.get("/admin/invoices", requireSuperadmin, async (req, res) => {
+router.get("/superadmin/invoices", requireSuperadmin, async (req, res) => {
   try {
     const invoices = await db
       .select({
@@ -65,7 +65,7 @@ router.get("/admin/invoices", requireSuperadmin, async (req, res) => {
   }
 });
 
-router.post("/admin/invoices/generate", requireSuperadmin, async (req, res) => {
+router.post("/superadmin/invoices/generate", requireSuperadmin, async (req, res) => {
   try {
     const { tenantId, period, notes } = req.body as {
       tenantId: number;
@@ -157,7 +157,7 @@ router.post("/admin/invoices/generate", requireSuperadmin, async (req, res) => {
   }
 });
 
-router.get("/admin/invoices/:id", requireSuperadmin, async (req, res) => {
+router.get("/superadmin/invoices/:id", requireSuperadmin, async (req, res) => {
   try {
     const id = parseInt(String(req.params.id));
     const invoice = await db.query.invoicesTable.findFirst({
@@ -178,7 +178,7 @@ router.get("/admin/invoices/:id", requireSuperadmin, async (req, res) => {
   }
 });
 
-router.patch("/admin/invoices/:id", requireSuperadmin, async (req, res) => {
+router.patch("/superadmin/invoices/:id", requireSuperadmin, async (req, res) => {
   try {
     const id = parseInt(String(req.params.id));
     const { status, notes } = req.body as { status?: string; notes?: string };

@@ -16,18 +16,22 @@ import Scripts from "@/pages/Scripts";
 import Analytics from "@/pages/Analytics";
 import Login from "@/pages/Login";
 import SuspensionNotice from "@/pages/SuspensionNotice";
-import AdminOverview from "@/pages/admin/AdminOverview";
-import AdminTenants from "@/pages/admin/AdminTenants";
-import AdminTenantDetail from "@/pages/admin/AdminTenantDetail";
-import AdminInvoices from "@/pages/admin/AdminInvoices";
-import AdminCosts from "@/pages/admin/AdminCosts";
+import AdminOverview from "@/pages/superadmin/AdminOverview";
+import AdminTenants from "@/pages/superadmin/AdminTenants";
+import AdminTenantDetail from "@/pages/superadmin/AdminTenantDetail";
+import AdminInvoices from "@/pages/superadmin/AdminInvoices";
+import AdminCosts from "@/pages/superadmin/AdminCosts";
+import AdminAnalytics from "@/pages/superadmin/AdminAnalytics";
+import AdminAlerts from "@/pages/superadmin/AdminAlerts";
+import AdminPricing from "@/pages/superadmin/AdminPricing";
+import AdminSettings from "@/pages/superadmin/AdminSettings";
 import Billing from "@/pages/Billing";
 import NotFound from "@/pages/not-found";
 import WidgetTest from "@/pages/WidgetTest";
 import WidgetDemo from "@/pages/WidgetDemo";
 import BbmpDemo from "@/pages/BbmpDemo";
 import NmcDemo from "@/pages/NmcDemo";
-import Forbidden from "@/pages/admin/Forbidden";
+import Forbidden from "@/pages/superadmin/Forbidden";
 import { useAuth } from "@/hooks/use-auth";
 
 const queryClient = new QueryClient({
@@ -70,21 +74,21 @@ function Router() {
       <Route path="/nmc/" component={NmcDemo} />
       <Route path="/login" component={Login} />
 
-      <Route path="/admin">
+      <Route path="/superadmin">
         <AdminGuard>
           <AdminLayout>
             <AdminOverview />
           </AdminLayout>
         </AdminGuard>
       </Route>
-      <Route path="/admin/tenants">
+      <Route path="/superadmin/tenants">
         <AdminGuard>
           <AdminLayout>
             <AdminTenants />
           </AdminLayout>
         </AdminGuard>
       </Route>
-      <Route path="/admin/tenants/:id">
+      <Route path="/superadmin/tenants/:id">
         {() => (
           <AdminGuard>
             <AdminLayout>
@@ -93,17 +97,45 @@ function Router() {
           </AdminGuard>
         )}
       </Route>
-      <Route path="/admin/invoices">
+      <Route path="/superadmin/invoices">
         <AdminGuard>
           <AdminLayout>
             <AdminInvoices />
           </AdminLayout>
         </AdminGuard>
       </Route>
-      <Route path="/admin/costs">
+      <Route path="/superadmin/costs">
         <AdminGuard>
           <AdminLayout>
             <AdminCosts />
+          </AdminLayout>
+        </AdminGuard>
+      </Route>
+      <Route path="/superadmin/analytics">
+        <AdminGuard>
+          <AdminLayout>
+            <AdminAnalytics />
+          </AdminLayout>
+        </AdminGuard>
+      </Route>
+      <Route path="/superadmin/alerts">
+        <AdminGuard>
+          <AdminLayout>
+            <AdminAlerts />
+          </AdminLayout>
+        </AdminGuard>
+      </Route>
+      <Route path="/superadmin/pricing">
+        <AdminGuard>
+          <AdminLayout>
+            <AdminPricing />
+          </AdminLayout>
+        </AdminGuard>
+      </Route>
+      <Route path="/superadmin/settings">
+        <AdminGuard>
+          <AdminLayout>
+            <AdminSettings />
           </AdminLayout>
         </AdminGuard>
       </Route>

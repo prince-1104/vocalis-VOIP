@@ -78,7 +78,7 @@ export default function AdminTenantDetail() {
   const fetchTenant = useCallback(async () => {
     try {
       setIsLoading(true);
-      const data = await apiFetch(`/api/admin/tenants/${id}`);
+      const data = await apiFetch(`/api/superadmin/tenants/${id}`);
       setTenant(data);
       setEditForm({
         name: data.name,
@@ -102,7 +102,7 @@ export default function AdminTenantDetail() {
   async function handleSave() {
     setSaving(true);
     try {
-      await apiFetch(`/api/admin/tenants/${id}`, {
+      await apiFetch(`/api/superadmin/tenants/${id}`, {
         method: "PATCH",
         body: JSON.stringify({
           name: editForm.name,
@@ -124,7 +124,7 @@ export default function AdminTenantDetail() {
     if (!tenant) return;
     const newStatus = tenant.status === "active" ? "suspended" : "active";
     try {
-      await apiFetch(`/api/admin/tenants/${id}`, {
+      await apiFetch(`/api/superadmin/tenants/${id}`, {
         method: "PATCH",
         body: JSON.stringify({ status: newStatus }),
       });
@@ -139,7 +139,7 @@ export default function AdminTenantDetail() {
     e.preventDefault();
     setAddingUser(true);
     try {
-      await apiFetch(`/api/admin/tenants/${id}/users`, {
+      await apiFetch(`/api/superadmin/tenants/${id}/users`, {
         method: "POST",
         body: JSON.stringify(userForm),
       });
@@ -156,7 +156,7 @@ export default function AdminTenantDetail() {
 
   async function toggleUserActive(user: TenantUser) {
     try {
-      await apiFetch(`/api/admin/tenants/${id}/users/${user.id}`, {
+      await apiFetch(`/api/superadmin/tenants/${id}/users/${user.id}`, {
         method: "PATCH",
         body: JSON.stringify({ isActive: !user.isActive }),
       });
@@ -171,7 +171,7 @@ export default function AdminTenantDetail() {
     e.preventDefault();
     setSavingTelephony(true);
     try {
-      await apiFetch(`/api/admin/tenants/${id}/telephony`, {
+      await apiFetch(`/api/superadmin/tenants/${id}/telephony`, {
         method: "PUT",
         body: JSON.stringify(telephonyForm),
       });
@@ -200,7 +200,7 @@ export default function AdminTenantDetail() {
   return (
     <div className="space-y-6">
       <div className="flex items-center gap-4">
-        <Link href="/admin/tenants">
+        <Link href="/superadmin/tenants">
           <Button variant="ghost" size="icon" className="shrink-0">
             <ArrowLeft className="w-5 h-5" />
           </Button>

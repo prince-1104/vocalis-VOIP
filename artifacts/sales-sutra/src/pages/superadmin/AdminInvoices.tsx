@@ -100,7 +100,7 @@ function GenerateInvoiceModal({ tenants, onClose }: { tenants: Tenant[]; onClose
 
   const mutation = useMutation({
     mutationFn: () =>
-      adminFetch(`${BASE}/api/admin/invoices/generate`, {
+      adminFetch(`${BASE}/api/superadmin/invoices/generate`, {
         method: "POST",
         body: JSON.stringify({ tenantId: parseInt(tenantId), period, notes: notes || undefined }),
       }),
@@ -186,17 +186,17 @@ export default function AdminInvoices() {
 
   const { data: invoicesData, isLoading: loadingInvoices } = useQuery<{ invoices: Invoice[] }>({
     queryKey: ["admin-invoices"],
-    queryFn: () => adminFetch(`${BASE}/api/admin/invoices`),
+    queryFn: () => adminFetch(`${BASE}/api/superadmin/invoices`),
   });
 
   const { data: tenantsRaw } = useQuery<Tenant[]>({
     queryKey: ["admin-tenants-list"],
-    queryFn: () => adminFetch(`${BASE}/api/admin/tenants`),
+    queryFn: () => adminFetch(`${BASE}/api/superadmin/tenants`),
   });
 
   const updateMutation = useMutation({
     mutationFn: ({ id, status }: { id: number; status: string }) =>
-      adminFetch(`${BASE}/api/admin/invoices/${id}`, {
+      adminFetch(`${BASE}/api/superadmin/invoices/${id}`, {
         method: "PATCH",
         body: JSON.stringify({ status }),
       }),
@@ -219,7 +219,7 @@ export default function AdminInvoices() {
     if (val === undefined) return;
     setSavingCommission((s) => ({ ...s, [tenantId]: true }));
     try {
-      await adminFetch(`${BASE}/api/admin/tenants/${tenantId}`, {
+      await adminFetch(`${BASE}/api/superadmin/tenants/${tenantId}`, {
         method: "PATCH",
         body: JSON.stringify({ commissionPct: val }),
       });
