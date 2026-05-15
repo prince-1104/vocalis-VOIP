@@ -96,7 +96,7 @@ router.get("/superadmin/dashboard", async (_req, res) => {
   const activeResult = await db.execute(sql`
     SELECT COUNT(DISTINCT tenant_id) as active_count
     FROM api_cost_logs
-    WHERE created_at >= ${monthStart}
+    WHERE created_at >= ${monthStart.toISOString()}
   `);
   const activeRows = (activeResult as any).rows || activeResult;
   const activeThisMonth = parseInt(activeRows[0]?.active_count ?? "0", 10);
@@ -105,7 +105,7 @@ router.get("/superadmin/dashboard", async (_req, res) => {
   const costResult = await db.execute(sql`
     SELECT coalesce(sum(cost_usd::numeric), 0) as total_cost
     FROM api_cost_logs
-    WHERE created_at >= ${monthStart}
+    WHERE created_at >= ${monthStart.toISOString()}
   `);
   const costRows = (costResult as any).rows || costResult;
   const platformCost = parseFloat(costRows[0]?.total_cost ?? "0");
@@ -151,7 +151,7 @@ router.get("/superadmin/dashboard", async (_req, res) => {
     SELECT a.tenant_id as "tenantId", t.name as "tenantName", sum(a.cost_usd::numeric) as "cost"
     FROM api_cost_logs a
     JOIN tenants t ON a.tenant_id = t.id
-    WHERE a.created_at >= ${monthStart}
+    WHERE a.created_at >= ${monthStart.toISOString()}
     GROUP BY a.tenant_id, t.name
     ORDER BY sum(a.cost_usd::numeric) DESC
     LIMIT 5
@@ -167,7 +167,7 @@ router.get("/superadmin/dashboard", async (_req, res) => {
       sum(case when api_provider like 'tts:%' then cost_usd::numeric else 0 end) as tts_cost,
       sum(case when api_provider like 'stt:%' then cost_usd::numeric else 0 end) as stt_cost
     FROM api_cost_logs
-    WHERE created_at >= ${monthStart}
+    WHERE created_at >= ${monthStart.toISOString()}
     GROUP BY DATE(created_at)
     ORDER BY DATE(created_at) ASC
   `);
