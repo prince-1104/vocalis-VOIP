@@ -1,4 +1,4 @@
-import { db, apiCostLogsTable, tenantLimitsTable, tenantsTable, platformSettingsTable, DEFAULT_API_RATES } from "@workspace/db";
+import { db, apiCostLogsTable, tenantLimitsTable, tenantsTable, tenantUsersTable, platformSettingsTable, DEFAULT_API_RATES } from "@workspace/db";
 import { eq, and, gte, sql } from "drizzle-orm";
 
 // ── Cached API rates (refreshed every 5 min) ────────────────────────────
@@ -206,13 +206,31 @@ export async function isTenantOverHardLimit(tenantId: number): Promise<boolean> 
 const ownerTenantCache = new Map<number, { tenantId: number; cachedAt: number }>();
 const OWNER_TENANT_CACHE_TTL = 5 * 60 * 1000;
 
-export async function resolveTenantIdForOwner(ownerId: number): Promise<number | null> {
-  const cached = ownerTenantCache.get(ownerId);
+export async function resolveTenantIdForOwner(userId: number): Promise<number | null> {
+  const cached = ownerTenantCache.get(userId);
   if (cached && Date.now() - cached.cachedAt < OWNER_TENANT_CACHE_TTL) return cached.tenantId;
+  
+  let tenantId: number | null = null;
   const tenant = await db.query.tenantsTable.findFirst({
-    where: eq(tenantsTable.ownerId, ownerId),
+    where: eq(tenantsTable.ownerId, userId),
   });
-  if (!tenant) return null;
-  ownerTenantCache.set(ownerId, { tenantId: tenant.id, cachedAt: Date.now() });
-  return tenant.id;
+  
+  if (tenant) {
+    tenantId = tenant.id;
+  } else {
+    // Check if the user is part of a tenant
+    const tenantUser = await db.query.tenantUsersTable.findFirst({
+      where: eq(tenantUsersTable.userId, userId),
+    });
+    if (tenantUser) {
+      tenantId = tenantUser.tenantId;
+    }
+  }
+
+  if (tenantId) {
+    ownerTenantCache.set(userId, { tenantId, cachedAt: Date.now() });
+    return tenantId;
+  }
+  
+  return null;
 }

@@ -1320,7 +1320,7 @@ router.post("/widget/chat", async (req, res) => {
     const estInputTokens = Math.ceil(inputChars / charsPerToken);
     const estOutputTokens = Math.ceil(outputChars / charsPerToken);
     const baseModel = modelUsed.replace(/\+rewrite$/, "");
-    logLLMCost({
+    return logLLMCost({
       tenantId,
       userId: agent.userId,
       provider: baseModel,
@@ -1328,7 +1328,7 @@ router.post("/widget/chat", async (req, res) => {
       outputTokens: estOutputTokens,
       context: "widget-chat",
     });
-  }).catch(() => {});
+  }).catch((e) => console.error("[widget] cost logging error:", e));
 
   // Suggest a relevant tutorial video if the user's message matches one of
   // the curated topics. We append AFTER the LLM reply so the link survives
@@ -1387,14 +1387,14 @@ router.post("/widget/chat", async (req, res) => {
       resolveTenantIdForOwner(agent.userId).then(tenantId => {
         if (!tenantId) return;
         const totalChars = ttsChunks.reduce((s, c) => s + c.length, 0);
-        logTTSCost({
+        return logTTSCost({
           tenantId,
           userId: agent.userId,
           provider: provider === "openai" ? "openai" : "sarvam",
           characters: totalChars,
           context: "widget-tts-parallel",
         });
-      }).catch(() => {});
+      }).catch((e) => console.error("[widget] TTS cost logging error:", e));
     }
   } else if (includeAudio) {
     // Legacy path: single monolithic TTS (for backward compatibility)
@@ -1454,14 +1454,14 @@ router.post("/widget/tts", async (req, res) => {
     if (agent) {
       resolveTenantIdForOwner(agent.userId).then(tenantId => {
         if (!tenantId) return;
-        logTTSCost({
+        return logTTSCost({
           tenantId,
           userId: agent.userId,
           provider: ttsResult.provider === "openai" ? "openai" : "sarvam",
           characters: text.length,
           context: "widget-tts-standalone",
         });
-      }).catch(() => {});
+      }).catch((e) => console.error("[widget] standalone TTS cost logging error:", e));
     }
   }
 });
