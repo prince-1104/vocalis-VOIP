@@ -1631,15 +1631,34 @@ router.get("/widget/loader.js", async (req, res) => {
     msgs.scrollTop = msgs.scrollHeight;
   }
 
+  var typingTimers = [];
   function setTyping(on) {
     var existing = document.getElementById("_dw-typing");
     if (on && !existing) {
       var t = el("div", {class:"dw-msg bot", id:"_dw-typing"});
-      t.innerHTML = '<div style="display:flex;align-items:center;gap:8px;"><span style="display:inline-block;animation:_dw-search 1.2s ease-in-out infinite;font-size:16px;">🔍</span><span style="font-size:13px;opacity:0.9;font-style:italic;">Please wait, we are searching for it...</span></div>';
+      var states = [
+        { icon: "🤔", text: "Analyzing your query..." },
+        { icon: "🔍", text: "Searching official " + agentName + " information..." },
+        { icon: "✅", text: "Found relevant details" },
+        { icon: "💡", text: "Generating simplified explanation..." }
+      ];
+      function updateState(idx) {
+        if (!document.getElementById("_dw-typing")) return;
+        var st = states[idx];
+        t.innerHTML = '<div style="display:flex;align-items:center;gap:8px;"><span style="display:inline-block;animation:_dw-search 1.2s ease-in-out infinite;font-size:16px;">' + st.icon + '</span><span style="font-size:13px;opacity:0.9;font-style:italic;">' + st.text + '</span></div>';
+        msgs.scrollTop = msgs.scrollHeight;
+      }
       msgs.appendChild(t);
-      msgs.scrollTop = msgs.scrollHeight;
+      updateState(0);
+      typingTimers.push(setTimeout(function(){ updateState(1); }, 1000));
+      typingTimers.push(setTimeout(function(){ updateState(2); }, 2500));
+      typingTimers.push(setTimeout(function(){ updateState(3); }, 3500));
     }
-    if (!on && existing) existing.remove();
+    if (!on && existing) {
+      existing.remove();
+      typingTimers.forEach(clearTimeout);
+      typingTimers = [];
+    }
   }
 
   var INDIC_LANGS = ["kn-IN","hi-IN","ta-IN","te-IN","mr-IN"];
