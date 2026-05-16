@@ -1650,9 +1650,9 @@ router.get("/widget/loader.js", async (req, res) => {
       }
       msgs.appendChild(t);
       updateState(0);
-      typingTimers.push(setTimeout(function(){ updateState(1); }, 1000));
-      typingTimers.push(setTimeout(function(){ updateState(2); }, 2500));
-      typingTimers.push(setTimeout(function(){ updateState(3); }, 3500));
+      typingTimers.push(setTimeout(function(){ updateState(1); }, 1500));
+      typingTimers.push(setTimeout(function(){ updateState(2); }, 3000));
+      typingTimers.push(setTimeout(function(){ updateState(3); }, 4000));
     }
     if (!on && existing) {
       existing.remove();
