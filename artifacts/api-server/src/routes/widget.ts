@@ -1561,6 +1561,7 @@ router.get("/widget/loader.js", async (req, res) => {
     "#_dw-mic.listening svg{fill:white;}",
     "#_dw-mic:disabled{opacity:.4;cursor:not-allowed;}",
     "@keyframes _dw-pulse{0%,100%{box-shadow:0 0 0 0 rgba(239,68,68,.6);}50%{box-shadow:0 0 0 8px rgba(239,68,68,0);}}",
+    "@keyframes _dw-search{0%,100%{transform:rotate(-15deg) scale(0.9);opacity:0.7;}50%{transform:rotate(15deg) scale(1.1);opacity:1;}}",
     "#_dw-listen-bar{display:none;align-items:center;gap:8px;padding:6px 12px;background:rgba(239,68,68,.12);border-top:1px solid rgba(239,68,68,.2);}",
     "#_dw-listen-bar.active{display:flex;}",
     "#_dw-listen-bar span{font-size:12px;color:#fca5a5;flex:1;}",
@@ -1633,7 +1634,8 @@ router.get("/widget/loader.js", async (req, res) => {
   function setTyping(on) {
     var existing = document.getElementById("_dw-typing");
     if (on && !existing) {
-      var t = el("div", {class:"dw-msg bot", id:"_dw-typing"}, "\u2026");
+      var t = el("div", {class:"dw-msg bot", id:"_dw-typing"});
+      t.innerHTML = '<div style="display:flex;align-items:center;gap:8px;"><span style="display:inline-block;animation:_dw-search 1.2s ease-in-out infinite;font-size:16px;">🔍</span><span style="font-size:13px;opacity:0.9;font-style:italic;">Please wait, we are searching for it...</span></div>';
       msgs.appendChild(t);
       msgs.scrollTop = msgs.scrollHeight;
     }
