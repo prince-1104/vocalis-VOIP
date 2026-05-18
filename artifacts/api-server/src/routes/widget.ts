@@ -989,13 +989,28 @@ function selectRelevantKBEntries(
   return [...relevant.map(s => s.entry), ...filler.map(s => s.entry)];
 }
 
+const trainingDataCache = new Map<number, { data: any[]; scripts: any[]; fetchedAt: number }>();
+const TRAINING_CACHE_TTL_MS = 60 * 1000;
+
 async function buildSystemPromptForWidget(userId: number, agentConfig: any, userMessage?: string): Promise<string> {
-  const [trainingDataRaw, scripts] = await Promise.all([
-    db.select().from(trainingDataTable).where(eq(trainingDataTable.userId, userId)).limit(200),
-    db.select().from(callingScriptsTable)
-      .where(and(eq(callingScriptsTable.userId, userId), eq(callingScriptsTable.isDefault, true)))
-      .limit(1),
-  ]);
+  let trainingDataRaw: any[] = [];
+  let scripts: any[] = [];
+  const cached = trainingDataCache.get(userId);
+
+  if (cached && Date.now() - cached.fetchedAt < TRAINING_CACHE_TTL_MS) {
+    trainingDataRaw = cached.data;
+    scripts = cached.scripts;
+  } else {
+    const [fetchedData, fetchedScripts] = await Promise.all([
+      db.select().from(trainingDataTable).where(eq(trainingDataTable.userId, userId)).limit(200),
+      db.select().from(callingScriptsTable)
+        .where(and(eq(callingScriptsTable.userId, userId), eq(callingScriptsTable.isDefault, true)))
+        .limit(1),
+    ]);
+    trainingDataRaw = fetchedData;
+    scripts = fetchedScripts;
+    trainingDataCache.set(userId, { data: fetchedData, scripts: fetchedScripts, fetchedAt: Date.now() });
+  }
   // Video-link entries are metadata used for the YouTube suggestion feature —
   // exclude them from the knowledge-base prompt so they don't pollute it.
   const kbCandidates = trainingDataRaw.filter((td: any) => td.type !== "video_link");
@@ -1370,67 +1385,15 @@ router.post("/widget/chat", async (req, res) => {
   let audioMimeType = "audio/mpeg";
   let audioChunks: Array<{ audio: string | null; mimeType: string }> | null = null;
 
-  // ── Voice-optimized path: TTS + video search run in PARALLEL ──────────
-  // The key insight: TTS only needs the LLM reply text (without video link).
-  // Video search only appends a text link. So we can fire TTS immediately
-  // on the clean reply and run video search concurrently. This saves the
-  // entire video search latency (~200-800ms) from the voice critical path.
+  // ── Voice-optimized path: Skip LLM Reranking & Server-side TTS blocking ──
+  // We return text to the client immediately after LLM generation so the user
+  // sees the reply instantly. The client-side `speakReply` will handle fetching
+  // the TTS chunks in parallel, allowing true streaming playback.
   if (isVoiceRequest) {
-    // Strip URLs/video text from the reply for TTS (TTS text is always clean)
-    const ttsReplyText = stripVideoSuggestionText(reply) || reply;
-    const ttsChunks = splitIntoTTSChunks(ttsReplyText);
-
-    // Fire TTS and video search in parallel
-    const ttsPromise = ttsChunks.length > 0
-      ? (async () => {
-          const ttsStart = Date.now();
-          const chunkResults = await Promise.allSettled(
-            ttsChunks.map(chunk =>
-              synthesizeWidgetTTS(chunk, agent.voice || "nova", language)
-            )
-          );
-          const chunks = chunkResults.map(r =>
-            r.status === "fulfilled"
-              ? { audio: r.value.audio, mimeType: r.value.mimeType }
-              : { audio: null, mimeType: "audio/wav" }
-          );
-          let prov: "sarvam" | "openai" | null = null;
-          for (const r of chunkResults) {
-            if (r.status === "fulfilled" && r.value.provider) {
-              prov = r.value.provider;
-              break;
-            }
-          }
-          console.log(`[widget/chat] parallel TTS: ${ttsChunks.length} chunks in ${Date.now() - ttsStart}ms`);
-          return { chunks, provider: prov, mimeType: chunks[0]?.mimeType || "audio/wav" };
-        })()
-      : Promise.resolve(null);
-
     // Video search uses preloaded data — pure lexical matching, no LLM calls.
     const videoMatch = matchVideoFromList(await videoPreload, message);
 
-    const [ttsResult] = await Promise.all([ttsPromise]);
-
-    if (ttsResult) {
-      audioChunks = ttsResult.chunks;
-      provider = ttsResult.provider;
-      audioMimeType = ttsResult.mimeType;
-
-      // Log TTS cost (fire-and-forget)
-      resolveTenantIdForOwner(agent.userId).then(tenantId => {
-        if (!tenantId) return;
-        const totalChars = ttsChunks.reduce((s, c) => s + c.length, 0);
-        return logTTSCost({
-          tenantId,
-          userId: agent.userId,
-          provider: provider === "openai" ? "openai" : "sarvam",
-          characters: totalChars,
-          context: "widget-tts-parallel",
-        });
-      }).catch((e) => console.error("[widget] TTS cost logging error:", e));
-    }
-
-    // Append video suggestion to text reply (not to TTS audio)
+    // Append video suggestion to text reply
     let suggestedVideo: { title: string; link: string } | null = null;
     if (videoMatch) {
       const link = pickVideoLink(videoMatch, language);
@@ -1440,7 +1403,7 @@ router.post("/widget/chat", async (req, res) => {
       }
     }
 
-    console.log(`[widget/chat] configured=${agent.language} effective=${language} source=${resolved.source} session=${sessionLanguage ?? "-"} model=${modelUsed} tts=${provider ?? "none"} voice=true chunks=${audioChunks?.length ?? 0} video=${suggestedVideo ? suggestedVideo.title : "none"} total=${Date.now() - requestStart}ms`);
+    console.log(`[widget/chat] configured=${agent.language} effective=${language} source=${resolved.source} session=${sessionLanguage ?? "-"} model=${modelUsed} voice=true video=${suggestedVideo ? suggestedVideo.title : "none"} total=${Date.now() - requestStart}ms`);
 
     res.json({
       reply,
@@ -1449,11 +1412,11 @@ router.post("/widget/chat", async (req, res) => {
       detectedLanguage: language,
       configuredLanguage: agent.language,
       modelUsed,
-      audio,
-      audioChunks,
-      provider,
+      audio: null,
+      audioChunks: null,
+      provider: null,
       video: suggestedVideo,
-      audioMimeType,
+      audioMimeType: "audio/wav",
     });
     return;
   }
