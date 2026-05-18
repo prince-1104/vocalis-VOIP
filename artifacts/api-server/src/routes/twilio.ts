@@ -301,9 +301,43 @@ const BULBUL_VOICE_FOR_LANG: Record<string, string> = {
   "mr-IN": "simran",
 };
 
+// ── TTS pronunciation normalization ─────────────────────────────────────
+// Sarvam Bulbul v3 reads Latin "e-Khata" as "ee-kkata". Rewrite brand
+// terms to phonetically correct native-script forms per language.
+const TTS_PRONUNCIATION_MAP: Record<string, Array<{ pattern: RegExp; replacement: string }>> = {
+  "hi-IN": [
+    { pattern: /\be[- ]?[Kk]hata\b/gi, replacement: "ए-खाता" },
+    { pattern: /\be[- ]?[Kk]hataa?\b/gi, replacement: "ए-खाता" },
+  ],
+  "kn-IN": [
+    { pattern: /\be[- ]?[Kk]hata\b/gi, replacement: "ಎ-ಖಾತಾ" },
+    { pattern: /\be[- ]?[Kk]hataa?\b/gi, replacement: "ಎ-ಖಾತಾ" },
+  ],
+  "ta-IN": [
+    { pattern: /\be[- ]?[Kk]hata\b/gi, replacement: "எ-காட்டா" },
+  ],
+  "te-IN": [
+    { pattern: /\be[- ]?[Kk]hata\b/gi, replacement: "ఎ-ఖాతా" },
+  ],
+  "mr-IN": [
+    { pattern: /\be[- ]?[Kk]hata\b/gi, replacement: "ए-खाता" },
+  ],
+};
+
+function normalizeTTSPronunciation(text: string, lang: string): string {
+  const rules = TTS_PRONUNCIATION_MAP[lang];
+  if (!rules) return text;
+  let out = text;
+  for (const { pattern, replacement } of rules) {
+    out = out.replace(pattern, replacement);
+  }
+  return out;
+}
+
 async function callSarvamTTS(text: string, lang: string): Promise<string | null> {
   if (!SARVAM_API_KEY) return null;
 
+  const ttsText = normalizeTTSPronunciation(text, lang);
   const speaker = BULBUL_VOICE_FOR_LANG[lang] ?? "manan";
 
   const res = await fetch("https://api.sarvam.ai/text-to-speech", {
@@ -313,7 +347,7 @@ async function callSarvamTTS(text: string, lang: string): Promise<string | null>
       "api-subscription-key": SARVAM_API_KEY,
     },
     body: JSON.stringify({
-      inputs: [text],
+      inputs: [ttsText],
       target_language_code: lang,
       speaker,
       model: "bulbul:v3",

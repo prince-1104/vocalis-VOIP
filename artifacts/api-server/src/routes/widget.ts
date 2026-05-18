@@ -48,10 +48,53 @@ function isSarvamSupportedTTS(lang?: string | null): boolean {
   return INDIAN_LANGUAGES.has(lang) || lang === "en-IN" || lang === "en-US";
 }
 
+// ── TTS pronunciation normalization ─────────────────────────────────────
+// Sarvam Bulbul v3 reads Latin "e-Khata" as "ee-kkata" because it treats
+// the standalone "e" prefix as a long vowel and over-aspirates "Kh".
+// We rewrite brand terms to phonetically correct forms per language so
+// the TTS output sounds natural.
+const TTS_PRONUNCIATION_MAP: Record<string, Array<{ pattern: RegExp; replacement: string }>> = {
+  "hi-IN": [
+    { pattern: /\be[- ]?[Kk]hata\b/gi, replacement: "ए-खाता" },
+    { pattern: /\be[- ]?[Kk]hataa?\b/gi, replacement: "ए-खाता" },
+  ],
+  "kn-IN": [
+    { pattern: /\be[- ]?[Kk]hata\b/gi, replacement: "ಎ-ಖಾತಾ" },
+    { pattern: /\be[- ]?[Kk]hataa?\b/gi, replacement: "ಎ-ಖಾತಾ" },
+  ],
+  "ta-IN": [
+    { pattern: /\be[- ]?[Kk]hata\b/gi, replacement: "எ-காட்டா" },
+  ],
+  "te-IN": [
+    { pattern: /\be[- ]?[Kk]hata\b/gi, replacement: "ఎ-ఖాతా" },
+  ],
+  "mr-IN": [
+    { pattern: /\be[- ]?[Kk]hata\b/gi, replacement: "ए-खाता" },
+  ],
+  "en-IN": [
+    // For English, space it out so Bulbul doesn't merge it into one syllable
+    { pattern: /\be[- ]?[Kk]hata\b/gi, replacement: "e khata" },
+  ],
+  "en-US": [
+    { pattern: /\be[- ]?[Kk]hata\b/gi, replacement: "e khata" },
+  ],
+};
+
+function normalizeTTSPronunciation(text: string, lang: string): string {
+  const rules = TTS_PRONUNCIATION_MAP[lang];
+  if (!rules) return text;
+  let out = text;
+  for (const { pattern, replacement } of rules) {
+    out = out.replace(pattern, replacement);
+  }
+  return out;
+}
+
 async function generateSarvamWidgetTTS(text: string, lang: string): Promise<string | null> {
   if (!SARVAM_API_KEY || !isSarvamSupportedTTS(lang)) return null;
 
   const target = sarvamTargetLang(lang);
+  const ttsText = normalizeTTSPronunciation(text, lang);
   const speaker = BULBUL_VOICE_FOR_LANG[lang] ?? BULBUL_VOICE_FOR_LANG[target] ?? BULBUL_FEMALE_FALLBACKS[0];
   const res = await fetch("https://api.sarvam.ai/text-to-speech", {
     method: "POST",
@@ -60,7 +103,7 @@ async function generateSarvamWidgetTTS(text: string, lang: string): Promise<stri
       "api-subscription-key": SARVAM_API_KEY,
     },
     body: JSON.stringify({
-      inputs: [text],
+      inputs: [ttsText],
       target_language_code: target,
       speaker,
       model: "bulbul:v3",
