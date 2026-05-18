@@ -1109,7 +1109,7 @@ function normalizeSearchText(text: string): string {
     .replace(/\bnew[\s-]*khata\b/g, "newkhata")
     .replace(/\bkahat\b/g, "khata")
     .replace(/\bekata\b/g, "ekhata")
-    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/[^\p{L}\p{M}\p{N}\s]/gu, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -2005,8 +2005,41 @@ router.get("/widget/loader.js", async (req, res) => {
         if (modeEl2) modeEl2.textContent = "Text";
       }
       var greeting = cfg.greeting || ("Hi! I\u2019m " + agentName + ". How can I help you today?");
-      addMsg(greeting, "bot", false);
-      history.push({role:"assistant", content:greeting});
+      
+      if (agentLang === "auto") {
+        var langWrapper = el("div", {class: "dw-msg bot", style: "display:flex;flex-direction:column;gap:8px;"});
+        langWrapper.textContent = "Please select your preferred language to begin:";
+        
+        var btnRow = el("div", {style: "display:flex;flex-wrap:wrap;gap:6px;margin-top:4px;"});
+        var langs = [
+          { label: "English", code: "en-US" },
+          { label: "हिंदी", code: "hi-IN" },
+          { label: "ಕನ್ನಡ", code: "kn-IN" },
+          { label: "Other", code: "auto" }
+        ];
+        
+        langs.forEach(function(l) {
+          var btn = el("button", {style: "background:#7c3aed;color:#fff;border:none;border-radius:12px;padding:6px 12px;font-size:12px;cursor:pointer;"});
+          btn.textContent = l.label;
+          btn.onclick = function() {
+            sessionLang = l.code;
+            langWrapper.style.display = "none";
+            if (l.label === "Other") {
+              addMsg("You can type or speak the language you prefer (e.g., 'Speak in Tamil').", "bot", false);
+            }
+            addMsg(greeting, "bot", false);
+            history.push({role:"assistant", content:greeting});
+          };
+          btnRow.appendChild(btn);
+        });
+        
+        langWrapper.appendChild(btnRow);
+        msgs.appendChild(langWrapper);
+        msgs.scrollTop = msgs.scrollHeight;
+      } else {
+        addMsg(greeting, "bot", false);
+        history.push({role:"assistant", content:greeting});
+      }
     })
     .catch(function(){
       var nameEl = document.getElementById("_dw-aname");
