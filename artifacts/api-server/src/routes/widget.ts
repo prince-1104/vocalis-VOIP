@@ -160,7 +160,7 @@ async function synthesizeWidgetTTS(
   }
 }
 
-const KB_ENTRY_MAX_CHARS = 500;
+const KB_ENTRY_MAX_CHARS = 1500;
 const KB_MAX_ENTRIES = 20;
 
 const SUPPORTED_LANGUAGES_LINE =
@@ -673,7 +673,7 @@ async function callDeepSeekChat(
       body: JSON.stringify({
         model: "deepseek-chat",
         messages: normalizeMessagesForSingleSystem(messages),
-        max_tokens: 110,
+        max_tokens: 500,
         temperature: 0.4,
       }),
     });
@@ -715,7 +715,7 @@ async function callSarvamChat(
       body: JSON.stringify({
         model: "sarvam-m",
         messages: normalizeMessagesForSingleSystem(messages),
-        max_completion_tokens: 110,
+        max_completion_tokens: 500,
       }),
     });
     if (!res.ok) {
@@ -767,7 +767,7 @@ async function generateWidgetReply(
   // DeepSeek understands "Kanglish" (Kannada in English letters) just as well as "Hinglish".
   const langInfo = NATIVE_LANG_NAMES[normalizedLanguage];
   if (langInfo && DEEPSEEK_API_KEY) {
-    const styleSystem = `Reply ONLY in natural ${langInfo.name} written in NATIVE ${langInfo.script}. Output MUST be in ${langInfo.script}. NEVER romanize. NEVER use Latin/English letters except for brand names like "BBMP", "e-Khata", "ePID" or URLs. If you cannot produce native script, output nothing. Keep replies under 2 sentences. The user's input may mix scripts or use transliteration — understand their intent and ANSWER the question. NEVER reply with a clarification question if the intent is clear.`;
+    const styleSystem = `Reply ONLY in natural ${langInfo.name} written in NATIVE ${langInfo.script}. Output MUST be in ${langInfo.script}. NEVER romanize. NEVER use Latin/English letters except for brand names like "BBMP", "e-Khata", "ePID" or URLs. If you cannot produce native script, output nothing. Provide the COMPLETE answer from the knowledge base — include all steps, documents, and details. Do NOT truncate or summarize if the knowledge base has a detailed answer. The user's input may mix scripts or use transliteration — understand their intent and ANSWER the question. NEVER reply with a clarification question if the intent is clear.`;
     const reply = await callDeepSeekChat([{ role: "system", content: styleSystem }, ...messages]);
     if (reply) {
       const normalized = normalizeIndicReply(reply, normalizedLanguage);
@@ -781,7 +781,7 @@ async function generateWidgetReply(
 
   // --- Fallback to Sarvam-M for Indic if DeepSeek is missing or fails ---
   if (langInfo && SARVAM_API_KEY) {
-    const styleSystem = `Reply ONLY in natural ${langInfo.name} written in NATIVE ${langInfo.script}. Output MUST be in ${langInfo.script}. NEVER romanize. NEVER use Latin/English letters except for brand names like "BBMP", "e-Khata", "ePID" or URLs. If you cannot produce native script, output nothing. Keep replies under 2 sentences. The user's input may be transliterated (e.g. English words in Devanagari, or ${langInfo.name} words in Roman letters) — understand the intent and ANSWER the question directly. NEVER respond with a clarification request when the user has already asked something specific.`;
+    const styleSystem = `Reply ONLY in natural ${langInfo.name} written in NATIVE ${langInfo.script}. Output MUST be in ${langInfo.script}. NEVER romanize. NEVER use Latin/English letters except for brand names like "BBMP", "e-Khata", "ePID" or URLs. If you cannot produce native script, output nothing. Provide the COMPLETE answer from the knowledge base — include all steps, documents, and details. Do NOT truncate or summarize if the knowledge base has a detailed answer. The user's input may be transliterated (e.g. English words in Devanagari, or ${langInfo.name} words in Roman letters) — understand the intent and ANSWER the question directly. NEVER respond with a clarification request when the user has already asked something specific.`;
     const reply = await callSarvamChat([{ role: "system", content: styleSystem }, ...messages]);
     if (reply) {
       const normalized = normalizeIndicReply(reply, normalizedLanguage);
@@ -797,7 +797,7 @@ async function generateWidgetReply(
   try {
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
-      max_completion_tokens: 110,
+      max_completion_tokens: 500,
       messages,
     });
     reply = completion.choices[0]?.message?.content || "I'm sorry, I couldn't process that. Could you try again?";
@@ -1019,7 +1019,7 @@ async function buildSystemPromptForWidget(userId: number, agentConfig: any, user
 
   let system = `You are ${agentConfig.agentName || "SalesBot"}, an AI sales representative`;
   if (agentConfig.personality) system += ` with a ${agentConfig.personality} personality`;
-  system += `. You are chatting with a visitor on the company website. Keep responses concise — 2 short sentences max. Be helpful and guide the visitor toward taking an action. Never mention you are an AI unless directly asked.\n\n`;
+  system += `. You are chatting with a visitor on the company website. Provide COMPLETE and thorough answers from the knowledge base — include all steps, required documents, and relevant details. Do NOT truncate or shorten the answer. Be helpful and guide the visitor toward taking an action. Never mention you are an AI unless directly asked.\n\n`;
 
   system += `${SUPPORTED_LANGUAGES_LINE}\n\n`;
   system += `${TRANSLITERATION_LINE}\n\n`;
@@ -1385,15 +1385,59 @@ router.post("/widget/chat", async (req, res) => {
   let audioMimeType = "audio/mpeg";
   let audioChunks: Array<{ audio: string | null; mimeType: string }> | null = null;
 
-  // ── Voice-optimized path: Skip LLM Reranking & Server-side TTS blocking ──
-  // We return text to the client immediately after LLM generation so the user
-  // sees the reply instantly. The client-side `speakReply` will handle fetching
-  // the TTS chunks in parallel, allowing true streaming playback.
+  // ── Voice path: server-side parallel TTS so text + audio arrive together ──
   if (isVoiceRequest) {
-    // Video search uses preloaded data — pure lexical matching, no LLM calls.
-    const videoMatch = matchVideoFromList(await videoPreload, message);
+    const ttsReplyText = stripVideoSuggestionText(reply) || reply;
+    const ttsChunks = splitIntoTTSChunks(ttsReplyText);
 
-    // Append video suggestion to text reply
+    // Fire TTS chunks and video search in parallel
+    const ttsPromise = ttsChunks.length > 0
+      ? (async () => {
+          const ttsStart = Date.now();
+          const chunkResults = await Promise.allSettled(
+            ttsChunks.map(chunk =>
+              synthesizeWidgetTTS(chunk, agent.voice || "nova", language)
+            )
+          );
+          const chunks = chunkResults.map(r =>
+            r.status === "fulfilled"
+              ? { audio: r.value.audio, mimeType: r.value.mimeType }
+              : { audio: null, mimeType: "audio/wav" }
+          );
+          let prov: "sarvam" | "openai" | null = null;
+          for (const r of chunkResults) {
+            if (r.status === "fulfilled" && r.value.provider) {
+              prov = r.value.provider;
+              break;
+            }
+          }
+          console.log(`[widget/chat] parallel TTS: ${ttsChunks.length} chunks in ${Date.now() - ttsStart}ms`);
+          return { chunks, provider: prov, mimeType: chunks[0]?.mimeType || "audio/wav" };
+        })()
+      : Promise.resolve(null);
+
+    const videoMatch = matchVideoFromList(await videoPreload, message);
+    const [ttsResult] = await Promise.all([ttsPromise]);
+
+    if (ttsResult) {
+      audioChunks = ttsResult.chunks;
+      provider = ttsResult.provider;
+      audioMimeType = ttsResult.mimeType;
+
+      // Fire-and-forget TTS cost logging
+      resolveTenantIdForOwner(agent.userId).then(tenantId => {
+        if (!tenantId) return;
+        const totalChars = ttsChunks.reduce((s, c) => s + c.length, 0);
+        return logTTSCost({
+          tenantId,
+          userId: agent.userId,
+          provider: provider === "openai" ? "openai" : "sarvam",
+          characters: totalChars,
+          context: "widget-tts-parallel",
+        });
+      }).catch((e) => console.error("[widget] TTS cost logging error:", e));
+    }
+
     let suggestedVideo: { title: string; link: string } | null = null;
     if (videoMatch) {
       const link = pickVideoLink(videoMatch, language);
@@ -1403,7 +1447,7 @@ router.post("/widget/chat", async (req, res) => {
       }
     }
 
-    console.log(`[widget/chat] configured=${agent.language} effective=${language} source=${resolved.source} session=${sessionLanguage ?? "-"} model=${modelUsed} voice=true video=${suggestedVideo ? suggestedVideo.title : "none"} total=${Date.now() - requestStart}ms`);
+    console.log(`[widget/chat] configured=${agent.language} effective=${language} source=${resolved.source} session=${sessionLanguage ?? "-"} model=${modelUsed} tts=${provider ?? "none"} voice=true chunks=${audioChunks?.length ?? 0} video=${suggestedVideo ? suggestedVideo.title : "none"} total=${Date.now() - requestStart}ms`);
 
     res.json({
       reply,
@@ -1412,11 +1456,11 @@ router.post("/widget/chat", async (req, res) => {
       detectedLanguage: language,
       configuredLanguage: agent.language,
       modelUsed,
-      audio: null,
-      audioChunks: null,
-      provider: null,
+      audio,
+      audioChunks,
+      provider,
       video: suggestedVideo,
-      audioMimeType: "audio/wav",
+      audioMimeType,
     });
     return;
   }
