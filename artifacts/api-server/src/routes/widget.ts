@@ -746,6 +746,7 @@ async function generateWidgetReply(
   history: { role: string; content: string }[],
   message: string,
   language: string,
+  isVoiceRequest?: boolean,
 ): Promise<{ reply: string; modelUsed: string }> {
   const normalizedLanguage = language || "en-US";
   const messages: any[] = [
@@ -770,6 +771,9 @@ async function generateWidgetReply(
     const reply = await callDeepSeekChat([{ role: "system", content: styleSystem }, ...messages]);
     if (reply) {
       const normalized = normalizeIndicReply(reply, normalizedLanguage);
+      // Voice requests skip ensureNativeScript (~600ms) since DeepSeek
+      // reliably produces native script and TTS handles minor issues.
+      if (isVoiceRequest) return { reply: normalized, modelUsed: "deepseek-chat" };
       const fixed = await ensureNativeScript(normalized, normalizedLanguage);
       return { reply: fixed.reply, modelUsed: fixed.rewrote ? "deepseek-chat+rewrite" : "deepseek-chat" };
     }
@@ -781,6 +785,7 @@ async function generateWidgetReply(
     const reply = await callSarvamChat([{ role: "system", content: styleSystem }, ...messages]);
     if (reply) {
       const normalized = normalizeIndicReply(reply, normalizedLanguage);
+      if (isVoiceRequest) return { reply: normalized, modelUsed: "sarvam-m" };
       const fixed = await ensureNativeScript(normalized, normalizedLanguage);
       return { reply: fixed.reply, modelUsed: fixed.rewrote ? "sarvam-m+rewrite" : "sarvam-m" };
     }
@@ -816,17 +821,29 @@ async function generateWidgetReply(
   // gpt-4o-mini/DeepSeek reliably produce native script for Indic; only run the
   // ensureNativeScript safety net when the language is non-English to keep
   // the English fast-path latency-free.
-  if (!isIndianLanguage(normalizedLanguage)) {
+  if (!isIndianLanguage(normalizedLanguage) || isVoiceRequest) {
     return { reply: normalized, modelUsed };
   }
   const fixed = await ensureNativeScript(normalized, normalizedLanguage);
   return { reply: fixed.reply, modelUsed: fixed.rewrote ? `${modelUsed}+rewrite` : modelUsed };
 }
 
+// ── Agent config cache (60s TTL) ─────────────────────────────────────────
+// The widget API key is stable within a session. Caching avoids a DB round-
+// trip (~50ms) on every turn, which adds up on voice requests.
+const AGENT_CACHE_TTL_MS = 60_000;
+const agentConfigCache = new Map<string, { data: any; fetchedAt: number }>();
+
 async function getAgentByWidgetKey(apiKey: string) {
-  return db.query.agentConfigsTable.findFirst({
+  const cached = agentConfigCache.get(apiKey);
+  if (cached && Date.now() - cached.fetchedAt < AGENT_CACHE_TTL_MS) {
+    return cached.data;
+  }
+  const agent = await db.query.agentConfigsTable.findFirst({
     where: and(eq(agentConfigsTable.widgetApiKey, apiKey), eq(agentConfigsTable.widgetEnabled, true)),
   });
+  agentConfigCache.set(apiKey, { data: agent, fetchedAt: Date.now() });
+  return agent;
 }
 
 // ── Intelligent per-message KB relevance scoring ────────────────────────
@@ -1203,6 +1220,16 @@ async function findRelevantVideo(
   message: string,
 ): Promise<VideoLinkEntry | null> {
   const videos = await loadVideoLinks(userId);
+  return matchVideoFromList(videos, message);
+}
+
+// Pure lexical video matching — no LLM calls needed. Videos are already
+// curated in training data with search_terms, so token overlap scoring is
+// fast (~0ms) and accurate enough.
+function matchVideoFromList(
+  videos: VideoLinkEntry[],
+  message: string,
+): VideoLinkEntry | null {
   if (!videos.length) return null;
   const tokens = tokenizeForSearch(message);
   if (!tokens.length) return null;
@@ -1214,49 +1241,7 @@ async function findRelevantVideo(
   ranked.sort((a, b) => b.score - a.score);
   if (!ranked.length) return null;
   const best = ranked[0];
-  // Threshold: require a meaningful overlap. Tuned so that "how to apply
-  // for ekhata" matches "How to Apply for e-Khata" but a generic greeting
-  // ("hello") never does.
   if (best.score < 2.5) return null;
-
-  // Fast path: clear winner, avoid extra LLM hop.
-  const second = ranked[1];
-  if (!second || best.score - second.score >= 1.2) return best.video;
-
-  // Ambiguous path: rerank top-N with a tiny LLM call.
-  const top = ranked.slice(0, 5);
-  try {
-    const userLine = normalizeSearchText(message).slice(0, 220);
-    const options = top.map((c, i) => ({
-      idx: i + 1,
-      title: c.video.title,
-      terms: (c.video.search_terms ?? []).slice(0, 8),
-    }));
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      max_completion_tokens: 6,
-      temperature: 0,
-      messages: [
-        {
-          role: "system",
-          content:
-            "Pick the single best matching BBMP e-Khata video option for the query. " +
-            "Return ONLY one digit: 0 if none fit, else 1-5.",
-        },
-        {
-          role: "user",
-          content: `Query: ${userLine}\nOptions: ${JSON.stringify(options)}`,
-        },
-      ],
-    });
-    const raw = completion.choices?.[0]?.message?.content?.trim() || "";
-    const n = Number((raw.match(/[0-5]/) || [])[0]);
-    if (Number.isInteger(n) && n >= 1 && n <= top.length) {
-      return top[n - 1].video;
-    }
-  } catch {
-    // fall through to lexical best
-  }
   return best.video;
 }
 
@@ -1284,6 +1269,7 @@ function videoSuggestionLine(language: string, link: string): string {
 }
 
 router.post("/widget/chat", async (req, res) => {
+  const requestStart = Date.now();
   const { apiKey, message, history, includeAudio, isVoiceRequest, sessionLanguage } = req.body as {
     apiKey: string;
     message: string;
@@ -1311,6 +1297,12 @@ router.post("/widget/chat", async (req, res) => {
       ? (h.role === "assistant" ? stripVideoSuggestionText(h.content) : h.content)
       : "",
   }));
+
+  // ── Optimization: preload video links while we resolve language ───────
+  // The DB fetch for video_link entries is I/O-bound and independent of the
+  // LLM pipeline. Start it early so it's ready by the time we need it.
+  const videoPreload = loadVideoLinks(agent.userId).catch(() => [] as VideoLinkEntry[]);
+
   const resolved = await resolveEffectiveWidgetLanguage(
     agent.language,
     message,
@@ -1330,6 +1322,7 @@ router.post("/widget/chat", async (req, res) => {
       normalizedHistory,
       message,
       effectiveLanguage,
+      isVoiceRequest,
     );
     reply = generation.reply;
     modelUsed = generation.modelUsed;
@@ -1338,7 +1331,8 @@ router.post("/widget/chat", async (req, res) => {
     reply = "Sorry, I'm having a moment. Please try again shortly.";
   }
 
-  await db.insert(callLogsTable).values({
+  // ── Fire-and-forget: DB call log + cost logging (never block response) ─
+  db.insert(callLogsTable).values({
     userId: agent.userId,
     direction: "widget",
     phone: "web-widget",
@@ -1352,9 +1346,6 @@ router.post("/widget/chat", async (req, res) => {
   }).catch(() => {});
 
   // ── Fire-and-forget cost logging ──────────────────────────────────────
-  // Estimate token counts from text length (rough: ~4 chars per token for
-  // English, ~2 for Indic scripts). We don't get exact counts from DeepSeek
-  // or Sarvam-M, so this is a reasonable approximation.
   resolveTenantIdForOwner(agent.userId).then(tenantId => {
     if (!tenantId) return;
     const charsPerToken = isIndianLanguage(effectiveLanguage) ? 2 : 4;
@@ -1373,58 +1364,57 @@ router.post("/widget/chat", async (req, res) => {
     });
   }).catch((e) => console.error("[widget] cost logging error:", e));
 
-  // Suggest a relevant tutorial video if the user's message matches one of
-  // the curated topics. We append AFTER the LLM reply so the link survives
-  // even when the model is verbose.
-  let suggestedVideo: { title: string; link: string } | null = null;
-  try {
-    const matched = await findRelevantVideo(agent.userId, message);
-    if (matched) {
-      const link = pickVideoLink(matched, effectiveLanguage);
-      if (link) {
-        reply = `${reply.trim()}${videoSuggestionLine(effectiveLanguage, link)}`;
-        suggestedVideo = { title: matched.title, link };
-      }
-    }
-  } catch (e) {
-    console.error("[widget/chat] video match error:", e);
-  }
-
   const language = effectiveLanguage;
   let audio: string | null = null;
   let provider: "sarvam" | "openai" | null = null;
   let audioMimeType = "audio/mpeg";
-
-  // ── Parallel server-side TTS (voice requests) ────────────────────────
-  // When the client signals isVoiceRequest, we split the reply into sentence
-  // chunks, fire ALL Sarvam/OpenAI TTS calls in parallel, and bundle every
-  // audio chunk in the response. This eliminates the extra client→server→Sarvam
-  // round-trip that used to add 4-8s of latency.
   let audioChunks: Array<{ audio: string | null; mimeType: string }> | null = null;
 
+  // ── Voice-optimized path: TTS + video search run in PARALLEL ──────────
+  // The key insight: TTS only needs the LLM reply text (without video link).
+  // Video search only appends a text link. So we can fire TTS immediately
+  // on the clean reply and run video search concurrently. This saves the
+  // entire video search latency (~200-800ms) from the voice critical path.
   if (isVoiceRequest) {
-    const ttsChunks = splitIntoTTSChunks(reply);
-    if (ttsChunks.length > 0) {
-      const ttsStart = Date.now();
-      const chunkResults = await Promise.allSettled(
-        ttsChunks.map(chunk =>
-          synthesizeWidgetTTS(chunk, agent.voice || "nova", language)
-        )
-      );
-      audioChunks = chunkResults.map(r =>
-        r.status === "fulfilled"
-          ? { audio: r.value.audio, mimeType: r.value.mimeType }
-          : { audio: null, mimeType: "audio/wav" }
-      );
-      // Determine the provider from the first successful chunk for logging
-      for (const r of chunkResults) {
-        if (r.status === "fulfilled" && r.value.provider) {
-          provider = r.value.provider;
-          break;
-        }
-      }
-      audioMimeType = audioChunks[0]?.mimeType || "audio/wav";
-      console.log(`[widget/chat] parallel TTS: ${ttsChunks.length} chunks in ${Date.now() - ttsStart}ms`);
+    // Strip URLs/video text from the reply for TTS (TTS text is always clean)
+    const ttsReplyText = stripVideoSuggestionText(reply) || reply;
+    const ttsChunks = splitIntoTTSChunks(ttsReplyText);
+
+    // Fire TTS and video search in parallel
+    const ttsPromise = ttsChunks.length > 0
+      ? (async () => {
+          const ttsStart = Date.now();
+          const chunkResults = await Promise.allSettled(
+            ttsChunks.map(chunk =>
+              synthesizeWidgetTTS(chunk, agent.voice || "nova", language)
+            )
+          );
+          const chunks = chunkResults.map(r =>
+            r.status === "fulfilled"
+              ? { audio: r.value.audio, mimeType: r.value.mimeType }
+              : { audio: null, mimeType: "audio/wav" }
+          );
+          let prov: "sarvam" | "openai" | null = null;
+          for (const r of chunkResults) {
+            if (r.status === "fulfilled" && r.value.provider) {
+              prov = r.value.provider;
+              break;
+            }
+          }
+          console.log(`[widget/chat] parallel TTS: ${ttsChunks.length} chunks in ${Date.now() - ttsStart}ms`);
+          return { chunks, provider: prov, mimeType: chunks[0]?.mimeType || "audio/wav" };
+        })()
+      : Promise.resolve(null);
+
+    // Video search uses preloaded data — pure lexical matching, no LLM calls.
+    const videoMatch = matchVideoFromList(await videoPreload, message);
+
+    const [ttsResult] = await Promise.all([ttsPromise]);
+
+    if (ttsResult) {
+      audioChunks = ttsResult.chunks;
+      provider = ttsResult.provider;
+      audioMimeType = ttsResult.mimeType;
 
       // Log TTS cost (fire-and-forget)
       resolveTenantIdForOwner(agent.userId).then(tenantId => {
@@ -1439,8 +1429,51 @@ router.post("/widget/chat", async (req, res) => {
         });
       }).catch((e) => console.error("[widget] TTS cost logging error:", e));
     }
-  } else if (includeAudio) {
-    // Legacy path: single monolithic TTS (for backward compatibility)
+
+    // Append video suggestion to text reply (not to TTS audio)
+    let suggestedVideo: { title: string; link: string } | null = null;
+    if (videoMatch) {
+      const link = pickVideoLink(videoMatch, language);
+      if (link) {
+        reply = `${reply.trim()}${videoSuggestionLine(language, link)}`;
+        suggestedVideo = { title: videoMatch.title, link };
+      }
+    }
+
+    console.log(`[widget/chat] configured=${agent.language} effective=${language} source=${resolved.source} session=${sessionLanguage ?? "-"} model=${modelUsed} tts=${provider ?? "none"} voice=true chunks=${audioChunks?.length ?? 0} video=${suggestedVideo ? suggestedVideo.title : "none"} total=${Date.now() - requestStart}ms`);
+
+    res.json({
+      reply,
+      agentName: agent.agentName,
+      language,
+      detectedLanguage: language,
+      configuredLanguage: agent.language,
+      modelUsed,
+      audio,
+      audioChunks,
+      provider,
+      video: suggestedVideo,
+      audioMimeType,
+    });
+    return;
+  }
+
+  // ── Non-voice path (text-only or legacy includeAudio) ─────────────────
+  let suggestedVideo: { title: string; link: string } | null = null;
+  try {
+    const matched = await findRelevantVideo(agent.userId, message);
+    if (matched) {
+      const link = pickVideoLink(matched, effectiveLanguage);
+      if (link) {
+        reply = `${reply.trim()}${videoSuggestionLine(effectiveLanguage, link)}`;
+        suggestedVideo = { title: matched.title, link };
+      }
+    }
+  } catch (e) {
+    console.error("[widget/chat] video match error:", e);
+  }
+
+  if (includeAudio) {
     const ttsText = stripVideoSuggestionText(reply) || reply;
     const ttsResult = await synthesizeWidgetTTS(ttsText, agent.voice || "nova", language);
     audio = ttsResult.audio;
@@ -1448,7 +1481,7 @@ router.post("/widget/chat", async (req, res) => {
     audioMimeType = ttsResult.mimeType;
   }
 
-  console.log(`[widget/chat] configured=${agent.language} effective=${language} source=${resolved.source} session=${sessionLanguage ?? "-"} model=${modelUsed} tts=${provider ?? "none"} voice=${!!isVoiceRequest} chunks=${audioChunks?.length ?? 0} video=${suggestedVideo ? suggestedVideo.title : "none"}`);
+  console.log(`[widget/chat] configured=${agent.language} effective=${language} source=${resolved.source} session=${sessionLanguage ?? "-"} model=${modelUsed} tts=${provider ?? "none"} voice=false chunks=0 video=${suggestedVideo ? suggestedVideo.title : "none"} total=${Date.now() - requestStart}ms`);
 
   res.json({
     reply,
