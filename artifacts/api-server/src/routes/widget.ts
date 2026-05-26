@@ -160,8 +160,12 @@ async function synthesizeWidgetTTS(
   }
 }
 
-const KB_ENTRY_MAX_CHARS = 1500;
-const KB_MAX_ENTRIES = 20;
+const KB_ENTRY_MAX_CHARS = 800;
+const KB_MAX_ENTRIES = 10;
+
+// Voice gets a much smaller prompt for speed — short KB, short replies.
+const KB_ENTRY_MAX_CHARS_VOICE = 400;
+const KB_MAX_ENTRIES_VOICE = 5;
 
 const SUPPORTED_LANGUAGES_LINE =
   "You support these languages and MUST be able to converse in any of them: English (en-US), Hindi (hi-IN), Kannada (kn-IN), Tamil (ta-IN), Telugu (te-IN), and Marathi (mr-IN). NEVER tell the user you only speak English or Hindi. If the user asks for Kannada / Tamil / Telugu / Marathi (in any script — e.g. 'in kannada', 'kannada me', 'ಕನ್ನಡದಲ್ಲಿ', 'कन्नड में', 'इन कनाडा लैंग्वेज'), switch to that language immediately and continue the entire conversation in it. NEVER ask the user to clarify which language they want when they have already named one.";
@@ -656,6 +660,7 @@ function tripProvider(name: string, reason: string, cooldownMs: number) {
 
 async function callDeepSeekChat(
   messages: any[],
+  maxTokens: number = 250,
 ): Promise<string | null> {
   if (!DEEPSEEK_API_KEY) return null;
   const tripped = isProviderTripped("deepseek");
@@ -673,7 +678,7 @@ async function callDeepSeekChat(
       body: JSON.stringify({
         model: "deepseek-chat",
         messages: normalizeMessagesForSingleSystem(messages),
-        max_tokens: 500,
+        max_tokens: maxTokens,
         temperature: 0.4,
       }),
     });
@@ -715,7 +720,7 @@ async function callSarvamChat(
       body: JSON.stringify({
         model: "sarvam-m",
         messages: normalizeMessagesForSingleSystem(messages),
-        max_completion_tokens: 500,
+        max_completion_tokens: 250,
       }),
     });
     if (!res.ok) {
@@ -767,8 +772,10 @@ async function generateWidgetReply(
   // DeepSeek understands "Kanglish" (Kannada in English letters) just as well as "Hinglish".
   const langInfo = NATIVE_LANG_NAMES[normalizedLanguage];
   if (langInfo && DEEPSEEK_API_KEY) {
-    const styleSystem = `Reply ONLY in natural ${langInfo.name} written in NATIVE ${langInfo.script}. Output MUST be in ${langInfo.script}. NEVER romanize. NEVER use Latin/English letters except for brand names like "BBMP", "e-Khata", "ePID" or URLs. If you cannot produce native script, output nothing. Provide the COMPLETE answer from the knowledge base — include all steps, documents, and details. Do NOT truncate or summarize if the knowledge base has a detailed answer. The user's input may mix scripts or use transliteration — understand their intent and ANSWER the question. NEVER reply with a clarification question if the intent is clear.`;
-    const reply = await callDeepSeekChat([{ role: "system", content: styleSystem }, ...messages]);
+    const brevity = isVoiceRequest ? " Keep your answer to 2-3 short sentences MAX — this will be spoken aloud." : "";
+    const styleSystem = `Reply ONLY in natural ${langInfo.name} written in NATIVE ${langInfo.script}. Output MUST be in ${langInfo.script}. NEVER romanize. NEVER use Latin/English letters except for brand names like "BBMP", "e-Khata", "ePID" or URLs. If you cannot produce native script, output nothing. Provide the answer from the knowledge base — include key details. The user's input may mix scripts or use transliteration — understand their intent and ANSWER the question. NEVER reply with a clarification question if the intent is clear.${brevity}`;
+    const voiceMaxTokens = isVoiceRequest ? 150 : 250;
+    const reply = await callDeepSeekChat([{ role: "system", content: styleSystem }, ...messages], voiceMaxTokens);
     if (reply) {
       const normalized = normalizeIndicReply(reply, normalizedLanguage);
       // DeepSeek V3 reliably produces native script — skip the expensive
@@ -780,7 +787,8 @@ async function generateWidgetReply(
 
   // --- Fallback to Sarvam-M for Indic if DeepSeek is missing or fails ---
   if (langInfo && SARVAM_API_KEY) {
-    const styleSystem = `Reply ONLY in natural ${langInfo.name} written in NATIVE ${langInfo.script}. Output MUST be in ${langInfo.script}. NEVER romanize. NEVER use Latin/English letters except for brand names like "BBMP", "e-Khata", "ePID" or URLs. If you cannot produce native script, output nothing. Provide the COMPLETE answer from the knowledge base — include all steps, documents, and details. Do NOT truncate or summarize if the knowledge base has a detailed answer. The user's input may be transliterated (e.g. English words in Devanagari, or ${langInfo.name} words in Roman letters) — understand the intent and ANSWER the question directly. NEVER respond with a clarification request when the user has already asked something specific.`;
+    const brevity = isVoiceRequest ? " Keep your answer to 2-3 short sentences MAX — this will be spoken aloud." : "";
+    const styleSystem = `Reply ONLY in natural ${langInfo.name} written in NATIVE ${langInfo.script}. Output MUST be in ${langInfo.script}. NEVER romanize. NEVER use Latin/English letters except for brand names like "BBMP", "e-Khata", "ePID" or URLs. If you cannot produce native script, output nothing. Provide the answer from the knowledge base — include key details. The user's input may be transliterated — understand the intent and ANSWER the question directly. NEVER respond with a clarification request when the user has already asked something specific.${brevity}`;
     const reply = await callSarvamChat([{ role: "system", content: styleSystem }, ...messages]);
     if (reply) {
       const normalized = normalizeIndicReply(reply, normalizedLanguage);
@@ -796,7 +804,7 @@ async function generateWidgetReply(
   try {
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
-      max_completion_tokens: 500,
+      max_completion_tokens: isVoiceRequest ? 150 : 300,
       messages,
     });
     reply = completion.choices[0]?.message?.content || "I'm sorry, I couldn't process that. Could you try again?";
@@ -991,7 +999,9 @@ function selectRelevantKBEntries(
 const trainingDataCache = new Map<number, { data: any[]; scripts: any[]; fetchedAt: number }>();
 const TRAINING_CACHE_TTL_MS = 60 * 1000;
 
-async function buildSystemPromptForWidget(userId: number, agentConfig: any, userMessage?: string): Promise<string> {
+async function buildSystemPromptForWidget(userId: number, agentConfig: any, userMessage?: string, isVoice?: boolean): Promise<string> {
+  const maxEntries = isVoice ? KB_MAX_ENTRIES_VOICE : KB_MAX_ENTRIES;
+  const maxChars = isVoice ? KB_ENTRY_MAX_CHARS_VOICE : KB_ENTRY_MAX_CHARS;
   let trainingDataRaw: any[] = [];
   let scripts: any[] = [];
   const cached = trainingDataCache.get(userId);
@@ -1014,11 +1024,15 @@ async function buildSystemPromptForWidget(userId: number, agentConfig: any, user
   // exclude them from the knowledge-base prompt so they don't pollute it.
   const kbCandidates = trainingDataRaw.filter((td: any) => td.type !== "video_link");
   // Use per-message relevance scoring to pick the most relevant KB entries
-  const trainingData = selectRelevantKBEntries(kbCandidates, userMessage, KB_MAX_ENTRIES);
+  const trainingData = selectRelevantKBEntries(kbCandidates, userMessage, maxEntries);
 
-  let system = `You are ${agentConfig.agentName || "SalesBot"}, an AI sales representative`;
+  let system = `You are ${agentConfig.agentName || "SalesBot"}, an AI assistant`;
   if (agentConfig.personality) system += ` with a ${agentConfig.personality} personality`;
-  system += `. You are chatting with a visitor on the company website. Provide COMPLETE and thorough answers from the knowledge base — include all steps, required documents, and relevant details. Do NOT truncate or shorten the answer. Be helpful and guide the visitor toward taking an action. Never mention you are an AI unless directly asked.\n\n`;
+  if (isVoice) {
+    system += `. You are on a VOICE chat. Keep ALL replies to 2-3 SHORT sentences. Be direct — the user is listening, not reading. Never mention you are an AI unless directly asked.\n\n`;
+  } else {
+    system += `. You are chatting with a visitor on the company website. Provide helpful answers from the knowledge base. Be helpful and guide the visitor toward taking an action. Never mention you are an AI unless directly asked.\n\n`;
+  }
 
   system += `${SUPPORTED_LANGUAGES_LINE}\n\n`;
   system += `${TRANSLITERATION_LINE}\n\n`;
@@ -1041,8 +1055,8 @@ async function buildSystemPromptForWidget(userId: number, agentConfig: any, user
   if (trainingData.length > 0) {
     system += `KNOWLEDGE BASE:\n`;
     for (const td of trainingData) {
-      const snippet = td.content.length > KB_ENTRY_MAX_CHARS
-        ? td.content.slice(0, KB_ENTRY_MAX_CHARS).trimEnd() + "…"
+      const snippet = td.content.length > maxChars
+        ? td.content.slice(0, maxChars).trimEnd() + "…"
         : td.content;
       system += `• [${td.type.replace(/_/g, " ").toUpperCase()}] ${td.title}: ${snippet}\n`;
     }
@@ -1149,10 +1163,7 @@ function splitIntoTTSChunks(text: string): string[] {
   for (const p of parts) {
     const trimmed = p.trim();
     if (!trimmed) continue;
-    // Merge ultra-short fragments (< 20 chars like "Ok." or "Hi.") into the
-    // previous buffer, but cap the combined chunk at 120 chars so Sarvam
-    // synthesizes each in < 2s.
-    if (buf && (trimmed.length < 20 || (buf + " " + trimmed).length < 120)) {
+    if (buf && (trimmed.length < 20 || (buf + " " + trimmed).length < 200)) {
       buf = (buf + " " + trimmed).trim();
     } else if (buf) {
       chunks.push(buf);
@@ -1162,7 +1173,17 @@ function splitIntoTTSChunks(text: string): string[] {
     }
   }
   if (buf) chunks.push(buf);
-  return chunks.length > 0 ? chunks : [stripped];
+  if (chunks.length === 0) return [stripped];
+
+  // Hard cap at 3 chunks — merge overflow into the last chunk to limit
+  // parallel Sarvam TTS calls and total latency.
+  const MAX_TTS_CHUNKS = 3;
+  if (chunks.length > MAX_TTS_CHUNKS) {
+    const merged = chunks.slice(0, MAX_TTS_CHUNKS - 1);
+    merged.push(chunks.slice(MAX_TTS_CHUNKS - 1).join(" "));
+    return merged;
+  }
+  return chunks;
 }
 
 async function loadVideoLinks(userId: number): Promise<VideoLinkEntry[]> {
@@ -1344,7 +1365,7 @@ router.post("/widget/chat", async (req, res) => {
   const systemPrompt = await buildSystemPromptForWidget(agent.userId, {
     ...agent,
     language: effectiveLanguage,
-  }, message);
+  }, message, isVoiceRequest);
   let reply: string;
   let modelUsed = "gpt-4o-mini";
   try {
