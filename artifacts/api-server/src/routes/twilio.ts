@@ -306,21 +306,21 @@ const BULBUL_VOICE_FOR_LANG: Record<string, string> = {
 // terms to phonetically correct native-script forms per language.
 const TTS_PRONUNCIATION_MAP: Record<string, Array<{ pattern: RegExp; replacement: string }>> = {
   "hi-IN": [
-    { pattern: /\be[- ]?[Kk]hata\b/gi, replacement: "ए-खाता" },
-    { pattern: /\be[- ]?[Kk]hataa?\b/gi, replacement: "ए-खाता" },
+    { pattern: /\be[- ]?[Kk]hata\b/gi, replacement: "ई-खाता" },
+    { pattern: /\be[- ]?[Kk]hataa?\b/gi, replacement: "ई-खाता" },
   ],
   "kn-IN": [
-    { pattern: /\be[- ]?[Kk]hata\b/gi, replacement: "ಎ-ಖಾತಾ" },
-    { pattern: /\be[- ]?[Kk]hataa?\b/gi, replacement: "ಎ-ಖಾತಾ" },
+    { pattern: /\be[- ]?[Kk]hata\b/gi, replacement: "ಈ-ಖಾತಾ" },
+    { pattern: /\be[- ]?[Kk]hataa?\b/gi, replacement: "ಈ-ಖಾತಾ" },
   ],
   "ta-IN": [
-    { pattern: /\be[- ]?[Kk]hata\b/gi, replacement: "எ-காட்டா" },
+    { pattern: /\be[- ]?[Kk]hata\b/gi, replacement: "ஈ-காட்டா" },
   ],
   "te-IN": [
-    { pattern: /\be[- ]?[Kk]hata\b/gi, replacement: "ఎ-ఖాతా" },
+    { pattern: /\be[- ]?[Kk]hata\b/gi, replacement: "ఈ-ఖాతా" },
   ],
   "mr-IN": [
-    { pattern: /\be[- ]?[Kk]hata\b/gi, replacement: "ए-खाता" },
+    { pattern: /\be[- ]?[Kk]hata\b/gi, replacement: "ई-खाता" },
   ],
 };
 

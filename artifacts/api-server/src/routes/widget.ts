@@ -55,28 +55,28 @@ function isSarvamSupportedTTS(lang?: string | null): boolean {
 // the TTS output sounds natural.
 const TTS_PRONUNCIATION_MAP: Record<string, Array<{ pattern: RegExp; replacement: string }>> = {
   "hi-IN": [
-    { pattern: /\be[- ]?[Kk]hata\b/gi, replacement: "ए-खाता" },
-    { pattern: /\be[- ]?[Kk]hataa?\b/gi, replacement: "ए-खाता" },
+    { pattern: /\be[- ]?[Kk]hata\b/gi, replacement: "ई-खाता" },
+    { pattern: /\be[- ]?[Kk]hataa?\b/gi, replacement: "ई-खाता" },
   ],
   "kn-IN": [
-    { pattern: /\be[- ]?[Kk]hata\b/gi, replacement: "ಎ-ಖಾತಾ" },
-    { pattern: /\be[- ]?[Kk]hataa?\b/gi, replacement: "ಎ-ಖಾತಾ" },
+    { pattern: /\be[- ]?[Kk]hata\b/gi, replacement: "ಈ-ಖಾತಾ" },
+    { pattern: /\be[- ]?[Kk]hataa?\b/gi, replacement: "ಈ-ಖಾತಾ" },
   ],
   "ta-IN": [
-    { pattern: /\be[- ]?[Kk]hata\b/gi, replacement: "எ-காட்டா" },
+    { pattern: /\be[- ]?[Kk]hata\b/gi, replacement: "ஈ-காட்டா" },
   ],
   "te-IN": [
-    { pattern: /\be[- ]?[Kk]hata\b/gi, replacement: "ఎ-ఖాతా" },
+    { pattern: /\be[- ]?[Kk]hata\b/gi, replacement: "ఈ-ఖాతా" },
   ],
   "mr-IN": [
-    { pattern: /\be[- ]?[Kk]hata\b/gi, replacement: "ए-खाता" },
+    { pattern: /\be[- ]?[Kk]hata\b/gi, replacement: "ई-खाता" },
   ],
   "en-IN": [
-    // For English, space it out so Bulbul doesn't merge it into one syllable
-    { pattern: /\be[- ]?[Kk]hata\b/gi, replacement: "e khata" },
+    // For English, use "ee" so Bulbul pronounces the long vowel (ई) with Indian accent
+    { pattern: /\be[- ]?[Kk]hata\b/gi, replacement: "ee khata" },
   ],
   "en-US": [
-    { pattern: /\be[- ]?[Kk]hata\b/gi, replacement: "e khata" },
+    { pattern: /\be[- ]?[Kk]hata\b/gi, replacement: "ee khata" },
   ],
 };
 
@@ -464,13 +464,13 @@ async function resolveEffectiveWidgetLanguage(
     return { lang: romanized.lang, source: "romanized-strong" };
   }
 
-  // Truly ambiguous: only call the LLM arbiter when heuristics conflict, NOT
-  // for every message. This was previously firing on common English words
-  // ("in", "me") and adding 400–800ms to every turn.
+  // Truly ambiguous: only call the LLM arbiter when heuristics GENUINELY
+  // conflict, NOT for weak signals. Tightened thresholds to avoid the
+  // 400-800ms LLM call on the majority of turns.
   const conflictingSignals =
     (native && romanized && native.lang !== romanized.lang) ||
-    (hasNativeChars && eng.ratio >= 0.35) ||
-    (romanized && eng.ratio >= 0.2 && eng.ratio < 0.4) ||
+    (hasNativeChars && eng.ratio >= 0.45) ||
+    (romanized && romanized.score >= 2 && eng.ratio >= 0.2 && eng.ratio < 0.4) ||
     (romanized && romanized.score === 1 && eng.words === 0); // Whisper phonetic artifact
     
   if (conflictingSignals) {
@@ -771,11 +771,10 @@ async function generateWidgetReply(
     const reply = await callDeepSeekChat([{ role: "system", content: styleSystem }, ...messages]);
     if (reply) {
       const normalized = normalizeIndicReply(reply, normalizedLanguage);
-      // Voice requests skip ensureNativeScript (~600ms) since DeepSeek
-      // reliably produces native script and TTS handles minor issues.
-      if (isVoiceRequest) return { reply: normalized, modelUsed: "deepseek-chat" };
-      const fixed = await ensureNativeScript(normalized, normalizedLanguage);
-      return { reply: fixed.reply, modelUsed: fixed.rewrote ? "deepseek-chat+rewrite" : "deepseek-chat" };
+      // DeepSeek V3 reliably produces native script — skip the expensive
+      // ensureNativeScript check (~600ms gpt-4o-mini call) for both voice
+      // and text paths. Only Sarvam-M or GPT fallbacks might need the check.
+      return { reply: normalized, modelUsed: "deepseek-chat" };
     }
   }
 
@@ -1313,17 +1312,34 @@ router.post("/widget/chat", async (req, res) => {
       : "",
   }));
 
-  // ── Optimization: preload video links while we resolve language ───────
-  // The DB fetch for video_link entries is I/O-bound and independent of the
-  // LLM pipeline. Start it early so it's ready by the time we need it.
+  // ── Optimization: preload video links AND warm training data cache ────
+  // Both are I/O-bound DB fetches independent of language resolution.
+  // Start them in parallel so data is ready by the time we need it.
   const videoPreload = loadVideoLinks(agent.userId).catch(() => [] as VideoLinkEntry[]);
 
-  const resolved = await resolveEffectiveWidgetLanguage(
-    agent.language,
-    message,
-    normalizedHistory,
-    sessionLanguage,
-  );
+  // Warm the training data cache in parallel with language resolution.
+  // buildSystemPromptForWidget will find the data already cached.
+  const trainingWarmup = (async () => {
+    const cached = trainingDataCache.get(agent.userId);
+    if (cached && Date.now() - cached.fetchedAt < TRAINING_CACHE_TTL_MS) return;
+    const [fetchedData, fetchedScripts] = await Promise.all([
+      db.select().from(trainingDataTable).where(eq(trainingDataTable.userId, agent.userId)).limit(200),
+      db.select().from(callingScriptsTable)
+        .where(and(eq(callingScriptsTable.userId, agent.userId), eq(callingScriptsTable.isDefault, true)))
+        .limit(1),
+    ]);
+    trainingDataCache.set(agent.userId, { data: fetchedData, scripts: fetchedScripts, fetchedAt: Date.now() });
+  })().catch(() => {});
+
+  const [resolved] = await Promise.all([
+    resolveEffectiveWidgetLanguage(
+      agent.language,
+      message,
+      normalizedHistory,
+      sessionLanguage,
+    ),
+    trainingWarmup,
+  ]);
   const effectiveLanguage = resolved.lang;
   const systemPrompt = await buildSystemPromptForWidget(agent.userId, {
     ...agent,
@@ -1466,9 +1482,11 @@ router.post("/widget/chat", async (req, res) => {
   }
 
   // ── Non-voice path (text-only or legacy includeAudio) ─────────────────
+  // Reuse the videoPreload started earlier instead of a fresh DB query.
   let suggestedVideo: { title: string; link: string } | null = null;
   try {
-    const matched = await findRelevantVideo(agent.userId, message);
+    const videos = await videoPreload;
+    const matched = matchVideoFromList(videos, message);
     if (matched) {
       const link = pickVideoLink(matched, effectiveLanguage);
       if (link) {
@@ -1633,7 +1651,18 @@ router.get("/widget/loader.js", async (req, res) => {
     ".dw-msg{max-width:80%;padding:8px 12px;border-radius:12px;font-size:13px;line-height:1.4;}",
     ".dw-msg.bot{background:rgba(124,58,237,.15);color:#e2d9f3;border-bottom-left-radius:4px;align-self:flex-start;}",
     ".dw-msg.user{background:#7c3aed;color:#fff;border-bottom-right-radius:4px;align-self:flex-end;}",
-    ".dw-msg.user.voice{background:linear-gradient(135deg,#7c3aed,#4f46e5);display:flex;align-items:center;gap:6px;}",
+    ".dw-msg.user.voice{background:linear-gradient(135deg,#7c3aed,#4f46e5);display:flex;align-items:center;gap:8px;padding:10px 14px;border-radius:16px;}",
+    ".dw-voice-orb{display:flex;align-items:center;gap:3px;height:28px;}",
+    ".dw-voice-orb .bar{width:3px;border-radius:3px;background:rgba(255,255,255,.85);animation:_dw-vbar 1.2s ease-in-out infinite;}",
+    ".dw-voice-orb .bar:nth-child(1){height:8px;animation-delay:0s;}",
+    ".dw-voice-orb .bar:nth-child(2){height:16px;animation-delay:.1s;}",
+    ".dw-voice-orb .bar:nth-child(3){height:24px;animation-delay:.2s;}",
+    ".dw-voice-orb .bar:nth-child(4){height:18px;animation-delay:.3s;}",
+    ".dw-voice-orb .bar:nth-child(5){height:10px;animation-delay:.4s;}",
+    ".dw-voice-orb .bar:nth-child(6){height:20px;animation-delay:.15s;}",
+    ".dw-voice-orb .bar:nth-child(7){height:12px;animation-delay:.35s;}",
+    ".dw-voice-label{font-size:12px;color:rgba(255,255,255,.8);font-style:italic;}",
+    "@keyframes _dw-vbar{0%,100%{transform:scaleY(.3);opacity:.5;}50%{transform:scaleY(1);opacity:1;}}",
     "#_dw-form{display:flex;gap:6px;padding:10px 12px;border-top:1px solid rgba(255,255,255,.08);align-items:center;}",
     "#_dw-input{flex:1;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.12);border-radius:8px;padding:8px 10px;color:#fff;font-size:13px;outline:none;}",
     "#_dw-send{background:#7c3aed;border:none;border-radius:8px;width:34px;height:34px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;}",
@@ -1707,6 +1736,13 @@ router.get("/widget/loader.js", async (req, res) => {
     var m = el("div", {class:cls});
     if (who === "bot") {
       m.innerHTML = linkifyHtml(text).replace(/\\n/g, "<br>");
+    } else if (isVoice && who === "user") {
+      // Show 3D audio wave animation instead of STT text (STT is often wrong)
+      var orb = el("div", {class:"dw-voice-orb"});
+      for (var bi = 0; bi < 7; bi++) { orb.appendChild(el("div", {class:"bar"})); }
+      m.appendChild(orb);
+      var lbl = el("span", {class:"dw-voice-label"}, "Voice message");
+      m.appendChild(lbl);
     } else {
       m.textContent = text;
     }
