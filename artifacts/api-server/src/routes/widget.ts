@@ -772,10 +772,10 @@ async function generateWidgetReply(
   // DeepSeek understands "Kanglish" (Kannada in English letters) just as well as "Hinglish".
   const langInfo = NATIVE_LANG_NAMES[normalizedLanguage];
   if (langInfo && DEEPSEEK_API_KEY) {
-    const brevity = isVoiceRequest ? " Keep your answer to 2-3 short sentences MAX — this will be spoken aloud." : "";
+    const brevity = isVoiceRequest ? " Give a complete, detailed answer using the knowledge base content." : " Keep your answer brief and conversational — 2-3 sentences max.";
     const styleSystem = `Reply ONLY in natural ${langInfo.name} written in NATIVE ${langInfo.script}. Output MUST be in ${langInfo.script}. NEVER romanize. NEVER use Latin/English letters except for brand names like "BBMP", "e-Khata", "ePID" or URLs. If you cannot produce native script, output nothing. Provide the answer from the knowledge base — include key details. The user's input may mix scripts or use transliteration — understand their intent and ANSWER the question. NEVER reply with a clarification question if the intent is clear.${brevity}`;
-    const voiceMaxTokens = isVoiceRequest ? 150 : 250;
-    const reply = await callDeepSeekChat([{ role: "system", content: styleSystem }, ...messages], voiceMaxTokens);
+    const llmMaxTokens = isVoiceRequest ? 300 : 150;
+    const reply = await callDeepSeekChat([{ role: "system", content: styleSystem }, ...messages], llmMaxTokens);
     if (reply) {
       const normalized = normalizeIndicReply(reply, normalizedLanguage);
       // DeepSeek V3 reliably produces native script — skip the expensive
@@ -787,7 +787,7 @@ async function generateWidgetReply(
 
   // --- Fallback to Sarvam-M for Indic if DeepSeek is missing or fails ---
   if (langInfo && SARVAM_API_KEY) {
-    const brevity = isVoiceRequest ? " Keep your answer to 2-3 short sentences MAX — this will be spoken aloud." : "";
+    const brevity = isVoiceRequest ? " Give a complete, detailed answer using the knowledge base content." : " Keep your answer brief and conversational — 2-3 sentences max.";
     const styleSystem = `Reply ONLY in natural ${langInfo.name} written in NATIVE ${langInfo.script}. Output MUST be in ${langInfo.script}. NEVER romanize. NEVER use Latin/English letters except for brand names like "BBMP", "e-Khata", "ePID" or URLs. If you cannot produce native script, output nothing. Provide the answer from the knowledge base — include key details. The user's input may be transliterated — understand the intent and ANSWER the question directly. NEVER respond with a clarification request when the user has already asked something specific.${brevity}`;
     const reply = await callSarvamChat([{ role: "system", content: styleSystem }, ...messages]);
     if (reply) {
@@ -804,7 +804,7 @@ async function generateWidgetReply(
   try {
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
-      max_completion_tokens: isVoiceRequest ? 150 : 300,
+      max_completion_tokens: isVoiceRequest ? 300 : 150,
       messages,
     });
     reply = completion.choices[0]?.message?.content || "I'm sorry, I couldn't process that. Could you try again?";
@@ -1029,9 +1029,9 @@ async function buildSystemPromptForWidget(userId: number, agentConfig: any, user
   let system = `You are ${agentConfig.agentName || "SalesBot"}, an AI assistant`;
   if (agentConfig.personality) system += ` with a ${agentConfig.personality} personality`;
   if (isVoice) {
-    system += `. You are on a VOICE chat. Keep ALL replies to 2-3 SHORT sentences. Be direct — the user is listening, not reading. Never mention you are an AI unless directly asked.\n\n`;
+    system += `. You are on a VOICE call. Answer using the exact details and facts from the knowledge base. Give complete, helpful answers without omitting key information. Be warm, conversational, and natural — the user is listening. Never mention you are an AI unless directly asked.\n\n`;
   } else {
-    system += `. You are chatting with a visitor on the company website. Provide helpful answers from the knowledge base. Be helpful and guide the visitor toward taking an action. Never mention you are an AI unless directly asked.\n\n`;
+    system += `. You are chatting with a visitor on the company website. Keep replies brief and conversational — 2-3 sentences max. Be helpful and guide the visitor toward taking an action. Never mention you are an AI unless directly asked.\n\n`;
   }
 
   system += `${SUPPORTED_LANGUAGES_LINE}\n\n`;
@@ -1071,6 +1071,118 @@ async function buildSystemPromptForWidget(userId: number, agentConfig: any, user
     }
   }
   return system;
+}
+
+// ── Direct KB answer retrieval for voice fast-path ──────────────────────
+// For voice requests, try to find an exact FAQ/objection match from the
+// training data and return the pre-written answer directly, completely
+// skipping the LLM call. This cuts voice latency by ~2-3 seconds.
+
+interface DirectKBAnswer {
+  answer: string;
+  confidence: number;
+  source: string;
+}
+
+function scoreQuestionMatch(
+  messageTokens: string[],
+  messageLower: string,
+  question: string,
+): number {
+  const qLower = question.toLowerCase().trim();
+  const qTokens = tokenizeForSearch(question);
+
+  // Exact or near-exact match
+  if (messageLower === qLower) return 100;
+  if (messageLower.length > 5 && qLower.length > 5 &&
+      (messageLower.includes(qLower) || qLower.includes(messageLower))) return 90;
+
+  // Token overlap scoring
+  if (!qTokens.length || !messageTokens.length) return 0;
+  const messageSet = new Set(messageTokens);
+  let overlap = 0;
+  for (const t of qTokens) {
+    if (messageSet.has(t)) overlap++;
+  }
+  const coverage = overlap / qTokens.length;
+  const messageCoverage = overlap / messageTokens.length;
+
+  // Both sides need good coverage to avoid false positives
+  if (coverage >= 0.8 && messageCoverage >= 0.4) return 80;
+  if (coverage >= 0.6 && messageCoverage >= 0.3 && overlap >= 2) return 60;
+  if (coverage >= 0.5 && overlap >= 2) return 40;
+  // Single decisive token — only if it's specific enough (length >= 5)
+  if (overlap >= 1 && messageCoverage >= 0.5 && qTokens.some(t => messageSet.has(t) && t.length >= 5)) return 35;
+  return 0;
+}
+
+async function findDirectKBAnswer(
+  userId: number,
+  message: string,
+): Promise<DirectKBAnswer | null> {
+  let trainingData: any[] = [];
+  const cached = trainingDataCache.get(userId);
+  if (cached && Date.now() - cached.fetchedAt < TRAINING_CACHE_TTL_MS) {
+    trainingData = cached.data;
+  } else {
+    trainingData = await db.select().from(trainingDataTable)
+      .where(eq(trainingDataTable.userId, userId)).limit(200);
+  }
+
+  const messageLower = message.toLowerCase().trim();
+  const messageTokens = tokenizeForSearch(message);
+  if (!messageTokens.length && messageLower.length < 3) return null;
+
+  let bestMatch: DirectKBAnswer | null = null;
+  let bestScore = 0;
+
+  for (const entry of trainingData) {
+    // 1. Manually added FAQ/objection entries — title is question, content is answer
+    if (entry.type === "faq" || entry.type === "objection_handling") {
+      const score = scoreQuestionMatch(messageTokens, messageLower, entry.title || "");
+      if (score > bestScore) {
+        bestScore = score;
+        bestMatch = { answer: entry.content, confidence: score, source: entry.type };
+      }
+      continue;
+    }
+
+    // 2. Uploaded JSON files — parse and extract FAQ/objection structures
+    try {
+      const parsed = JSON.parse(entry.content);
+      const root = parsed?.knowledge_base || parsed;
+
+      // Check FAQs array
+      const faqs: any[] = root?.faqs || parsed?.faqs || [];
+      for (const faq of faqs) {
+        if (!faq?.question || !faq?.answer) continue;
+        const score = scoreQuestionMatch(messageTokens, messageLower, faq.question);
+        if (score > bestScore) {
+          bestScore = score;
+          bestMatch = { answer: faq.answer, confidence: score, source: "faq" };
+        }
+      }
+
+      // Check objection handling array
+      const objections: any[] = root?.objection_handling || parsed?.objection_handling || [];
+      for (const obj of objections) {
+        if (!obj?.objection || !obj?.response) continue;
+        const score = scoreQuestionMatch(messageTokens, messageLower, obj.objection);
+        if (score > bestScore) {
+          bestScore = score;
+          bestMatch = { answer: obj.response, confidence: score, source: "objection" };
+        }
+      }
+    } catch {
+      // Not JSON — skip structured matching for this entry
+    }
+  }
+
+  // Require confidence >= 35 for a direct match
+  if (bestMatch && bestMatch.confidence >= 35) {
+    return bestMatch;
+  }
+  return null;
 }
 
 router.get("/widget/config/:apiKey", async (req, res) => {
@@ -1362,25 +1474,42 @@ router.post("/widget/chat", async (req, res) => {
     trainingWarmup,
   ]);
   const effectiveLanguage = resolved.lang;
-  const systemPrompt = await buildSystemPromptForWidget(agent.userId, {
-    ...agent,
-    language: effectiveLanguage,
-  }, message, isVoiceRequest);
-  let reply: string;
+  let reply = "";
   let modelUsed = "gpt-4o-mini";
-  try {
-    const generation = await generateWidgetReply(
-      systemPrompt,
-      normalizedHistory,
-      message,
-      effectiveLanguage,
-      isVoiceRequest,
-    );
-    reply = generation.reply;
-    modelUsed = generation.modelUsed;
-  } catch (err) {
-    console.error("Widget AI error:", err);
-    reply = "Sorry, I'm having a moment. Please try again shortly.";
+  let systemPrompt = "";
+
+  // ── Voice fast-path: direct KB match skips LLM entirely ────────────────
+  // For voice, try to match the user's question against FAQ/objection entries
+  // in the training data. If found, return the pre-written answer directly
+  // without calling the LLM — this cuts voice latency by ~2-3 seconds.
+  if (isVoiceRequest) {
+    const directAnswer = await findDirectKBAnswer(agent.userId, message);
+    if (directAnswer) {
+      reply = directAnswer.answer;
+      modelUsed = "direct-kb";
+      console.log(`[widget/chat] VOICE FAST PATH: direct KB match (confidence=${directAnswer.confidence}, source=${directAnswer.source})`);
+    }
+  }
+
+  if (!reply) {
+    systemPrompt = await buildSystemPromptForWidget(agent.userId, {
+      ...agent,
+      language: effectiveLanguage,
+    }, message, isVoiceRequest);
+    try {
+      const generation = await generateWidgetReply(
+        systemPrompt,
+        normalizedHistory,
+        message,
+        effectiveLanguage,
+        isVoiceRequest,
+      );
+      reply = generation.reply;
+      modelUsed = generation.modelUsed;
+    } catch (err) {
+      console.error("Widget AI error:", err);
+      reply = "Sorry, I'm having a moment. Please try again shortly.";
+    }
   }
 
   // ── Fire-and-forget: DB call log + cost logging (never block response) ─
