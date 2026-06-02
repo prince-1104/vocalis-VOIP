@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
-import { ScrollArea } from "@/components/ui/scroll-area";
+
 import { Badge } from "@/components/ui/badge";
 import { Trash2, Plus, BrainCircuit, FileText, Upload, Loader2, CheckCircle2, FileJson, File, Eye, ExternalLink, Video, AlertTriangle } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
@@ -506,7 +506,7 @@ export default function Training() {
                   </DialogTitle>
                 </DialogHeader>
 
-                <ScrollArea className="flex-1 min-h-[100px] max-h-[60vh] -mx-6 px-6 mt-4">
+                <div className="flex-1 min-h-[100px] overflow-y-auto -mx-6 px-6 mt-4" style={{ maxHeight: 'calc(85vh - 180px)' }}>
                   <div className="space-y-4 pb-4">
                     {/* Video Link detail view */}
                     {isVideoLink && videoLinkData && (
@@ -606,7 +606,7 @@ export default function Training() {
                       </>
                     )}
                   </div>
-                </ScrollArea>
+                </div>
 
                 <div className="flex justify-between items-center pt-3 border-t border-white/10 shrink-0">
                   <Button
