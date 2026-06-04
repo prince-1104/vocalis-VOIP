@@ -90,6 +90,30 @@ function normalizeTTSPronunciation(text: string, lang: string): string {
   return out;
 }
 
+// ── Voice TTS sanitization ──────────────────────────────────────────────
+// Strip contact details from TTS output so the bot doesn't read out phone
+// numbers, emails, social handles, etc. The full text is still shown in chat.
+function stripForVoiceTTS(text: string): string {
+  let out = text;
+  // Phone numbers: +91 63629 85767, 063629 85767, +91-636-29-85767, etc.
+  out = out.replace(/(\+?\d{1,3}[\s.-]?)?(\(?\d{2,5}\)?[\s.-]?){1,4}\d{3,5}/g, '');
+  // Email addresses
+  out = out.replace(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g, '');
+  // Social media handles and references
+  out = out.replace(/@[a-zA-Z0-9_]+/g, '');
+  out = out.replace(/\b(Instagram|Facebook|Twitter|YouTube|WhatsApp|Telegram|LinkedIn)\b[^.!?।॥]*/gi, '');
+  // URLs
+  out = out.replace(/https?:\/\/\S+/gi, '');
+  out = out.replace(/www\.[^\s]+/gi, '');
+  // Google Play / App Store references
+  out = out.replace(/\b(Google Play|Play Store|App Store|Chanakya App)\b[^.!?।॥]*/gi, '');
+  // Clean up residual punctuation and whitespace
+  out = out.replace(/,\s*,/g, ',').replace(/\.\s*\./g, '.').replace(/\s{2,}/g, ' ').trim();
+  // Remove empty sentences (just punctuation left)
+  out = out.replace(/^[\s,;.!?।॥]+/, '').replace(/[\s,;]+$/, '').trim();
+  return out || text; // fallback to original if everything was stripped
+}
+
 async function generateSarvamWidgetTTS(text: string, lang: string): Promise<string | null> {
   if (!SARVAM_API_KEY || !isSarvamSupportedTTS(lang)) return null;
 
@@ -772,9 +796,9 @@ async function generateWidgetReply(
   // DeepSeek understands "Kanglish" (Kannada in English letters) just as well as "Hinglish".
   const langInfo = NATIVE_LANG_NAMES[normalizedLanguage];
   if (langInfo && DEEPSEEK_API_KEY) {
-    const brevity = isVoiceRequest ? " Give a complete, detailed answer using the knowledge base content." : " Keep your answer brief and conversational — 2-3 sentences max.";
+    const brevity = isVoiceRequest ? " Answer in 1-2 short spoken sentences ONLY. NEVER read out phone numbers, email addresses, social media handles, URLs, or app store links — just say 'you can find contact details on the website'. Be warm and natural." : " Keep your answer brief and conversational — 2-3 sentences max.";
     const styleSystem = `Reply ONLY in natural ${langInfo.name} written in NATIVE ${langInfo.script}. Output MUST be in ${langInfo.script}. NEVER romanize. NEVER use Latin/English letters except for brand names like "BBMP", "e-Khata", "ePID" or URLs. If you cannot produce native script, output nothing. Provide the answer from the knowledge base — include key details. The user's input may mix scripts or use transliteration — understand their intent and ANSWER the question. NEVER reply with a clarification question if the intent is clear.${brevity}`;
-    const llmMaxTokens = isVoiceRequest ? 300 : 150;
+    const llmMaxTokens = isVoiceRequest ? 100 : 150;
     const reply = await callDeepSeekChat([{ role: "system", content: styleSystem }, ...messages], llmMaxTokens);
     if (reply) {
       const normalized = normalizeIndicReply(reply, normalizedLanguage);
@@ -787,7 +811,7 @@ async function generateWidgetReply(
 
   // --- Fallback to Sarvam-M for Indic if DeepSeek is missing or fails ---
   if (langInfo && SARVAM_API_KEY) {
-    const brevity = isVoiceRequest ? " Give a complete, detailed answer using the knowledge base content." : " Keep your answer brief and conversational — 2-3 sentences max.";
+    const brevity = isVoiceRequest ? " Answer in 1-2 short spoken sentences ONLY. NEVER read out phone numbers, email addresses, social media handles, URLs, or app store links — just say 'you can find contact details on the website'. Be warm and natural." : " Keep your answer brief and conversational — 2-3 sentences max.";
     const styleSystem = `Reply ONLY in natural ${langInfo.name} written in NATIVE ${langInfo.script}. Output MUST be in ${langInfo.script}. NEVER romanize. NEVER use Latin/English letters except for brand names like "BBMP", "e-Khata", "ePID" or URLs. If you cannot produce native script, output nothing. Provide the answer from the knowledge base — include key details. The user's input may be transliterated — understand the intent and ANSWER the question directly. NEVER respond with a clarification request when the user has already asked something specific.${brevity}`;
     const reply = await callSarvamChat([{ role: "system", content: styleSystem }, ...messages]);
     if (reply) {
@@ -804,7 +828,7 @@ async function generateWidgetReply(
   try {
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
-      max_completion_tokens: isVoiceRequest ? 300 : 150,
+      max_completion_tokens: isVoiceRequest ? 100 : 150,
       messages,
     });
     reply = completion.choices[0]?.message?.content || "I'm sorry, I couldn't process that. Could you try again?";
@@ -1029,7 +1053,7 @@ async function buildSystemPromptForWidget(userId: number, agentConfig: any, user
   let system = `You are ${agentConfig.agentName || "SalesBot"}, an AI assistant`;
   if (agentConfig.personality) system += ` with a ${agentConfig.personality} personality`;
   if (isVoice) {
-    system += `. You are on a VOICE call. Answer using the exact details and facts from the knowledge base. Give complete, helpful answers without omitting key information. Be warm, conversational, and natural — the user is listening. Never mention you are an AI unless directly asked.\n\n`;
+    system += `. You are on a VOICE call. Answer in 1-2 short, natural spoken sentences ONLY. NEVER read out phone numbers, email addresses, contact numbers, social media handles, website URLs, or app store links — if the user asks for contact info, say "you can find the contact details on the website" or "I can show you the details in the chat". Be warm, conversational, and concise — the user is listening. Never mention you are an AI unless directly asked.\n\n`;
   } else {
     system += `. You are chatting with a visitor on the company website. Keep replies brief and conversational — 2-3 sentences max. Be helpful and guide the visitor toward taking an action. Never mention you are an AI unless directly asked.\n\n`;
   }
@@ -1303,16 +1327,78 @@ async function loadVideoLinks(userId: number): Promise<VideoLinkEntry[]> {
   if (cached && Date.now() - cached.fetchedAt < VIDEO_CACHE_TTL_MS) {
     return cached.videos;
   }
+
+  // Fetch ALL training data (not just video_link) so we can extract embedded
+  // video objects from FAQ/product_info/objection_handling entries too.
   const rows = await db
     .select()
     .from(trainingDataTable)
-    .where(and(eq(trainingDataTable.userId, userId), eq(trainingDataTable.type, "video_link")));
+    .where(eq(trainingDataTable.userId, userId))
+    .limit(200);
+
   const videos: VideoLinkEntry[] = [];
+  const seenLinks = new Set<string>(); // deduplicate by link
+
   for (const r of rows) {
     try {
       const parsed = JSON.parse(r.content);
-      if (parsed && typeof parsed.title === "string") {
-        videos.push(parsed);
+
+      // 1. Dedicated video_link entries (original format)
+      if (r.type === "video_link" && parsed && typeof parsed.title === "string") {
+        const key = parsed.link_en || parsed.link_kn || parsed.title;
+        if (!seenLinks.has(key)) {
+          seenLinks.add(key);
+          videos.push(parsed);
+        }
+        continue;
+      }
+
+      // 2. Embedded videos inside FAQ/product_info/objection_handling entries
+      //    Format: { title, answer, sampleQuestions: [...], video: { english, kannada } }
+      //    Also handles nested structures like { knowledge_base: { faqs: [...] } }
+      if (parsed?.video && (parsed.video.english || parsed.video.kannada)) {
+        const linkEn = parsed.video.english || "";
+        const linkKn = parsed.video.kannada || "";
+        const key = linkEn || linkKn;
+        if (key && !seenLinks.has(key)) {
+          seenLinks.add(key);
+          // Use title + sampleQuestions as search terms for matching
+          const searchTerms: string[] = [];
+          if (parsed.title) searchTerms.push(parsed.title);
+          if (Array.isArray(parsed.sampleQuestions)) {
+            searchTerms.push(...parsed.sampleQuestions);
+          }
+          videos.push({
+            title: parsed.title || r.title || "Video",
+            link_en: linkEn,
+            link_kn: linkKn,
+            search_terms: searchTerms,
+          });
+        }
+        continue;
+      }
+
+      // 3. Nested knowledge_base structures with faqs/items arrays
+      const root = parsed?.knowledge_base || parsed;
+      const items: any[] = root?.items || root?.faqs || [];
+      for (const item of items) {
+        if (!item?.video) continue;
+        const linkEn = item.video.english || item.video.link_en || "";
+        const linkKn = item.video.kannada || item.video.link_kn || "";
+        const key = linkEn || linkKn;
+        if (!key || seenLinks.has(key)) continue;
+        seenLinks.add(key);
+        const searchTerms: string[] = [];
+        if (item.title) searchTerms.push(item.title);
+        if (Array.isArray(item.sampleQuestions)) {
+          searchTerms.push(...item.sampleQuestions);
+        }
+        videos.push({
+          title: item.title || "Video",
+          link_en: linkEn,
+          link_kn: linkKn,
+          search_terms: searchTerms,
+        });
       }
     } catch {
       // ignore malformed entries
@@ -1553,7 +1639,8 @@ router.post("/widget/chat", async (req, res) => {
 
   // ── Voice path: server-side parallel TTS so text + audio arrive together ──
   if (isVoiceRequest) {
-    const ttsReplyText = stripVideoSuggestionText(reply) || reply;
+    const ttsReplyRaw = stripVideoSuggestionText(reply) || reply;
+    const ttsReplyText = stripForVoiceTTS(ttsReplyRaw);
     const ttsChunks = splitIntoTTSChunks(ttsReplyText);
 
     // Fire TTS chunks and video search in parallel
@@ -1824,6 +1911,7 @@ router.get("/widget/loader.js", async (req, res) => {
     "#_dw-mic:disabled{opacity:.4;cursor:not-allowed;}",
     "@keyframes _dw-pulse{0%,100%{box-shadow:0 0 0 0 rgba(239,68,68,.6);}50%{box-shadow:0 0 0 8px rgba(239,68,68,0);}}",
     "@keyframes _dw-search{0%,100%{transform:rotate(-15deg) scale(0.9);opacity:0.7;}50%{transform:rotate(15deg) scale(1.1);opacity:1;}}",
+    "@keyframes _dw-shimmer{0%{background-position:200% 0;}100%{background-position:-200% 0;}}",
     "#_dw-listen-bar{display:none;align-items:center;gap:8px;padding:6px 12px;background:rgba(239,68,68,.12);border-top:1px solid rgba(239,68,68,.2);}",
     "#_dw-listen-bar.active{display:flex;}",
     "#_dw-listen-bar span{font-size:12px;color:#fca5a5;flex:1;}",
@@ -1877,9 +1965,18 @@ router.get("/widget/loader.js", async (req, res) => {
   }
   function linkifyHtml(text) {
     var safe = escapeHtml(text);
-    return safe.replace(/(https?:\\/\\/[^\\s<]+)/g, function(url) {
-      return '<a href="' + url + '" target="_blank" rel="noopener noreferrer" style="color:#a78bfa;text-decoration:underline;word-break:break-all">' + url + '</a>';
+    // 1. Parse markdown-style links: [text](url) -> clickable link
+    safe = safe.replace(/\\[([^\\]]+)\\]\\((https?:\\/\\/[^\\s)]+)\\)/g, function(_, label, url) {
+      var cleanUrl = url.replace(/[).,;:!?]+$/, '');
+      return '<a href="' + cleanUrl + '" target="_blank" rel="noopener noreferrer" style="color:#a78bfa;text-decoration:underline;word-break:break-all">' + label + '</a>';
     });
+    // 2. Linkify remaining bare URLs (not already inside href)
+    safe = safe.replace(/(^|[^"=])(https?:\\/\\/[^\\s<]+)/g, function(match, prefix, url) {
+      var cleanUrl = url.replace(/[).,;:!?]+$/, '');
+      var trailing = url.slice(cleanUrl.length);
+      return prefix + '<a href="' + cleanUrl + '" target="_blank" rel="noopener noreferrer" style="color:#a78bfa;text-decoration:underline;word-break:break-all">' + cleanUrl + '</a>' + trailing;
+    });
+    return safe;
   }
   function addMsg(text, who, isVoice) {
     var cls = "dw-msg " + who + (isVoice && who === "user" ? " voice" : "");
@@ -1904,24 +2001,41 @@ router.get("/widget/loader.js", async (req, res) => {
   function setTyping(on) {
     var existing = document.getElementById("_dw-typing");
     if (on && !existing) {
-      var t = el("div", {class:"dw-msg bot", id:"_dw-typing"});
+      var t = el("div", {class:"dw-msg bot", id:"_dw-typing", style:"max-width:85%;"});
       var states = [
-        { icon: "🤔", text: "Analyzing your query..." },
-        { icon: "🔍", text: "Searching official " + agentName + " information..." },
-        { icon: "✅", text: "Found relevant details" },
-        { icon: "💡", text: "Generating simplified explanation..." }
+        { icon: "🤔", text: "Thinking..." },
+        { icon: "📚", text: "Searching knowledge base..." },
+        { icon: "🔍", text: "Finding relevant information..." },
+        { icon: "📋", text: "Reviewing details..." },
+        { icon: "✍️", text: "Crafting your answer..." },
+        { icon: "🎯", text: "Almost ready..." },
+        { icon: "⏳", text: "Finishing up..." },
+        { icon: "💡", text: "Just a moment more..." }
       ];
+      var shimmerHtml = '<div style="margin-top:8px;display:flex;flex-direction:column;gap:5px;">' +
+        '<div style="height:8px;width:90%;border-radius:4px;background:linear-gradient(90deg,rgba(124,58,237,.1) 25%,rgba(124,58,237,.25) 50%,rgba(124,58,237,.1) 75%);background-size:200% 100%;animation:_dw-shimmer 1.5s ease-in-out infinite;"></div>' +
+        '<div style="height:8px;width:70%;border-radius:4px;background:linear-gradient(90deg,rgba(124,58,237,.1) 25%,rgba(124,58,237,.25) 50%,rgba(124,58,237,.1) 75%);background-size:200% 100%;animation:_dw-shimmer 1.5s ease-in-out infinite;animation-delay:.2s;"></div>' +
+        '<div style="height:8px;width:50%;border-radius:4px;background:linear-gradient(90deg,rgba(124,58,237,.1) 25%,rgba(124,58,237,.25) 50%,rgba(124,58,237,.1) 75%);background-size:200% 100%;animation:_dw-shimmer 1.5s ease-in-out infinite;animation-delay:.4s;"></div>' +
+        '</div>';
       function updateState(idx) {
         if (!document.getElementById("_dw-typing")) return;
         var st = states[idx];
-        t.innerHTML = '<div style="display:flex;align-items:center;gap:8px;"><span style="display:inline-block;animation:_dw-search 1.2s ease-in-out infinite;font-size:16px;">' + st.icon + '</span><span style="font-size:13px;opacity:0.9;font-style:italic;">' + st.text + '</span></div>';
+        t.innerHTML = '<div style="display:flex;flex-direction:column;gap:4px;">' +
+          '<div style="display:flex;align-items:center;gap:8px;transition:opacity 0.3s ease;">' +
+          '<span style="display:inline-block;animation:_dw-search 1.2s ease-in-out infinite;font-size:16px;">' + st.icon + '</span>' +
+          '<span style="font-size:13px;opacity:0.9;font-style:italic;">' + st.text + '</span>' +
+          '</div>' + shimmerHtml + '</div>';
         msgs.scrollTop = msgs.scrollHeight;
       }
       msgs.appendChild(t);
       updateState(0);
       typingTimers.push(setTimeout(function(){ updateState(1); }, 1500));
-      typingTimers.push(setTimeout(function(){ updateState(2); }, 3000));
-      typingTimers.push(setTimeout(function(){ updateState(3); }, 4000));
+      typingTimers.push(setTimeout(function(){ updateState(2); }, 3500));
+      typingTimers.push(setTimeout(function(){ updateState(3); }, 5500));
+      typingTimers.push(setTimeout(function(){ updateState(4); }, 7500));
+      typingTimers.push(setTimeout(function(){ updateState(5); }, 9500));
+      typingTimers.push(setTimeout(function(){ updateState(6); }, 11500));
+      typingTimers.push(setTimeout(function(){ updateState(7); }, 13500));
     }
     if (!on && existing) {
       existing.remove();
