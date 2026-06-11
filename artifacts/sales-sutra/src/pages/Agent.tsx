@@ -5,10 +5,9 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
-import { Bot, Phone, Settings2, AlertCircle, Copy, CheckCircle2, Webhook, Cpu, Lock, Ear, Brain, Volume2, Zap, ChevronDown, Play, Square, Languages, Sparkles } from "lucide-react";
+import { Bot, Phone, Settings2, AlertCircle, Copy, CheckCircle2, Webhook, Cpu, Lock, Ear, Brain, Volume2, Zap, ChevronDown, Play, Square, Languages, Sparkles, Save } from "lucide-react";
 import { useForm } from "react-hook-form";
 import { useAuth } from "@/hooks/use-auth";
-import { Switch } from "@/components/ui/switch";
 
 const INDIAN_LANGUAGES = ["kn-IN", "hi-IN", "ta-IN", "te-IN", "mr-IN"];
 
@@ -340,6 +339,27 @@ export default function AgentSettings() {
       </div>
 
       <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-8">
+        {/* Sticky save bar when auto mode is active */}
+        {autoAiMode && (
+          <div className="sticky top-0 z-30 -mx-2 px-2 py-3">
+            <div className="flex items-center justify-between gap-4 rounded-xl border border-fuchsia-500/30 bg-gradient-to-r from-fuchsia-950/95 via-violet-950/95 to-slate-950/95 backdrop-blur-xl px-5 py-3 shadow-2xl shadow-fuchsia-500/10">
+              <div className="flex items-center gap-3">
+                <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-fuchsia-500/20">
+                  <Sparkles className="w-4 h-4 text-fuchsia-300" />
+                </div>
+                <div>
+                  <p className="text-sm font-semibold text-foreground">Auto-AI Mode Active</p>
+                  <p className="text-xs text-muted-foreground">All settings managed automatically</p>
+                </div>
+              </div>
+              <Button type="submit" size="default" disabled={updateAgent.isPending} className="shadow-lg shadow-primary/20 gap-2">
+                <Save className="w-4 h-4" />
+                {updateAgent.isPending ? "Saving..." : "Save Configuration"}
+              </Button>
+            </div>
+          </div>
+        )}
+
         <Card className="glass-panel border-fuchsia-500/30 bg-gradient-to-r from-fuchsia-500/10 via-violet-500/5 to-cyan-500/10">
           <CardHeader>
             <CardTitle className="flex items-center justify-between gap-3">
@@ -350,11 +370,32 @@ export default function AgentSettings() {
                   Recommended
                 </span>
               </span>
-              <Switch
-                checked={autoAiMode}
-                onCheckedChange={handleToggleAutoAiMode}
+              {/* Enhanced toggle with visible state label */}
+              <button
+                type="button"
+                role="switch"
+                aria-checked={autoAiMode}
                 aria-label="Toggle Auto-AI Mode"
-              />
+                onClick={() => handleToggleAutoAiMode(!autoAiMode)}
+                className={`group relative flex items-center gap-2.5 rounded-full border px-1.5 py-1.5 transition-all duration-300 cursor-pointer ${
+                  autoAiMode
+                    ? "border-fuchsia-400/50 bg-fuchsia-500/20 shadow-[0_0_20px_rgba(217,70,239,0.2)]"
+                    : "border-white/10 bg-white/5 hover:border-white/20"
+                }`}
+              >
+                <span className={`text-xs font-semibold px-2 transition-colors duration-200 ${
+                  autoAiMode ? "text-fuchsia-300" : "text-muted-foreground"
+                }`}>
+                  {autoAiMode ? "ON" : "OFF"}
+                </span>
+                <span className={`relative flex h-6 w-11 shrink-0 rounded-full transition-colors duration-300 ${
+                  autoAiMode ? "bg-fuchsia-500" : "bg-white/15"
+                }`}>
+                  <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow-md transition-transform duration-300 ${
+                    autoAiMode ? "translate-x-[22px]" : "translate-x-0.5"
+                  }`} />
+                </span>
+              </button>
             </CardTitle>
             <CardDescription>
               Automatically detects language and routes LLM + voice pipeline per turn. Turn this off to manually control language, model, and voice behavior.

@@ -25,6 +25,7 @@ interface TenantCostRow {
   ttsCostUsd: number;
   sttCostUsd: number;
   apiCalls: number;
+  callCount: number;
   usagePercent: number;
   status: "ok" | "warning" | "over_limit";
   limitAlertSentAt: string | null;
@@ -52,6 +53,7 @@ interface TenantDetail {
   }>;
   subtotals: { llm: number; tts: number; stt: number };
   grandTotal: number;
+  callCount: number;
   monthlyLimitUsd: number;
   hardLimit: boolean;
   usagePercent: number;
@@ -147,9 +149,9 @@ export default function AdminCosts() {
   }
 
   function handleExportCsv() {
-    const header = "Tenant Name,Slug,Calls,Total Cost USD,Monthly Limit USD,Usage %,Status\n";
+    const header = "Tenant Name,Slug,Calls,API Calls,Total Cost USD,Monthly Limit USD,Usage %,Status\n";
     const csv = filtered.map(t => 
-      `${t.tenantName},${t.tenantSlug},${t.apiCalls},${t.totalCostUsd},${t.monthlyLimitUsd},${t.usagePercent.toFixed(1)},${t.status}`
+      `${t.tenantName},${t.tenantSlug},${t.callCount},${t.apiCalls},${t.totalCostUsd},${t.monthlyLimitUsd},${t.usagePercent.toFixed(1)},${t.status}`
     ).join("\n");
     const blob = new Blob([header + csv], { type: 'text/csv' });
     const url = window.URL.createObjectURL(blob);
@@ -305,7 +307,7 @@ export default function AdminCosts() {
                 </div>
                 <div>
                   <p className="font-medium text-sm text-foreground">{t.tenantName}</p>
-                  <p className="text-xs text-muted-foreground">/{t.tenantSlug} · {t.apiCalls} calls</p>
+                  <p className="text-xs text-muted-foreground">/{t.tenantSlug} · {t.callCount} calls</p>
                 </div>
               </div>
 

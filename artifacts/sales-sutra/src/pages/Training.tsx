@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import { useTrainingList, useAddTrainingDataMutation, useDeleteTrainingDataMutation, useDeleteAllTrainingDataMutation } from "@/hooks/use-training";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -20,6 +20,26 @@ const TYPE_LABELS: Record<string, string> = {
   video_link: "Video Link",
   custom: "Custom",
 };
+
+const INTENT_LABELS: Record<string, string> = {
+  greeting: "Greeting / Welcoming",
+  product_inquiry: "Product Inquiry / Info",
+  pricing_query: "Pricing Query / Quote",
+  complaint: "Customer Complaint",
+  technical_support: "Technical Support",
+  billing: "Billing & Invoices",
+  appointment: "Appointment Booking",
+  interested: "Customer Interested",
+  not_interested: "Customer Not Interested",
+  callback_request: "Callback Request",
+  escalation: "Escalation / Management",
+  general_question: "General Question",
+  follow_up: "Follow Up",
+  objection_handling: "Objection Handling",
+};
+
+const KNOWN_INTENTS = Object.keys(INTENT_LABELS);
+
 
 function FileIcon({ name }: { name: string }) {
   const ext = name.split(".").pop()?.toLowerCase();
@@ -220,6 +240,110 @@ export default function Training() {
     content: ""
   });
 
+  // ── Intent Training State & Handlers ──
+  const [activeTab, setActiveTab] = useState<"kb" | "intents">("kb");
+  const [intentConfigs, setIntentConfigs] = useState<any[]>([]);
+  const [loadingIntents, setLoadingIntents] = useState(false);
+  const [editingIntent, setEditingIntent] = useState<any | null>(null);
+  const [intentForm, setIntentForm] = useState({
+    intent: "",
+    trainingContent: "",
+    maxTurns: 8,
+    autoTransfer: true,
+    transferTo: "",
+    crmAgentId: "",
+  });
+
+  const fetchIntentConfigs = useCallback(async () => {
+    setLoadingIntents(true);
+    try {
+      const token = localStorage.getItem("ss_auth_token");
+      const res = await fetch("/api/intent-training", {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setIntentConfigs(data);
+      }
+    } catch (err) {
+      console.error("Failed to fetch intent configs", err);
+    } finally {
+      setLoadingIntents(false);
+    }
+  }, []);
+
+  const [agents, setAgents] = useState<any[]>([]);
+  useEffect(() => {
+    const fetchAgents = async () => {
+      try {
+        const token = localStorage.getItem("ss_auth_token");
+        const res = await fetch("/api/crm-agents", {
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        });
+        if (res.ok) {
+          const data = await res.json();
+          setAgents(data.agents || []);
+        }
+      } catch (err) {
+        console.error("Failed to fetch CRM agents:", err);
+      }
+    };
+    fetchAgents();
+  }, []);
+
+  useEffect(() => {
+    if (activeTab === "intents") {
+      fetchIntentConfigs();
+    }
+  }, [activeTab, fetchIntentConfigs]);
+
+  const handleSaveIntent = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      const token = localStorage.getItem("ss_auth_token");
+      const res = await fetch("/api/intent-training", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify(intentForm),
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || "Failed to save intent config");
+      }
+
+      toast({ title: "Intent config saved successfully" });
+      setEditingIntent(null);
+      fetchIntentConfigs();
+    } catch (err: any) {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    }
+  };
+
+  const handleResetIntent = async (id: number) => {
+    if (!window.confirm("Are you sure you want to delete this custom configuration? The AI will revert to default behavior for this intent.")) return;
+    try {
+      const token = localStorage.getItem("ss_auth_token");
+      const res = await fetch(`/api/intent-training/${id}`, {
+        method: "DELETE",
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+
+      if (!res.ok) {
+        throw new Error("Failed to delete configuration");
+      }
+
+      toast({ title: "Intent config reset to default" });
+      setEditingIntent(null);
+      fetchIntentConfigs();
+    } catch (err: any) {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
@@ -240,170 +364,407 @@ export default function Training() {
     <div className="space-y-6">
       <div className="flex justify-between items-center">
         <div>
-          <h1 className="text-3xl font-display font-bold">Knowledge Base</h1>
-          <p className="text-muted-foreground mt-1">Train your AI agent on your products, FAQs, and handling objections.</p>
+          <h1 className="text-3xl font-display font-bold">Training & Knowledge</h1>
+          <p className="text-muted-foreground mt-1">Train your AI agent on general knowledge, custom scripts, and per-intent transfer rules.</p>
         </div>
-        <div className="flex items-center gap-3">
-          {trainingData && trainingData.length > 0 && (
-            <Button
-              variant="outline"
-              className="border-rose-500/30 text-rose-400 hover:bg-rose-500/10 hover:text-rose-300"
-              onClick={() => { setDeleteConfirmText(""); setIsDeleteAllOpen(true); }}
-            >
-              <Trash2 className="w-4 h-4 mr-2" /> Delete All ({trainingData.length})
-            </Button>
-          )}
-          <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
-          <DialogTrigger asChild>
-            <Button className="bg-primary hover:bg-primary/90 text-white shadow-lg shadow-primary/25">
-              <Plus className="w-4 h-4 mr-2" /> Add Manually
-            </Button>
-          </DialogTrigger>
-          <DialogContent className="glass-panel sm:max-w-[600px] border-white/10">
-            <DialogHeader>
-              <DialogTitle className="flex items-center gap-2">
-                <BrainCircuit className="w-5 h-5 text-primary" /> Train Agent
-              </DialogTitle>
-            </DialogHeader>
-            <form onSubmit={handleSubmit} className="space-y-4 mt-4">
-              <div className="space-y-2">
-                <label className="text-sm font-medium">Information Type</label>
-                <select 
-                  value={formData.type}
-                  onChange={e => setFormData({...formData, type: e.target.value})}
-                  className="w-full flex h-10 items-center justify-between rounded-md border border-white/10 bg-background/50 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
-                >
-                  <option value="product_info">Product/Service Info</option>
-                  <option value="faq">Frequently Asked Question (FAQ)</option>
-                  <option value="objection_handling">Objection Handling</option>
-                  <option value="competitor_info">Competitor Information</option>
-                  <option value="custom">Custom Instruction</option>
-                </select>
-              </div>
-              <div className="space-y-2">
-                <label className="text-sm font-medium">Title / Question</label>
-                <Input 
-                  required 
-                  value={formData.title} 
-                  onChange={e => setFormData({...formData, title: e.target.value})} 
-                  className="bg-background/50 border-white/10" 
-                  placeholder="e.g. What is our refund policy?"
-                />
-              </div>
-              <div className="space-y-2">
-                <label className="text-sm font-medium">Content / Answer</label>
-                <Textarea 
-                  required
-                  value={formData.content} 
-                  onChange={e => setFormData({...formData, content: e.target.value})} 
-                  className="bg-background/50 border-white/10 min-h-[150px]" 
-                  placeholder="We offer a 30-day money-back guarantee no questions asked..."
-                />
-              </div>
-              <Button type="submit" className="w-full mt-4" disabled={addTraining.isPending}>
-                {addTraining.isPending ? "Saving..." : "Add to Knowledge Base"}
+        
+        {activeTab === "kb" && (
+          <div className="flex items-center gap-3">
+            {trainingData && trainingData.length > 0 && (
+              <Button
+                variant="outline"
+                className="border-rose-500/30 text-rose-400 hover:bg-rose-500/10 hover:text-rose-300"
+                onClick={() => { setDeleteConfirmText(""); setIsDeleteAllOpen(true); }}
+              >
+                <Trash2 className="w-4 h-4 mr-2" /> Delete All ({trainingData.length})
               </Button>
-            </form>
-          </DialogContent>
-        </Dialog>
-        </div>
+            )}
+            <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
+              <DialogTrigger asChild>
+                <Button className="bg-primary hover:bg-primary/90 text-white shadow-lg shadow-primary/25">
+                  <Plus className="w-4 h-4 mr-2" /> Add Manually
+                </Button>
+              </DialogTrigger>
+              <DialogContent className="glass-panel sm:max-w-[600px] border-white/10">
+                <DialogHeader>
+                  <DialogTitle className="flex items-center gap-2">
+                    <BrainCircuit className="w-5 h-5 text-primary" /> Train Agent
+                  </DialogTitle>
+                </DialogHeader>
+                <form onSubmit={handleSubmit} className="space-y-4 mt-4">
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium">Information Type</label>
+                    <select 
+                      value={formData.type}
+                      onChange={e => setFormData({...formData, type: e.target.value})}
+                      className="w-full flex h-10 items-center justify-between rounded-md border border-white/10 bg-background/50 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
+                    >
+                      <option value="product_info">Product/Service Info</option>
+                      <option value="faq">Frequently Asked Question (FAQ)</option>
+                      <option value="objection_handling">Objection Handling</option>
+                      <option value="competitor_info">Competitor Information</option>
+                      <option value="custom">Custom Instruction</option>
+                    </select>
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium">Title / Question</label>
+                    <Input 
+                      required 
+                      value={formData.title} 
+                      onChange={e => setFormData({...formData, title: e.target.value})} 
+                      className="bg-background/50 border-white/10" 
+                      placeholder="e.g. What is our refund policy?"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium">Content / Answer</label>
+                    <Textarea 
+                      required
+                      value={formData.content} 
+                      onChange={e => setFormData({...formData, content: e.target.value})} 
+                      className="bg-background/50 border-white/10 min-h-[150px]" 
+                      placeholder="We offer a 30-day money-back guarantee no questions asked..."
+                    />
+                  </div>
+                  <Button type="submit" className="w-full mt-4" disabled={addTraining.isPending}>
+                    {addTraining.isPending ? "Saving..." : "Add to Knowledge Base"}
+                  </Button>
+                </form>
+              </DialogContent>
+            </Dialog>
+          </div>
+        )}
       </div>
 
-      <UploadZone onUploaded={handleUploaded} />
+      {/* Tabs Selector */}
+      <div className="flex border-b border-white/10">
+        <button
+          onClick={() => setActiveTab("kb")}
+          className={`flex items-center gap-2 px-5 py-3 text-sm font-medium border-b-2 transition-all ${
+            activeTab === "kb"
+              ? "border-primary text-foreground font-semibold bg-white/5 rounded-t-lg"
+              : "border-transparent text-muted-foreground hover:text-foreground"
+          }`}
+        >
+          <FileText className="w-4 h-4" />
+          General Knowledge Base
+        </button>
+        <button
+          onClick={() => setActiveTab("intents")}
+          className={`flex items-center gap-2 px-5 py-3 text-sm font-medium border-b-2 transition-all ${
+            activeTab === "intents"
+              ? "border-primary text-foreground font-semibold bg-white/5 rounded-t-lg"
+              : "border-transparent text-muted-foreground hover:text-foreground"
+          }`}
+        >
+          <BrainCircuit className="w-4 h-4" />
+          Intent-Specific Training & Transfer
+        </button>
+      </div>
 
-      {isLoading ? (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          {[1, 2, 3, 4].map(i => <div key={i} className="h-40 bg-card border border-white/5 rounded-xl animate-pulse"></div>)}
-        </div>
-      ) : trainingData && trainingData.length > 0 ? (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          {trainingData.map((item) => (
-            <Card
-              key={item.id}
-              className="glass-panel border-white/5 hover:border-primary/30 transition-all duration-200 group cursor-pointer hover:shadow-lg hover:shadow-primary/5"
-              onClick={() => setViewItem(item)}
-            >
-              <CardHeader className="pb-2">
-                <div className="flex justify-between items-start">
-                  <div className="min-w-0 flex-1 pr-2">
-                    <div className="flex items-center gap-2 mb-1">
-                      <div className="text-xs uppercase tracking-wider text-primary font-semibold">
-                        {TYPE_LABELS[item.type] ?? item.type.replace(/_/g, " ")}
+      {activeTab === "kb" ? (
+        <div className="space-y-6">
+          <UploadZone onUploaded={handleUploaded} />
+
+          {isLoading ? (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              {[1, 2, 3, 4].map(i => <div key={i} className="h-40 bg-card border border-white/5 rounded-xl animate-pulse"></div>)}
+            </div>
+          ) : trainingData && trainingData.length > 0 ? (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              {trainingData.map((item) => (
+                <Card
+                  key={item.id}
+                  className="glass-panel border-white/5 hover:border-primary/30 transition-all duration-200 group cursor-pointer hover:shadow-lg hover:shadow-primary/5"
+                  onClick={() => setViewItem(item)}
+                >
+                  <CardHeader className="pb-2">
+                    <div className="flex justify-between items-start">
+                      <div className="min-w-0 flex-1 pr-2">
+                        <div className="flex items-center gap-2 mb-1">
+                          <div className="text-xs uppercase tracking-wider text-primary font-semibold">
+                            {TYPE_LABELS[item.type] ?? item.type.replace(/_/g, " ")}
+                          </div>
+                          {item.type === "video_link" && (
+                            <Video className="w-3 h-3 text-rose-400" />
+                          )}
+                        </div>
+                        <CardTitle className="text-base leading-snug">{item.title}</CardTitle>
                       </div>
-                      {item.type === "video_link" && (
-                        <Video className="w-3 h-3 text-rose-400" />
-                      )}
+                      <div className="flex items-center gap-1 shrink-0">
+                        <div className="opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground/60">
+                          <Eye className="w-4 h-4" />
+                        </div>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-rose-400 hover:bg-rose-400/10"
+                          onClick={(e) => { e.stopPropagation(); deleteTraining.mutateAsync(item.id); }}
+                          disabled={deleteTraining.isPending}
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </Button>
+                      </div>
                     </div>
-                    <CardTitle className="text-base leading-snug">{item.title}</CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    {item.type === "video_link" ? (() => {
+                      const vl = parseVideoLinkContent(item.content);
+                      return vl ? (
+                        <div className="space-y-2">
+                          <p className="text-sm text-muted-foreground">Video tutorial: <span className="text-foreground font-medium">{vl.title}</span></p>
+                          <div className="flex flex-wrap gap-1.5">
+                            {vl.link_en && <Badge variant="secondary" className="text-xs gap-1"><Video className="w-3 h-3" /> EN</Badge>}
+                            {vl.link_kn && <Badge variant="secondary" className="text-xs gap-1"><Video className="w-3 h-3" /> KN</Badge>}
+                          </div>
+                          <p className="text-xs text-muted-foreground/60">{(vl.search_terms || []).length} search terms</p>
+                        </div>
+                      ) : (
+                        <p className="text-sm text-muted-foreground line-clamp-4 leading-relaxed whitespace-pre-line">{item.content}</p>
+                      );
+                    })() : (
+                      <>
+                        <p className="text-sm text-muted-foreground line-clamp-4 leading-relaxed whitespace-pre-line">
+                          {item.content}
+                        </p>
+                        {extractYouTubeLinks(item.content).length > 0 && (
+                          <div className="flex items-center gap-1.5 mt-2">
+                            <Video className="w-3.5 h-3.5 text-rose-400" />
+                            <span className="text-xs text-rose-400 font-medium">{extractYouTubeLinks(item.content).length} video{extractYouTubeLinks(item.content).length > 1 ? "s" : ""} attached</span>
+                          </div>
+                        )}
+                      </>
+                    )}
+                    <p className="text-xs text-muted-foreground/50 mt-4">
+                      Added {format(new Date(item.createdAt), 'MMM d, yyyy')}
+                    </p>
+                  </CardContent>
+                </Card>
+              ))}
+            </div>
+          ) : (
+            <Card className="glass-panel border-white/5">
+              <div className="p-16 text-center flex flex-col items-center justify-center">
+                <div className="w-16 h-16 rounded-full bg-primary/10 flex items-center justify-center mb-4">
+                  <FileText className="w-8 h-8 text-primary" />
+                </div>
+                <h3 className="text-xl font-medium text-foreground">Knowledge Base is Empty</h3>
+                <p className="text-muted-foreground mt-2 max-w-sm">
+                  Upload a PDF, DOCX, or JSON file — or add entries manually — to train your AI agent.
+                </p>
+                <div className="flex gap-3 mt-6">
+                  <Button onClick={() => setIsDialogOpen(true)}>
+                    <Plus className="w-4 h-4 mr-2" /> Add Manually
+                  </Button>
+                </div>
+              </div>
+            </Card>
+          )}
+        </div>
+      ) : (
+        <div className="space-y-6">
+          <Card className="glass-panel border-white/5">
+            <CardHeader>
+              <CardTitle className="text-lg">Per-Intent AI Training & Auto-Transfer</CardTitle>
+              <p className="text-sm text-muted-foreground">
+                Define custom training material or scripts for specific caller intents. When the AI detects these intents, it will prioritize using your custom content first before considering auto-transferring to a human agent.
+              </p>
+            </CardHeader>
+          </Card>
+
+          {loadingIntents ? (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              {[1, 2, 3, 4].map(i => <div key={i} className="h-44 bg-card border border-white/5 rounded-xl animate-pulse"></div>)}
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              {KNOWN_INTENTS.map((intentKey) => {
+                const config = intentConfigs.find(c => c.intent === intentKey);
+                return (
+                  <Card
+                    key={intentKey}
+                    className={`glass-panel border-white/5 transition-all duration-200 hover:shadow-lg ${
+                      config ? "border-primary/20 hover:border-primary/45" : "opacity-85 hover:opacity-100 hover:border-white/10"
+                    }`}
+                  >
+                    <CardHeader className="pb-2">
+                      <div className="flex justify-between items-start">
+                        <div>
+                          <Badge variant={config ? "default" : "outline"} className={config ? "bg-emerald-500/15 hover:bg-emerald-500/20 text-emerald-400 border-emerald-500/20" : "text-muted-foreground border-white/10"}>
+                            {config ? "Custom trained" : "Default settings"}
+                          </Badge>
+                          <CardTitle className="text-base mt-1.5 font-semibold text-foreground">
+                            {INTENT_LABELS[intentKey] || intentKey}
+                          </CardTitle>
+                          <span className="text-xs font-mono text-muted-foreground/50">{intentKey}</span>
+                        </div>
+                        <Button
+                          variant={config ? "secondary" : "outline"}
+                          size="sm"
+                          className="border-white/10"
+                          onClick={() => {
+                            setIntentForm({
+                              intent: intentKey,
+                              trainingContent: config?.trainingContent || "",
+                              maxTurns: config?.maxTurns ?? 8,
+                              autoTransfer: config?.autoTransfer ?? true,
+                              transferTo: config?.transferTo || "",
+                              crmAgentId: config?.crmAgentId || "",
+                            });
+                            setEditingIntent(config || { intent: intentKey });
+                          }}
+                        >
+                          {config ? "Edit config" : "Configure"}
+                        </Button>
+                      </div>
+                    </CardHeader>
+                    <CardContent className="space-y-2.5 text-sm">
+                      <div className="grid grid-cols-2 gap-x-4 gap-y-1 bg-white/[0.02] p-2.5 rounded-lg border border-white/5">
+                        <div className="text-muted-foreground text-xs">Auto Transfer:</div>
+                        <div className="text-foreground text-xs font-medium">
+                          {config ? (config.autoTransfer ? "Enabled" : "Disabled") : "Enabled (Default)"}
+                        </div>
+                        <div className="text-muted-foreground text-xs">Max AI Turns:</div>
+                        <div className="text-foreground text-xs font-medium">
+                          {config ? `${config.maxTurns} turns` : "8 turns (Default)"}
+                        </div>
+                        <div className="text-muted-foreground text-xs">Transfer Phone:</div>
+                        <div className="text-foreground text-xs font-medium truncate">
+                          {config?.transferTo || "Default CRM config"}
+                        </div>
+                        <div className="text-muted-foreground text-xs">CRM Agent ID:</div>
+                        <div className="text-foreground text-xs font-medium truncate">
+                          {config?.crmAgentId ? (agents.find(a => a.crmAgentId === config.crmAgentId)?.name || config.crmAgentId) : "Default CRM config"}
+                        </div>
+                      </div>
+
+                      <div className="text-xs text-muted-foreground">
+                        <span className="font-semibold block mb-0.5 text-[10px] uppercase tracking-wider text-muted-foreground/60">Training Content / Script:</span>
+                        {config?.trainingContent ? (
+                          <p className="line-clamp-2 italic text-foreground/80">"{config.trainingContent}"</p>
+                        ) : (
+                          <p className="italic text-muted-foreground/40">Using general knowledge base only.</p>
+                        )}
+                      </div>
+                    </CardContent>
+                  </Card>
+                );
+              })}
+            </div>
+          )}
+
+          {/* ── Editing Intent Dialog ───────────────────────────────────── */}
+          <Dialog open={!!editingIntent} onOpenChange={(open) => { if (!open) setEditingIntent(null); }}>
+            <DialogContent className="glass-panel sm:max-w-[550px] border-white/10">
+              <DialogHeader>
+                <DialogTitle className="flex items-center gap-2">
+                  <BrainCircuit className="w-5 h-5 text-primary" /> Configure "{INTENT_LABELS[intentForm.intent] || intentForm.intent}"
+                </DialogTitle>
+              </DialogHeader>
+              <form onSubmit={handleSaveIntent} className="space-y-4 mt-2">
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Trained Knowledge / Response Script</label>
+                  <Textarea
+                    value={intentForm.trainingContent}
+                    onChange={e => setIntentForm({ ...intentForm, trainingContent: e.target.value })}
+                    className="bg-background/50 border-white/10 min-h-[120px]"
+                    placeholder="Enter products details, predefined answers, script rules, or fallback suggestions for this specific intent..."
+                  />
+                  <p className="text-[11px] text-muted-foreground">
+                    When this intent is detected, this content is injected with high priority into the system prompt to guide the AI's answer.
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-4 bg-white/5 border border-white/5 p-3 rounded-lg">
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={intentForm.autoTransfer}
+                      onChange={(e) => setIntentForm({ ...intentForm, autoTransfer: e.target.checked })}
+                      className="sr-only peer"
+                    />
+                    <div className="w-11 h-6 bg-white/10 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-foreground after:border-white/20 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary"></div>
+                    <span className="ml-3 text-sm font-medium text-muted-foreground peer-checked:text-foreground">Enable Auto-Transfer</span>
+                  </label>
+                </div>
+
+                {intentForm.autoTransfer && (
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium">Max AI Turns</label>
+                      <Input
+                        type="number"
+                        min="1"
+                        max="50"
+                        value={intentForm.maxTurns}
+                        onChange={e => setIntentForm({ ...intentForm, maxTurns: parseInt(e.target.value, 10) || 8 })}
+                        className="bg-background/50 border-white/10"
+                      />
+                      <p className="text-[10px] text-muted-foreground">Turns before auto-transfer</p>
+                    </div>
+
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium">Transfer Phone Override</label>
+                      <Input
+                        type="tel"
+                        value={intentForm.transferTo}
+                        onChange={e => setIntentForm({ ...intentForm, transferTo: e.target.value })}
+                        className="bg-background/50 border-white/10"
+                        placeholder="+1234567890"
+                      />
+                      <p className="text-[10px] text-muted-foreground">Optional phone/SIP number</p>
+                    </div>
                   </div>
-                  <div className="flex items-center gap-1 shrink-0">
-                    <div className="opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground/60">
-                      <Eye className="w-4 h-4" />
-                    </div>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-rose-400 hover:bg-rose-400/10"
-                      onClick={(e) => { e.stopPropagation(); deleteTraining.mutateAsync(item.id); }}
-                      disabled={deleteTraining.isPending}
+                )}
+
+                {intentForm.autoTransfer && (
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium">Agent Override</label>
+                    <select
+                      value={intentForm.crmAgentId}
+                      onChange={e => setIntentForm({ ...intentForm, crmAgentId: e.target.value })}
+                      className="w-full flex h-10 items-center justify-between rounded-md border border-white/10 bg-background/50 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
                     >
-                      <Trash2 className="w-4 h-4" />
+                      <option value="">Default (balanced among matching agents)</option>
+                      {agents.map(a => (
+                        <option key={a.crmAgentId} value={a.crmAgentId}>
+                          {a.name} ({a.crmAgentId}) {a.specialization ? `- ${a.specialization}` : ""}
+                        </option>
+                      ))}
+                    </select>
+                    <p className="text-[11px] text-muted-foreground">Select a specific agent to handle calls of this intent.</p>
+                  </div>
+                )}
+
+                <div className="flex justify-between gap-3 pt-2">
+                  {editingIntent && editingIntent.id && (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      className="text-rose-400 hover:text-rose-300 hover:bg-rose-400/10"
+                      onClick={() => handleResetIntent(editingIntent.id)}
+                    >
+                      <Trash2 className="w-4 h-4 mr-2" /> Reset Behavior
+                    </Button>
+                  )}
+                  <div className="flex gap-2 ml-auto">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="border-white/10"
+                      onClick={() => setEditingIntent(null)}
+                    >
+                      Cancel
+                    </Button>
+                    <Button type="submit" className="bg-primary hover:bg-primary/90">
+                      Save Changes
                     </Button>
                   </div>
                 </div>
-              </CardHeader>
-              <CardContent>
-                {item.type === "video_link" ? (() => {
-                  const vl = parseVideoLinkContent(item.content);
-                  return vl ? (
-                    <div className="space-y-2">
-                      <p className="text-sm text-muted-foreground">Video tutorial: <span className="text-foreground font-medium">{vl.title}</span></p>
-                      <div className="flex flex-wrap gap-1.5">
-                        {vl.link_en && <Badge variant="secondary" className="text-xs gap-1"><Video className="w-3 h-3" /> EN</Badge>}
-                        {vl.link_kn && <Badge variant="secondary" className="text-xs gap-1"><Video className="w-3 h-3" /> KN</Badge>}
-                      </div>
-                      <p className="text-xs text-muted-foreground/60">{(vl.search_terms || []).length} search terms</p>
-                    </div>
-                  ) : (
-                    <p className="text-sm text-muted-foreground line-clamp-4 leading-relaxed whitespace-pre-line">{item.content}</p>
-                  );
-                })() : (
-                  <>
-                    <p className="text-sm text-muted-foreground line-clamp-4 leading-relaxed whitespace-pre-line">
-                      {item.content}
-                    </p>
-                    {extractYouTubeLinks(item.content).length > 0 && (
-                      <div className="flex items-center gap-1.5 mt-2">
-                        <Video className="w-3.5 h-3.5 text-rose-400" />
-                        <span className="text-xs text-rose-400 font-medium">{extractYouTubeLinks(item.content).length} video{extractYouTubeLinks(item.content).length > 1 ? "s" : ""} attached</span>
-                      </div>
-                    )}
-                  </>
-                )}
-                <p className="text-xs text-muted-foreground/50 mt-4">
-                  Added {format(new Date(item.createdAt), 'MMM d, yyyy')}
-                </p>
-              </CardContent>
-            </Card>
-          ))}
+              </form>
+            </DialogContent>
+          </Dialog>
         </div>
-      ) : (
-        <Card className="glass-panel border-white/5">
-          <div className="p-16 text-center flex flex-col items-center justify-center">
-            <div className="w-16 h-16 rounded-full bg-primary/10 flex items-center justify-center mb-4">
-              <FileText className="w-8 h-8 text-primary" />
-            </div>
-            <h3 className="text-xl font-medium text-foreground">Knowledge Base is Empty</h3>
-            <p className="text-muted-foreground mt-2 max-w-sm">
-              Upload a PDF, DOCX, or JSON file — or add entries manually — to train your AI agent.
-            </p>
-            <div className="flex gap-3 mt-6">
-              <Button onClick={() => setIsDialogOpen(true)}>
-                <Plus className="w-4 h-4 mr-2" /> Add Manually
-              </Button>
-            </div>
-          </div>
-        </Card>
       )}
       {/* ── Delete All Confirmation (GitHub-style) ────────────────────── */}
       <Dialog open={isDeleteAllOpen} onOpenChange={setIsDeleteAllOpen}>

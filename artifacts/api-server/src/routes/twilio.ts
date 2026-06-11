@@ -1,9 +1,13 @@
 import { Router, type IRouter } from "express";
 import twilio from "twilio";
-import { db, agentConfigsTable, callLogsTable, trainingDataTable, callingScriptsTable, tenantsTable } from "@workspace/db";
+import { db, agentConfigsTable, callLogsTable, trainingDataTable, callingScriptsTable, tenantsTable, intentTrainingTable } from "@workspace/db";
 import { eq, and } from "drizzle-orm";
 import { openai } from "@workspace/integrations-openai-ai-server";
 import { randomUUID } from "crypto";
+import { crmEventBus } from "../lib/crm-event-bus";
+import { classifyIntent, shouldTransfer, detectHumanRequest, type TransferRules } from "../lib/intent-classifier";
+import { findBestAgent } from "../lib/transfer-manager";
+import { logLLMCost, logTTSCost, resolveTenantIdForOwner } from "../lib/cost-logger";
 
 const router: IRouter = Router();
 
@@ -377,6 +381,7 @@ async function generateAIResponseIndic(
   userMessage: string,
   lang: string,
   baseUrl: string,
+  userId?: number,
 ): Promise<{ text: string; ttsAudioId: string | null }> {
   const llm = resolveSplitModelLLM(lang);
 
@@ -389,9 +394,41 @@ async function generateAIResponseIndic(
     text = await callSarvamLLM(systemPrompt, history, userMessage);
   }
 
+  // Fire-and-forget: log LLM cost for Indic model
+  if (userId) {
+    resolveTenantIdForOwner(userId).then(tenantId => {
+      if (!tenantId) return;
+      const charsPerToken = 2; // Indic scripts are denser
+      const inputChars = userMessage.length + (systemPrompt?.length ?? 0);
+      const outputChars = text.length;
+      return logLLMCost({
+        tenantId,
+        userId,
+        provider: llm,
+        inputTokens: Math.ceil(inputChars / charsPerToken),
+        outputTokens: Math.ceil(outputChars / charsPerToken),
+        context: "twilio-voice-indic",
+      });
+    }).catch(e => console.error("[twilio] Indic LLM cost logging error:", e));
+  }
+
   let ttsAudioId: string | null = null;
   try {
     ttsAudioId = await callSarvamTTS(text, lang);
+
+    // Fire-and-forget: log Sarvam TTS cost
+    if (userId && ttsAudioId) {
+      resolveTenantIdForOwner(userId).then(tenantId => {
+        if (!tenantId) return;
+        return logTTSCost({
+          tenantId,
+          userId,
+          provider: "sarvam",
+          characters: text.length,
+          context: "twilio-tts-sarvam",
+        });
+      }).catch(e => console.error("[twilio] Sarvam TTS cost logging error:", e));
+    }
   } catch (ttsErr) {
     console.error("[split-model] Sarvam Bulbul TTS failed, falling back to Twilio <Say>:", ttsErr);
   }
@@ -524,6 +561,74 @@ function mapVoice(voice?: string | null): string {
   return voiceMap[voice || "nova"] || "Polly.Salli";
 }
 
+// ── Hold Music Endpoint (zero TTS cost) ────────────────────────────────
+// Twilio calls this while the caller waits in a conference for an agent.
+// Uses Twilio's built-in Polly voices — included in per-minute call cost.
+// The message loops automatically until the agent joins.
+router.post("/twilio/hold-music", (req, res) => {
+  const twiml = new twilio.twiml.VoiceResponse();
+  const lang = (req.query.lang as string) || "en-IN";
+  const baseUrl = getBaseUrl(req);
+
+  // Multi-language hold messages using Twilio's Polly voices (no TTS API cost)
+  const holdMessages: Record<string, { voice: string; messages: string[] }> = {
+    "hi-IN": {
+      voice: "Polly.Aditi",
+      messages: [
+        "कृपया प्रतीक्षा करें, हम आपको एक विशेषज्ञ से जोड़ रहे हैं। आपका कॉल हमारे लिए महत्वपूर्ण है।",
+        "धन्यवाद आपकी प्रतीक्षा के लिए। एक प्रतिनिधि शीघ्र ही आपसे बात करेंगे।",
+      ],
+    },
+    "kn-IN": {
+      voice: "Polly.Aditi",
+      messages: [
+        "ದಯವಿಟ್ಟು ನಿರೀಕ್ಷಿಸಿ, ನಾವು ನಿಮ್ಮನ್ನು ತಜ್ಞರೊಂದಿಗೆ ಸಂಪರ್ಕಿಸುತ್ತಿದ್ದೇವೆ.",
+        "ನಿಮ್ಮ ತಾಳ್ಮೆಗೆ ಧನ್ಯವಾದಗಳು. ಪ್ರತಿನಿಧಿ ಶೀಘ್ರದಲ್ಲಿ ನಿಮ್ಮೊಂದಿಗೆ ಮಾತನಾಡುತ್ತಾರೆ.",
+      ],
+    },
+    "ta-IN": {
+      voice: "Polly.Aditi",
+      messages: [
+        "தயவுசெய்து காத்திருங்கள், நாங்கள் உங்களை ஒரு நிபுணருடன் இணைக்கிறோம்.",
+        "உங்கள் பொறுமைக்கு நன்றி. ஒரு பிரதிநிதி விரைவில் உங்களுடன் பேசுவார்.",
+      ],
+    },
+    "te-IN": {
+      voice: "Polly.Aditi",
+      messages: [
+        "దయచేసి వేచి ఉండండి, మేము మిమ్మల్ని ఒక నిపుణుడితో అనుసంధానం చేస్తున్నాము.",
+        "మీ ఓపికకు ధన్యవాదాలు. ప్రతినిధి త్వరలో మీతో మాట్లాడతారు.",
+      ],
+    },
+    "mr-IN": {
+      voice: "Polly.Aditi",
+      messages: [
+        "कृपया प्रतीक्षा करा, आम्ही तुम्हाला तज्ञांशी जोडत आहोत.",
+        "तुमच्या संयमाबद्दल धन्यवाद. प्रतिनिधी लवकरच तुमच्याशी बोलतील.",
+      ],
+    },
+  };
+
+  // Default English hold messages
+  const config = holdMessages[lang] || {
+    voice: "Polly.Raveena",
+    messages: [
+      "Please wait while we connect you with a specialist. Your call is in queue and will be answered shortly.",
+      "Thank you for your patience. An agent will be with you shortly.",
+    ],
+  };
+
+  twiml.say({ voice: config.voice as any, language: lang as any }, config.messages[0]);
+  twiml.pause({ length: 8 });
+  twiml.say({ voice: config.voice as any, language: lang as any }, config.messages[1]);
+  twiml.pause({ length: 8 });
+  // Loop: Twilio re-fetches this URL when TwiML completes
+  twiml.redirect(`${baseUrl}/api/twilio/hold-music?lang=${encodeURIComponent(lang)}`);
+
+  res.type("text/xml");
+  res.send(twiml.toString());
+});
+
 router.post("/twilio/inbound", async (req, res) => {
   const twiml = new twilio.twiml.VoiceResponse();
 
@@ -599,6 +704,14 @@ router.post("/twilio/voice", async (req, res) => {
     } catch { }
   }
 
+  // ── Per-intent turn counters & human request tracking ──
+  let intentTurnCounts: Record<string, number> = {};
+  try {
+    const raw = req.query.intentCounts as string;
+    if (raw) intentTurnCounts = JSON.parse(decodeURIComponent(raw));
+  } catch { }
+  let humanReqCount = parseInt(req.query.humanReqCount as string) || 0;
+
   const agentConfig = await db.query.agentConfigsTable.findFirst({ where: eq(agentConfigsTable.userId, userId) });
   const baseUrl = getBaseUrl(req);
   const voice = mapVoice(agentConfig?.voice);
@@ -612,27 +725,210 @@ router.post("/twilio/voice", async (req, res) => {
     console.log(`[twilio/voice] auto-detected lang=${lang} from utterance`);
   }
 
+  let intentResult = { intent: "general_question", confidence: 1.0, needsHuman: false };
+  let intentTraining = null;
+
+  if (!isSilent && speechResult.trim()) {
+    // 1. Detect explicit "talk to human" request
+    if (detectHumanRequest(speechResult)) {
+      humanReqCount++;
+      console.log(`[twilio/voice] Human request detected (count: ${humanReqCount})`);
+    }
+
+    // 2. Classify intent and look up intent-specific training config
+    try {
+      intentResult = await classifyIntent(history, speechResult);
+      if (intentResult.confidence >= 0.6) {
+        intentTurnCounts[intentResult.intent] = (intentTurnCounts[intentResult.intent] || 0) + 1;
+      }
+      
+      intentTraining = await db.query.intentTrainingTable.findFirst({
+        where: and(
+          eq(intentTrainingTable.userId, userId),
+          eq(intentTrainingTable.intent, intentResult.intent),
+        ),
+      });
+    } catch (classifyErr) {
+      console.error("[twilio/voice] Intent classification error:", classifyErr);
+    }
+
+    // 3. Check transfer rules & execute transfer if needed
+    const numId = parseInt(callLogId, 10);
+    if (!isNaN(numId)) {
+      const logForTransfer = await db.query.callLogsTable.findFirst({ where: eq(callLogsTable.id, numId) });
+      const meta = logForTransfer?.crmMetadata as Record<string, unknown> | undefined;
+      const transferRules = meta?.__transferRules as TransferRules | undefined;
+
+      // Emit intent event
+      crmEventBus.emitCallEvent({
+        type: "call.intent",
+        callId: numId,
+        callSid: logForTransfer?.callSid || undefined,
+        data: {
+          intent: intentResult.intent,
+          confidence: intentResult.confidence,
+          needsHuman: intentResult.needsHuman,
+          turnCount: Math.floor((history.length + 2) / 2),
+          intentTurnCounts,
+          humanRequestCount: humanReqCount,
+        },
+        metadata: meta,
+        timestamp: new Date().toISOString(),
+      });
+
+      if (transferRules) {
+        const mergedRules: TransferRules = {
+          ...transferRules,
+          perIntentMaxTurns: {
+            ...(transferRules.perIntentMaxTurns || {}),
+            ...(intentTraining ? { [intentResult.intent]: intentTraining.maxTurns } : {}),
+          },
+        };
+
+        const decision = shouldTransfer(
+          intentResult, mergedRules, Math.floor((history.length + 2) / 2),
+          intentTurnCounts, humanReqCount,
+        );
+
+        if (decision.transfer) {
+          let targetPhone = intentTraining?.transferTo || transferRules.transferTo;
+          let agentId = intentTraining?.crmAgentId || transferRules.crmAgentId;
+
+          if (!targetPhone && userId) {
+            const bestAgent = await findBestAgent(userId, intentResult.intent);
+            if (bestAgent) {
+              targetPhone = bestAgent.phone;
+              agentId = bestAgent.agentId;
+            }
+          }
+
+          if (targetPhone) {
+            console.log(`[twilio/voice] Auto-transfer triggered: intent=${intentResult.intent} reason="${decision.reason}" target=${targetPhone}`);
+
+            crmEventBus.emitCallEvent({
+              type: "call.transferring",
+              callId: numId,
+              callSid: logForTransfer?.callSid || undefined,
+              data: {
+                transferTo: targetPhone,
+                reason: decision.reason,
+                intent: intentResult.intent,
+                crmAgentId: agentId,
+              },
+              metadata: meta,
+              timestamp: new Date().toISOString(),
+            });
+
+            const conferenceName = `auto-transfer-${numId}-${Date.now()}`;
+            twiml.say("Let me connect you with a specialist who can help you further.");
+            const dial = twiml.dial();
+            dial.conference(
+              {
+                statusCallback: `${baseUrl}/api/crm/conference-status?callId=${numId}`,
+                statusCallbackEvent: "join leave end" as any,
+                startConferenceOnEnter: false,
+                endConferenceOnExit: true,
+                beep: "false",
+                waitUrl: `${baseUrl}/api/twilio/hold-music?lang=${encodeURIComponent(lang)}`,
+                waitMethod: "POST" as any,
+              },
+              conferenceName,
+            );
+
+            await db.update(callLogsTable)
+              .set({
+                conferenceSid: conferenceName,
+                transferredTo: targetPhone,
+                transferReason: decision.reason,
+                transferredAt: new Date(),
+              })
+              .where(eq(callLogsTable.id, numId));
+
+            const agentConfig2 = await db.query.agentConfigsTable.findFirst({ where: eq(agentConfigsTable.userId, userId!) });
+            if (agentConfig2?.twilioAccountSid && agentConfig2?.twilioAuthToken && agentConfig2?.phoneNumber) {
+              const client = twilio(agentConfig2.twilioAccountSid, agentConfig2.twilioAuthToken);
+              client.calls.create({
+                to: targetPhone,
+                from: agentConfig2.phoneNumber,
+                twiml: `<Response><Dial><Conference startConferenceOnEnter="true" endConferenceOnExit="false" beep="false">${conferenceName}</Conference></Dial></Response>`,
+                statusCallback: `${baseUrl}/api/crm/agent-call-status?callId=${numId}`,
+                statusCallbackMethod: "POST",
+                statusCallbackEvent: ["completed", "no-answer", "busy", "failed"],
+              }).then(agentCall => {
+                crmEventBus.emitCallEvent({
+                  type: "call.transferred",
+                  callId: numId,
+                  callSid: logForTransfer?.callSid || undefined,
+                  data: { conferenceSid: conferenceName, agentCallSid: agentCall.sid, transferTo: targetPhone },
+                  metadata: meta,
+                  timestamp: new Date().toISOString(),
+                });
+              }).catch(err => console.error("[twilio/voice] Auto-transfer agent dial failed:", err));
+            }
+
+            res.type("text/xml");
+            res.send(twiml.toString());
+            return;
+          }
+        }
+      }
+    }
+  }
+
+  // 4. Branch to Indian languages if applicable (and no transfer was triggered)
+  if (!isSilent && speechResult.trim() && isIndianLanguage(lang)) {
+    const encodedSpeech = encodeURIComponent(speechResult);
+    const encodedHistory = encodeURIComponent(JSON.stringify(history.slice(-4)));
+    const encodedLang = encodeURIComponent(lang);
+    const encodedIntentCounts = encodeURIComponent(JSON.stringify(intentTurnCounts));
+    const encodedIntent = encodeURIComponent(intentResult.intent);
+    twiml.say({ language: "en-US", voice: "Polly.Raveena" }, "One moment please.");
+    twiml.redirect({ method: "POST" }, `${baseUrl}/api/twilio/voice-indic?callLogId=${callLogId}&history=${encodedHistory}&speech=${encodedSpeech}&lang=${encodedLang}&intentCounts=${encodedIntentCounts}&humanReqCount=${humanReqCount}&intent=${encodedIntent}`);
+    res.type("text/xml");
+    res.send(twiml.toString());
+    return;
+  }
+
+  // 5. English / Standard response generation
   let aiResponse: string;
   let ttsAudioId: string | null = null;
 
   if (isSilent || !speechResult.trim()) {
     aiResponse = "I didn't quite catch that. Are you still there? Please go ahead and speak.";
-  } else if (isIndianLanguage(lang)) {
-    const encodedSpeech = encodeURIComponent(speechResult);
-    const encodedHistory = encodeURIComponent(JSON.stringify(history.slice(-4)));
-    const encodedLang = encodeURIComponent(lang);
-    twiml.say({ language: "en-US", voice: "Polly.Raveena" }, "One moment please.");
-    twiml.redirect({ method: "POST" }, `${baseUrl}/api/twilio/voice-indic?callLogId=${callLogId}&history=${encodedHistory}&speech=${encodedSpeech}&lang=${encodedLang}`);
-    res.type("text/xml");
-    res.send(twiml.toString());
-    return;
   } else {
     const promptConfig = configuredLang === "auto"
       ? { ...(agentConfig || {}), language: lang }
       : (agentConfig || {});
-    const systemPrompt = await buildSystemPrompt(userId, promptConfig);
+    const basePrompt = await buildSystemPrompt(userId, promptConfig);
+
+    let systemPrompt = basePrompt;
+    if (intentTraining && intentTraining.trainingContent) {
+      systemPrompt = basePrompt +
+        `\n\nINTENT-SPECIFIC KNOWLEDGE (${intentResult.intent}):\n${intentTraining.trainingContent}\n\n` +
+        `IMPORTANT: Use the above intent-specific knowledge to answer the caller's question thoroughly. ` +
+        `You are an expert on this topic. Give detailed, helpful answers. ` +
+        `Only suggest connecting to a human agent if you truly cannot answer after using this knowledge.`;
+    }
+
     try {
       aiResponse = await generateAIResponse(systemPrompt, history, speechResult, resolveOpenAIModel(aiModel));
+
+      // Fire-and-forget: log LLM cost for this turn
+      resolveTenantIdForOwner(userId).then(tenantId => {
+        if (!tenantId) return;
+        const model = resolveOpenAIModel(aiModel);
+        const charsPerToken = 4;
+        const inputChars = speechResult.length + (systemPrompt?.length ?? 0);
+        const outputChars = aiResponse.length;
+        return logLLMCost({
+          tenantId,
+          userId,
+          provider: model,
+          inputTokens: Math.ceil(inputChars / charsPerToken),
+          outputTokens: Math.ceil(outputChars / charsPerToken),
+          context: "twilio-voice",
+        });
+      }).catch(e => console.error("[twilio] LLM cost logging error:", e));
     } catch (err) {
       console.error("AI response error:", err);
       aiResponse = "I'm sorry, I had a technical issue. Could you please repeat that?";
@@ -644,9 +940,50 @@ router.post("/twilio/voice", async (req, res) => {
     : [...history, { role: "user", content: speechResult }, { role: "assistant", content: aiResponse }];
   const encodedHistory = encodeURIComponent(JSON.stringify(newHistory.slice(-4)));
 
+  // ── CRM Event Bus: emit conversation turn & Persist live transcript ──
+  if (!isSilent && speechResult.trim()) {
+    const numericCallLogId = parseInt(callLogId, 10);
+    if (!isNaN(numericCallLogId)) {
+      // Fetch CRM metadata for the event
+      const callLogForEvent = await db.query.callLogsTable.findFirst({ where: eq(callLogsTable.id, numericCallLogId) });
+      const crmMeta = callLogForEvent?.crmMetadata as Record<string, unknown> | undefined;
+
+      crmEventBus.emitCallEvent({
+        type: "call.turn",
+        callId: numericCallLogId,
+        callSid: callLogForEvent?.callSid || undefined,
+        data: { role: "user", content: speechResult, turnIndex: newHistory.length - 2, language: lang },
+        metadata: crmMeta,
+        timestamp: new Date().toISOString(),
+      });
+      crmEventBus.emitCallEvent({
+        type: "call.turn",
+        callId: numericCallLogId,
+        callSid: callLogForEvent?.callSid || undefined,
+        data: { role: "assistant", content: aiResponse, turnIndex: newHistory.length - 1, language: lang },
+        metadata: crmMeta,
+        timestamp: new Date().toISOString(),
+      });
+
+      // Persist live transcript
+      const existingTranscript = (callLogForEvent?.liveTranscript as Array<{ role: string; content: string; timestamp: string }>) || [];
+      const updatedTranscript = [
+        ...existingTranscript,
+        { role: "user", content: speechResult, timestamp: new Date().toISOString() },
+        { role: "assistant", content: aiResponse, timestamp: new Date().toISOString() },
+      ];
+      db.update(callLogsTable)
+        .set({ liveTranscript: updatedTranscript })
+        .where(eq(callLogsTable.id, numericCallLogId))
+        .catch(err => console.error("Failed to update live transcript:", err));
+    }
+  }
+
+  const encodedIntentCounts = encodeURIComponent(JSON.stringify(intentTurnCounts));
+
   const gather = twiml.gather({
     input: ["speech"],
-    action: `${baseUrl}/api/twilio/voice?callLogId=${callLogId}&history=${encodedHistory}`,
+    action: `${baseUrl}/api/twilio/voice?callLogId=${callLogId}&history=${encodedHistory}&intentCounts=${encodedIntentCounts}&humanReqCount=${humanReqCount}`,
     method: "POST",
     speechTimeout: "auto",
     timeout: 10,
@@ -661,6 +998,18 @@ router.post("/twilio/voice", async (req, res) => {
       const b64 = await generateOpenAITTS(aiResponse, agentConfig?.voice || "nova");
       ttsAudioId = storeTtsAudio(b64);
       ttsUseMp3 = true;
+
+      // Fire-and-forget: log OpenAI TTS cost
+      resolveTenantIdForOwner(userId).then(tenantId => {
+        if (!tenantId) return;
+        return logTTSCost({
+          tenantId,
+          userId,
+          provider: "openai",
+          characters: aiResponse.length,
+          context: "twilio-tts-openai",
+        });
+      }).catch(e => console.error("[twilio] OpenAI TTS cost logging error:", e));
     } catch (e) {
       console.error("OpenAI TTS err:", e);
     }
@@ -672,7 +1021,7 @@ router.post("/twilio/voice", async (req, res) => {
     gather.say({ voice: voice as any, language: getTwilioLang(lang) as any }, aiResponse);
   }
 
-  twiml.redirect({ method: "POST" }, `${baseUrl}/api/twilio/voice?callLogId=${callLogId}&history=${encodedHistory}&silent=1`);
+  twiml.redirect({ method: "POST" }, `${baseUrl}/api/twilio/voice?callLogId=${callLogId}&history=${encodedHistory}&intentCounts=${encodedIntentCounts}&humanReqCount=${humanReqCount}&silent=1`);
 
   res.type("text/xml");
   res.send(twiml.toString());
@@ -702,11 +1051,19 @@ router.post("/twilio/voice-indic", async (req, res) => {
     } catch { }
   }
 
+  // ── Per-intent turn counters & human request tracking ──
+  let intentTurnCounts: Record<string, number> = {};
+  try {
+    const raw = req.query.intentCounts as string;
+    if (raw) intentTurnCounts = JSON.parse(decodeURIComponent(raw));
+  } catch { }
+  let humanReqCount = parseInt(req.query.humanReqCount as string) || 0;
+  const detectedIntent = req.query.intent as string || "general_question";
+
   const agentConfig = await db.query.agentConfigsTable.findFirst({ where: eq(agentConfigsTable.userId, userId) });
   const baseUrl = getBaseUrl(req);
   const voice = mapVoice(agentConfig?.voice);
   const configuredLang = agentConfig?.language || "en-US";
-  // Auto mode passes the detected language via the ?lang= query param.
   const queryLang = (req.query.lang as string) || "";
   const lang = (configuredLang === "auto" && queryLang) ? queryLang : configuredLang;
 
@@ -717,8 +1074,31 @@ router.post("/twilio/voice-indic", async (req, res) => {
     aiResponse = "I didn't quite catch that. Are you still there? Please go ahead and speak.";
   } else {
     const systemPrompt = await buildSystemPrompt(userId, { ...(agentConfig || {}), language: lang });
+    let finalSystemPrompt = systemPrompt;
+
+    // Look up intent training configuration to inject content
+    let intentTraining = null;
     try {
-      const indicResult = await generateAIResponseIndic(systemPrompt, history, speechResult, lang, baseUrl);
+      intentTraining = await db.query.intentTrainingTable.findFirst({
+        where: and(
+          eq(intentTrainingTable.userId, userId),
+          eq(intentTrainingTable.intent, detectedIntent),
+        ),
+      });
+      if (intentTraining && intentTraining.trainingContent) {
+        finalSystemPrompt = systemPrompt +
+          `\n\nINTENT-SPECIFIC KNOWLEDGE (${detectedIntent}):\n${intentTraining.trainingContent}\n\n` +
+          `IMPORTANT: Use the above intent-specific knowledge to answer the caller's question thoroughly. ` +
+          `You are an expert on this topic. Give detailed, helpful answers. ` +
+          `Only suggest connecting to a human agent if you truly cannot answer after using this knowledge.`;
+        console.log(`[voice-indic] Used intent training data for "${detectedIntent}"`);
+      }
+    } catch (intentErr) {
+      console.error("[voice-indic] Intent training lookup failed:", intentErr);
+    }
+
+    try {
+      const indicResult = await generateAIResponseIndic(finalSystemPrompt, history, speechResult, lang, baseUrl, userId);
       aiResponse = indicResult.text;
       ttsAudioId = indicResult.ttsAudioId;
     } catch (err) {
@@ -729,10 +1109,48 @@ router.post("/twilio/voice-indic", async (req, res) => {
 
   const newHistory = [...history, { role: "user", content: speechResult }, { role: "assistant", content: aiResponse }];
   const encodedHistory = encodeURIComponent(JSON.stringify(newHistory.slice(-4)));
+  const encodedIntentCounts = encodeURIComponent(JSON.stringify(intentTurnCounts));
+
+  // ── CRM Event Bus: emit conversation turn & Persist live transcript ──
+  if (speechResult.trim()) {
+    const numericCallLogId = parseInt(callLogId, 10);
+    if (!isNaN(numericCallLogId)) {
+      const callLogForEvent = await db.query.callLogsTable.findFirst({ where: eq(callLogsTable.id, numericCallLogId) });
+      const crmMeta = callLogForEvent?.crmMetadata as Record<string, unknown> | undefined;
+
+      crmEventBus.emitCallEvent({
+        type: "call.turn",
+        callId: numericCallLogId,
+        callSid: callLogForEvent?.callSid || undefined,
+        data: { role: "user", content: speechResult, turnIndex: newHistory.length - 2, language: lang },
+        metadata: crmMeta,
+        timestamp: new Date().toISOString(),
+      });
+      crmEventBus.emitCallEvent({
+        type: "call.turn",
+        callId: numericCallLogId,
+        callSid: callLogForEvent?.callSid || undefined,
+        data: { role: "assistant", content: aiResponse, turnIndex: newHistory.length - 1, language: lang },
+        metadata: crmMeta,
+        timestamp: new Date().toISOString(),
+      });
+
+      const existingTranscript = (callLogForEvent?.liveTranscript as Array<{ role: string; content: string; timestamp: string }>) || [];
+      const updatedTranscript = [
+        ...existingTranscript,
+        { role: "user", content: speechResult, timestamp: new Date().toISOString() },
+        { role: "assistant", content: aiResponse, timestamp: new Date().toISOString() },
+      ];
+      db.update(callLogsTable)
+        .set({ liveTranscript: updatedTranscript })
+        .where(eq(callLogsTable.id, numericCallLogId))
+        .catch(err => console.error("Failed to update live transcript:", err));
+    }
+  }
 
   const gather = twiml.gather({
     input: ["speech"],
-    action: `${baseUrl}/api/twilio/voice?callLogId=${callLogId}&history=${encodedHistory}`,
+    action: `${baseUrl}/api/twilio/voice?callLogId=${callLogId}&history=${encodedHistory}&intentCounts=${encodedIntentCounts}&humanReqCount=${humanReqCount}`,
     method: "POST",
     speechTimeout: "auto",
     timeout: 10,
@@ -746,7 +1164,7 @@ router.post("/twilio/voice-indic", async (req, res) => {
     gather.say({ voice: voice as any, language: getTwilioLang(lang) as any }, aiResponse);
   }
 
-  twiml.redirect({ method: "POST" }, `${baseUrl}/api/twilio/voice?callLogId=${callLogId}&history=${encodedHistory}&silent=1`);
+  twiml.redirect({ method: "POST" }, `${baseUrl}/api/twilio/voice?callLogId=${callLogId}&history=${encodedHistory}&intentCounts=${encodedIntentCounts}&humanReqCount=${humanReqCount}&silent=1`);
 
   res.type("text/xml");
   res.send(twiml.toString());
@@ -853,9 +1271,82 @@ router.post("/twilio/status", async (req, res) => {
         } : {}),
       })
       .where(eq(callLogsTable.id, parseInt(callLogId)));
+
+    // ── CRM Event Bus: emit call ended ──
+    if (existingLog) {
+      const finalLog = await db.query.callLogsTable.findFirst({ where: eq(callLogsTable.id, parseInt(callLogId)) });
+      crmEventBus.emitCallEvent({
+        type: "call.ended",
+        callId: parseInt(callLogId),
+        callSid: finalLog?.callSid || undefined,
+        data: {
+          outcome: outcomeMap[callStatus] || "no_answer",
+          duration: callDuration,
+          transcript: finalLog?.transcript || null,
+          aiSummary: finalLog?.aiSummary || null,
+          estimatedCostUsd: costData?.totalCost?.toString() || null,
+          billedCostUsd: billedCost?.toString() || null,
+          liveTranscript: finalLog?.liveTranscript || [],
+        },
+        metadata: finalLog?.crmMetadata as Record<string, unknown> | undefined,
+        timestamp: new Date().toISOString(),
+      });
+    }
   }
 
   res.status(200).send("OK");
+});
+
+// GET/POST /api/twilio/hold-music — Twilio calls this while caller waits in conference
+router.post("/twilio/hold-music", (req, res) => {
+  const twiml = new twilio.twiml.VoiceResponse();
+  const queryLang = (req.query.lang as string || req.body.lang as string || "en-US").toLowerCase();
+
+  let twilioLang = "en-IN";
+  let voice: any = "Polly.Raveena";
+  let msg1 = "Please wait while we connect you with a specialist. Your call is in queue and will be answered shortly.";
+  let msg2 = "Thank you for your patience. An agent will be with you shortly.";
+
+  if (queryLang.startsWith("hi")) {
+    twilioLang = "hi-IN";
+    voice = "Polly.Aditi";
+    msg1 = "कृपया प्रतीक्षा करें, हम आपको हमारे विशेषज्ञ से जोड़ रहे हैं। आपकी कॉल कतार में है और जल्द ही इसका उत्तर दिया जाएगा।";
+    msg2 = "धैर्य रखने के लिए धन्यवाद। हमारे प्रतिनिधि जल्द ही आपसे बात करेंगे।";
+  } else if (queryLang.startsWith("kn")) {
+    twilioLang = "kn-IN";
+    voice = "Polly.Aditi";
+    msg1 = "ದಯವಿಟ್ಟು ನಿರೀಕ್ಷಿಸಿ, ನಾವು ನಿಮ್ಮನ್ನು ನಮ್ಮ ತಜ್ಞರೊಂದಿಗೆ ಸಂಪರ್ಕಿಸುತ್ತಿದ್ದೇವೆ. ನಿಮ್ಮ ಕರೆ ಸರತಿಯಲ್ಲಿದೆ ಮತ್ತು ಶೀಘ್ರದಲ್ಲೇ ಉತ್ತರಿಸಲಾಗುವುದು.";
+    msg2 = "ನಿಮ್ಮ ತಾಳ್ಮೆಗೆ ಧನ್ಯವಾದಗಳು. ನಮ್ಮ ಪ್ರತಿನಿಧಿ ಶೀಘ್ರದಲ್ಲೇ ನಿಮ್ಮೊಂದಿಗೆ ಮಾತನಾಡಲಿದ್ದಾರೆ.";
+  } else if (queryLang.startsWith("ta")) {
+    twilioLang = "ta-IN";
+    voice = "Polly.Aditi";
+    msg1 = "தயவுசெய்து காத்திருங்கள், நாங்கள் உங்களை எங்கள் நிபுணருடன் இணைக்கிறோம். உங்கள் அழைப்பு வரிசையில் உள்ளது, விரைவில் பதிலளிக்கப்படும்.";
+    msg2 = "உங்கள் பொறுமைக்கு நன்றி. எங்கள் முகவர் விரைவில் உங்களுடன் இருப்பார்.";
+  } else if (queryLang.startsWith("te")) {
+    twilioLang = "te-IN";
+    voice = "Polly.Aditi";
+    msg1 = "దయచేసి వేచి ఉండండి, మేము మిమ్మల్ని మా నిపుణుడితో కనెక్ట్ చేస్తున్నాము. మీ కాల్ క్యూలో ఉంది మరియు త్వరలోనే సమాధానం ఇవ్వబడుతుంది.";
+    msg2 = "మీ ఓర్పుకు ధన్యವಾದాలు. మా ప్రతినిధి త్వరలోనే మీతో మాట్లాడతారు.";
+  } else if (queryLang.startsWith("mr")) {
+    twilioLang = "mr-IN";
+    voice = "Polly.Aditi";
+    msg1 = "कृपया प्रतीक्षा करा, आम्ही तुम्हाला आमच्या तज्ज्ञांशी जोडत आहोत. तुमचा कॉल रांगेत आहे आणि लवकरच त्याचे उत्तर दिले जाईल।";
+    msg2 = "तुमच्या संयमाबद्दल धन्यवाद। आमचे प्रतिनिधी लवकरच तुमच्याशी बोलतील।";
+  }
+
+  const sayOptions: any = { language: twilioLang };
+  if (voice) {
+    sayOptions.voice = voice;
+  }
+
+  twiml.say(sayOptions, msg1);
+  twiml.pause({ length: 8 });
+  twiml.say(sayOptions, msg2);
+  twiml.pause({ length: 8 });
+  twiml.redirect({ method: "POST" }, `${getBaseUrl(req)}/api/twilio/hold-music?lang=${encodeURIComponent(queryLang)}`);
+
+  res.type("text/xml");
+  res.send(twiml.toString());
 });
 
 export default router;

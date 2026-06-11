@@ -1,5 +1,5 @@
 import { Router, type IRouter } from "express";
-import { db, tenantsTable, tenantUsersTable, callLogsTable, agentConfigsTable, usersTable, platformSettingsTable } from "@workspace/db";
+import { db, tenantsTable, tenantUsersTable, callLogsTable, agentConfigsTable, usersTable, platformSettingsTable, apiCostLogsTable } from "@workspace/db";
 import { eq, and, gte, sql } from "drizzle-orm";
 import bcrypt from "bcryptjs";
 
@@ -10,17 +10,41 @@ function getMonthStart(): Date {
   return new Date(now.getFullYear(), now.getMonth(), 1);
 }
 
-async function getTenantMonthStats(ownerId: number) {
-  const rows = await db
+async function getTenantMonthStats(ownerId: number, tenantId?: number) {
+  const monthStart = getMonthStart();
+
+  // Call count from call_logs (owner's calls)
+  const callRows = await db
     .select({
       count: sql<string>`count(*)`,
-      totalCost: sql<string>`coalesce(sum(estimated_cost_usd::numeric), 0)`,
     })
     .from(callLogsTable)
-    .where(and(eq(callLogsTable.userId, ownerId), gte(callLogsTable.startedAt, getMonthStart())));
+    .where(and(eq(callLogsTable.userId, ownerId), gte(callLogsTable.startedAt, monthStart)));
+
+  // Cost from api_cost_logs (accurate per-API-call tracking) if tenantId is available
+  let costThisMonth = 0;
+  if (tenantId) {
+    const costRows = await db
+      .select({
+        totalCost: sql<string>`coalesce(sum(cost_usd::numeric), 0)`,
+      })
+      .from(apiCostLogsTable)
+      .where(and(eq(apiCostLogsTable.tenantId, tenantId), gte(apiCostLogsTable.createdAt, monthStart)));
+    costThisMonth = parseFloat(costRows[0]?.totalCost ?? "0");
+  } else {
+    // Fallback: use call_logs estimated cost if tenantId not available
+    const costRows = await db
+      .select({
+        totalCost: sql<string>`coalesce(sum(estimated_cost_usd::numeric), 0)`,
+      })
+      .from(callLogsTable)
+      .where(and(eq(callLogsTable.userId, ownerId), gte(callLogsTable.startedAt, monthStart)));
+    costThisMonth = parseFloat(costRows[0]?.totalCost ?? "0");
+  }
+
   return {
-    callsThisMonth: parseInt(rows[0]?.count ?? "0", 10),
-    costThisMonth: parseFloat(rows[0]?.totalCost ?? "0"),
+    callsThisMonth: parseInt(callRows[0]?.count ?? "0", 10),
+    costThisMonth,
   };
 }
 
@@ -37,7 +61,7 @@ router.get("/superadmin/tenants", async (req, res) => {
       ? await db.query.agentConfigsTable.findFirst({ where: eq(agentConfigsTable.userId, tenant.ownerId) })
       : null;
 
-    const monthStats = tenant.ownerId ? await getTenantMonthStats(tenant.ownerId) : { callsThisMonth: 0, costThisMonth: 0 };
+    const monthStats = tenant.ownerId ? await getTenantMonthStats(tenant.ownerId, tenant.id) : { callsThisMonth: 0, costThisMonth: 0 };
 
     return {
       id: tenant.id,
@@ -124,7 +148,7 @@ router.get("/superadmin/tenants/:id", async (req, res) => {
     ? await db.query.agentConfigsTable.findFirst({ where: eq(agentConfigsTable.userId, tenant.ownerId) })
     : null;
 
-  const monthStats = tenant.ownerId ? await getTenantMonthStats(tenant.ownerId) : { callsThisMonth: 0, costThisMonth: 0 };
+  const monthStats = tenant.ownerId ? await getTenantMonthStats(tenant.ownerId, tenantId) : { callsThisMonth: 0, costThisMonth: 0 };
 
   res.json({
     ...tenant,
@@ -152,7 +176,7 @@ router.get("/superadmin/tenants/:id/stats", async (req, res) => {
     return;
   }
 
-  const monthStats = await getTenantMonthStats(tenant.ownerId);
+  const monthStats = await getTenantMonthStats(tenant.ownerId, tenantId);
   const [userCount] = await db
     .select({ count: sql<string>`count(*)` })
     .from(tenantUsersTable)

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { useAgentConfig, useUpdateAgentMutation } from "@/hooks/use-agent";
 import { useCampaignsList } from "@/hooks/use-campaigns";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -7,7 +7,8 @@ import { useToast } from "@/hooks/use-toast";
 import { getStoredToken } from "@/hooks/use-auth";
 import {
   Globe, Copy, CheckCircle2, RefreshCw, ToggleLeft, ToggleRight,
-  Code2, Megaphone, Activity, Info, ExternalLink, Zap
+  Code2, Megaphone, Activity, Info, ExternalLink, Zap,
+  Send, MessageSquare, Bot, Loader2, Trash2
 } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { getGetAgentQueryKey } from "@workspace/api-client-react";
@@ -29,6 +30,216 @@ function CopyBox({ label, value }: { label: string; value: string }) {
           {copied
             ? <CheckCircle2 className="w-4 h-4 text-green-400" />
             : <Copy className="w-4 h-4 text-muted-foreground" />}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+interface ChatMessage {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  timestamp: Date;
+  language?: string;
+  modelUsed?: string;
+}
+
+const QUICK_PROMPTS = [
+  "Hi, what can you help me with?",
+  "Tell me about your services",
+  "How do I get started?",
+];
+
+function ChatTestPanel({ apiKey, agentName }: { apiKey: string; agentName: string }) {
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [input, setInput] = useState("");
+  const [sending, setSending] = useState(false);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const scrollToBottom = () => {
+    const el = messagesContainerRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  };
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages]);
+
+  const sendMessage = async (text?: string) => {
+    const msg = (text || input).trim();
+    if (!msg || sending || !apiKey) return;
+
+    const userMsg: ChatMessage = {
+      id: `user-${Date.now()}`,
+      role: "user",
+      content: msg,
+      timestamp: new Date(),
+    };
+    setMessages(prev => [...prev, userMsg]);
+    setInput("");
+    setSending(true);
+
+    try {
+      const history = messages.map(m => ({ role: m.role, content: m.content }));
+      const res = await fetch(`${window.location.origin}/api/widget/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ apiKey, message: msg, history }),
+      });
+      if (!res.ok) throw new Error(`API error: ${res.status}`);
+      const data = await res.json();
+
+      const botMsg: ChatMessage = {
+        id: `bot-${Date.now()}`,
+        role: "assistant",
+        content: data.reply || "No response",
+        timestamp: new Date(),
+        language: data.language,
+        modelUsed: data.modelUsed,
+      };
+      setMessages(prev => [...prev, botMsg]);
+    } catch {
+      const errorMsg: ChatMessage = {
+        id: `err-${Date.now()}`,
+        role: "assistant",
+        content: "⚠️ Failed to get a response. Check that the widget is enabled and try again.",
+        timestamp: new Date(),
+      };
+      setMessages(prev => [...prev, errorMsg]);
+    } finally {
+      setSending(false);
+      inputRef.current?.focus();
+    }
+  };
+
+  const clearChat = () => {
+    setMessages([]);
+    inputRef.current?.focus();
+  };
+
+  const formatTime = (d: Date) =>
+    d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
+  return (
+    <div className="flex flex-col rounded-2xl overflow-hidden border border-white/[0.08] bg-[#0c0a14]" style={{ height: "480px" }}>
+      <div className="px-4 py-3 bg-gradient-to-r from-violet-600 to-indigo-600 flex items-center gap-3 shrink-0">
+        <div className="relative">
+          <div className="w-9 h-9 rounded-full bg-white/20 flex items-center justify-center">
+            <Bot className="w-5 h-5 text-white" />
+          </div>
+          <div className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-green-400 border-2 border-violet-600" />
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className="text-sm font-semibold text-white truncate">{agentName}</p>
+          <p className="text-[11px] text-white/60">Online • Test Mode</p>
+        </div>
+        {messages.length > 0 && (
+          <button
+            onClick={clearChat}
+            className="text-white/50 hover:text-white/90 transition-colors p-1.5 rounded-lg hover:bg-white/10"
+            title="Clear chat"
+          >
+            <Trash2 className="w-4 h-4" />
+          </button>
+        )}
+      </div>
+
+      <div ref={messagesContainerRef} className="flex-1 overflow-y-auto px-4 py-3 space-y-4" style={{ minHeight: 0 }}>
+        {messages.length === 0 && (
+          <div className="flex flex-col items-center justify-center h-full gap-5">
+            <div className="relative">
+              <div className="w-16 h-16 rounded-full bg-gradient-to-br from-violet-500/30 to-indigo-500/30 flex items-center justify-center">
+                <MessageSquare className="w-7 h-7 text-violet-300" />
+              </div>
+              <div className="absolute -top-1 -right-1 w-5 h-5 rounded-full bg-gradient-to-br from-green-400 to-emerald-500 flex items-center justify-center">
+                <CheckCircle2 className="w-3 h-3 text-white" />
+              </div>
+            </div>
+            <div className="text-center space-y-1.5">
+              <p className="text-sm font-medium text-foreground">Chat with {agentName}</p>
+              <p className="text-xs text-muted-foreground max-w-[240px]">
+                Test how your widget responds to visitors. Try one of these:
+              </p>
+            </div>
+            <div className="flex flex-col gap-2 w-full max-w-[280px]">
+              {QUICK_PROMPTS.map((prompt, i) => (
+                <button
+                  key={i}
+                  onClick={() => sendMessage(prompt)}
+                  className="text-left text-xs px-3 py-2.5 rounded-xl border border-violet-500/20 bg-violet-500/[0.06] hover:bg-violet-500/[0.12] hover:border-violet-500/30 text-foreground/80 hover:text-foreground transition-all duration-200 group"
+                >
+                  <span className="text-violet-400 mr-1.5 group-hover:mr-2 transition-all">→</span>
+                  {prompt}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {messages.map(msg => (
+          <div key={msg.id} className={`flex gap-2 ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
+            {msg.role === "assistant" && (
+              <div className="w-6 h-6 rounded-full bg-gradient-to-br from-violet-500 to-indigo-500 flex items-center justify-center shrink-0 mt-0.5">
+                <Bot className="w-3.5 h-3.5 text-white" />
+              </div>
+            )}
+            <div className="space-y-1 max-w-[75%]">
+              <div className={`rounded-2xl px-3.5 py-2.5 text-[13px] leading-relaxed ${
+                msg.role === "user"
+                  ? "bg-gradient-to-r from-violet-600 to-indigo-600 text-white rounded-tr-md"
+                  : "bg-white/[0.06] border border-white/[0.08] text-foreground/90 rounded-tl-md"
+              }`}>
+                <p className="whitespace-pre-wrap break-words">{msg.content}</p>
+              </div>
+              <div className={`flex items-center gap-1.5 px-1 ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
+                <span className="text-[10px] text-muted-foreground/40">{formatTime(msg.timestamp)}</span>
+                {msg.role === "assistant" && msg.modelUsed && (
+                  <span className="text-[10px] text-violet-400/50">• {msg.modelUsed}</span>
+                )}
+                {msg.role === "assistant" && msg.language && (
+                  <span className="text-[10px] text-violet-400/50">• {msg.language}</span>
+                )}
+              </div>
+            </div>
+          </div>
+        ))}
+
+        {sending && (
+          <div className="flex gap-2 justify-start">
+            <div className="w-6 h-6 rounded-full bg-gradient-to-br from-violet-500 to-indigo-500 flex items-center justify-center shrink-0 mt-0.5">
+              <Bot className="w-3.5 h-3.5 text-white" />
+            </div>
+            <div className="bg-white/[0.06] border border-white/[0.08] rounded-2xl rounded-tl-md px-4 py-3">
+              <div className="flex items-center gap-1.5">
+                <span className="w-2 h-2 rounded-full bg-violet-400/70 animate-bounce" style={{ animationDelay: "0ms" }} />
+                <span className="w-2 h-2 rounded-full bg-violet-400/70 animate-bounce" style={{ animationDelay: "150ms" }} />
+                <span className="w-2 h-2 rounded-full bg-violet-400/70 animate-bounce" style={{ animationDelay: "300ms" }} />
+              </div>
+            </div>
+          </div>
+        )}
+
+      </div>
+
+      <div className="shrink-0 border-t border-white/[0.06] px-3 py-2.5 flex items-center gap-2 bg-[#0e0c17]">
+        <input
+          ref={inputRef}
+          type="text"
+          value={input}
+          onChange={e => setInput(e.target.value)}
+          onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); } }}
+          placeholder="Type a message…"
+          disabled={sending}
+          className="flex-1 bg-white/[0.05] border border-white/[0.08] rounded-xl px-3.5 py-2.5 text-sm text-foreground placeholder:text-muted-foreground/40 outline-none focus:ring-1 focus:ring-violet-500/40 focus:border-violet-500/30 transition-all disabled:opacity-50"
+        />
+        <button
+          onClick={() => sendMessage()}
+          disabled={sending || !input.trim()}
+          className="shrink-0 w-9 h-9 flex items-center justify-center rounded-xl bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 transition-all disabled:opacity-30 disabled:cursor-not-allowed shadow-lg shadow-violet-500/20"
+        >
+          {sending ? <Loader2 className="w-4 h-4 text-white animate-spin" /> : <Send className="w-4 h-4 text-white" />}
         </button>
       </div>
     </div>
@@ -102,7 +313,7 @@ export default function WidgetSettings() {
   if (isLoading) return <div className="animate-pulse h-96 bg-white/5 rounded-xl" />;
 
   return (
-    <div className="space-y-6 max-w-4xl mx-auto">
+    <div className="space-y-6 max-w-5xl mx-auto">
       <div>
         <h1 className="text-3xl font-display font-bold">Web Widget</h1>
         <p className="text-muted-foreground mt-1">
@@ -110,83 +321,100 @@ export default function WidgetSettings() {
         </p>
       </div>
 
-      <Card className="glass-panel border-white/5">
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Globe className="w-5 h-5 text-primary" /> Widget Status
-          </CardTitle>
-          <CardDescription>Enable or disable the chat widget. When disabled, the embed script shows nothing.</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="flex items-center justify-between bg-white/5 border border-white/10 rounded-xl p-4">
-            <div className="space-y-1">
-              <p className="font-medium text-foreground">
-                {widgetEnabled ? "Widget is live" : "Widget is disabled"}
-              </p>
-              <p className="text-sm text-muted-foreground">
-                {widgetEnabled
-                  ? "Your AI agent is accepting web widget conversations."
-                  : "Toggle on to let visitors chat with your AI agent on your website."}
-              </p>
-            </div>
-            <button
-              onClick={toggleWidget}
-              disabled={updateAgent.isPending}
-              className="shrink-0 disabled:opacity-50 hover:opacity-80 transition-opacity"
-            >
-              {widgetEnabled
-                ? <ToggleRight className="w-12 h-12 text-primary" />
-                : <ToggleLeft className="w-12 h-12 text-muted-foreground" />}
-            </button>
+      {widgetEnabled ? (
+        <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
+          <div className="lg:col-span-3 space-y-6">
+            <Card className="glass-panel border-white/5">
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <Globe className="w-5 h-5 text-primary" /> Widget Status
+                </CardTitle>
+                <CardDescription>Enable or disable the chat widget. When disabled, the embed script shows nothing.</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="flex items-center justify-between bg-white/5 border border-white/10 rounded-xl p-4">
+                  <div className="space-y-1">
+                    <p className="font-medium text-foreground">Widget is live</p>
+                    <p className="text-sm text-muted-foreground">Your AI agent is accepting web widget conversations.</p>
+                  </div>
+                  <button onClick={toggleWidget} disabled={updateAgent.isPending} className="shrink-0 disabled:opacity-50 hover:opacity-80 transition-opacity">
+                    <ToggleRight className="w-12 h-12 text-primary" />
+                  </button>
+                </div>
+                <div className="mt-3 flex items-center gap-2 bg-green-500/10 border border-green-500/20 rounded-lg p-2.5">
+                  <div className="w-2 h-2 rounded-full bg-green-400 animate-pulse shrink-0" />
+                  <p className="text-xs text-green-300">Active — visitors can start conversations from your website.</p>
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card className="glass-panel border-white/5">
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <Megaphone className="w-5 h-5 text-primary" /> Campaign Assignment
+                </CardTitle>
+                <CardDescription>Route widget conversations to a campaign for unified tracking.</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Link to Campaign (optional)</label>
+                  <div className="flex gap-3">
+                    <select
+                      value={campaignId}
+                      onChange={e => setCampaignId(e.target.value)}
+                      className="flex-1 h-10 rounded-md border border-white/10 bg-background/50 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
+                    >
+                      <option value="">— No campaign (standalone) —</option>
+                      {campaigns.map((c: any) => (
+                        <option key={c.id} value={String(c.id)}>{c.name}</option>
+                      ))}
+                    </select>
+                    <Button onClick={saveCampaign} disabled={updateAgent.isPending} variant="outline" className="border-white/10 shrink-0">Save</Button>
+                  </div>
+                </div>
+                {widgetCampaignId && (
+                  <div className="flex items-start gap-2 bg-primary/10 border border-primary/20 rounded-lg p-3">
+                    <Info className="w-4 h-4 text-primary mt-0.5 shrink-0" />
+                    <p className="text-sm text-primary/80">Widget conversations will appear in the selected campaign's analytics.</p>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
           </div>
 
-          {widgetEnabled && (
-            <div className="mt-4 flex items-center gap-2 bg-green-500/10 border border-green-500/20 rounded-lg p-3">
-              <div className="w-2 h-2 rounded-full bg-green-400 animate-pulse shrink-0" />
-              <p className="text-sm text-green-300">Widget is active — visitors can start conversations from your website.</p>
-            </div>
-          )}
-        </CardContent>
-      </Card>
-
-      <Card className="glass-panel border-white/5">
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Megaphone className="w-5 h-5 text-primary" /> Campaign Assignment
-          </CardTitle>
-          <CardDescription>
-            Route widget conversations to a campaign. This lets you track widget interactions alongside telephony activity in the same funnel.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="space-y-2">
-            <label className="text-sm font-medium">Link to Campaign (optional)</label>
-            <div className="flex gap-3">
-              <select
-                value={campaignId}
-                onChange={e => setCampaignId(e.target.value)}
-                className="flex-1 h-10 rounded-md border border-white/10 bg-background/50 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
-              >
-                <option value="">— No campaign (standalone widget) —</option>
-                {campaigns.map((c: any) => (
-                  <option key={c.id} value={String(c.id)}>{c.name}</option>
-                ))}
-              </select>
-              <Button onClick={saveCampaign} disabled={updateAgent.isPending} variant="outline" className="border-white/10 shrink-0">
-                Save
-              </Button>
+          <div className="lg:col-span-2">
+            <div className="lg:sticky lg:top-4">
+              <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-3 flex items-center gap-1.5">
+                <Zap className="w-3 h-3 text-amber-400" /> Live Preview
+              </p>
+              <ChatTestPanel apiKey={widgetApiKey} agentName={agentAny?.agentName || "Agent"} />
             </div>
           </div>
-          {widgetCampaignId && (
-            <div className="flex items-start gap-2 bg-primary/10 border border-primary/20 rounded-lg p-3">
-              <Info className="w-4 h-4 text-primary mt-0.5 shrink-0" />
-              <p className="text-sm text-primary/80">
-                Widget conversations will appear in the selected campaign's analytics alongside telephony calls, giving you a unified view of all interactions.
-              </p>
+        </div>
+      ) : (
+        <Card className="glass-panel border-white/5">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Globe className="w-5 h-5 text-primary" /> Widget Status
+            </CardTitle>
+            <CardDescription>Enable or disable the chat widget. When disabled, the embed script shows nothing.</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="flex items-center justify-between bg-white/5 border border-white/10 rounded-xl p-4">
+              <div className="space-y-1">
+                <p className="font-medium text-foreground">Widget is disabled</p>
+                <p className="text-sm text-muted-foreground">Toggle on to let visitors chat with your AI agent on your website.</p>
+              </div>
+              <button onClick={toggleWidget} disabled={updateAgent.isPending} className="shrink-0 disabled:opacity-50 hover:opacity-80 transition-opacity">
+                <ToggleLeft className="w-12 h-12 text-muted-foreground" />
+              </button>
             </div>
-          )}
-        </CardContent>
-      </Card>
+          </CardContent>
+        </Card>
+      )}
+
+
+
 
       <Card className="glass-panel border-white/5">
         <CardHeader>

@@ -9,3 +9,5 @@ export * from "./scripts";
 export * from "./settings";
 export * from "./invoices";
 export * from "./costs";
+export * from "./crm";
+export * from "./intent-training";

@@ -9,6 +9,7 @@ import Dashboard from "@/pages/Dashboard";
 import Contacts from "@/pages/Contacts";
 import Campaigns from "@/pages/Campaigns";
 import Calls from "@/pages/Calls";
+import Dialer from "@/pages/Dialer";
 import AgentSettings from "@/pages/Agent";
 import WidgetSettings from "@/pages/Widget";
 import Training from "@/pages/Training";
@@ -150,6 +151,7 @@ function Router() {
               <Route path="/contacts" component={Contacts} />
               <Route path="/campaigns" component={Campaigns} />
               <Route path="/calls" component={Calls} />
+              <Route path="/dialer" component={Dialer} />
               <Route path="/agent" component={AgentSettings} />
               <Route path="/widget" component={WidgetSettings} />
               <Route path="/training" component={Training} />

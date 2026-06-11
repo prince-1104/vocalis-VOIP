@@ -72,6 +72,11 @@ router.post("/contacts/:id/dial", async (req, res) => {
     asyncAmd: "true",
   });
 
+  // Store Twilio Call SID for CRM tracking/control
+  await db.update(callLogsTable)
+    .set({ callSid: call.sid })
+    .where(eq(callLogsTable.id, callLog.id));
+
   res.json({ callSid: call.sid, callLogId: callLog.id, status: "dialing" });
 });
 
@@ -159,6 +164,72 @@ router.post("/campaigns/:id/dial-next", async (req, res) => {
     contact: { id: nextContact.id, phone: nextContact.phone, firstName: nextContact.firstName, lastName: nextContact.lastName },
     remaining: pendingContacts.filter(c => c != null).length - 1,
   });
+});
+
+// ── Dial by raw phone number (Dialer UI) ──
+router.post("/dial/phone", async (req, res) => {
+  const userId = req.userId!;
+  const { phone } = req.body;
+
+  if (!phone) {
+    res.status(400).json({ error: "phone is required" });
+    return;
+  }
+
+  const agentConfig = await db.query.agentConfigsTable.findFirst({
+    where: eq(agentConfigsTable.userId, userId),
+  });
+
+  if (!agentConfig?.twilioAccountSid || !agentConfig?.twilioAuthToken) {
+    res.status(400).json({ error: "Twilio credentials not configured. Go to AI Agent → Twilio Settings to add your Account SID, Auth Token, and Phone Number." });
+    return;
+  }
+
+  if (!agentConfig.phoneNumber) {
+    res.status(400).json({ error: "Twilio phone number not configured. Go to AI Agent → Twilio Settings to add your phone number." });
+    return;
+  }
+
+  const baseUrl = getBaseUrl(req);
+  const client = getTwilioClient(agentConfig.twilioAccountSid, agentConfig.twilioAuthToken);
+
+  const [callLog] = await db.insert(callLogsTable).values({
+    userId,
+    direction: "outbound",
+    phone,
+    outcome: "no_answer",
+    aiModel: agentConfig.aiModel || "gpt-4o-mini",
+    startedAt: new Date(),
+  }).returning();
+
+  try {
+    const call = await client.calls.create({
+      to: phone,
+      from: agentConfig.phoneNumber,
+      url: `${baseUrl}/api/twilio/outbound-voice?callLogId=${callLog.id}&userId=${userId}`,
+      statusCallback: `${baseUrl}/api/twilio/status?callLogId=${callLog.id}`,
+      statusCallbackMethod: "POST",
+      statusCallbackEvent: ["completed", "no-answer", "busy", "failed"],
+      machineDetection: "Enable",
+      asyncAmd: "true",
+    });
+
+    // Store the Call SID
+    await db.update(callLogsTable)
+      .set({ callSid: call.sid })
+      .where(eq(callLogsTable.id, callLog.id));
+
+    res.json({ callSid: call.sid, callLogId: callLog.id, status: "dialing" });
+  } catch (err: any) {
+    await db.update(callLogsTable)
+      .set({ outcome: "no_answer", endedAt: new Date() })
+      .where(eq(callLogsTable.id, callLog.id));
+
+    res.status(500).json({
+      error: `Twilio error: ${err.message}`,
+      callLogId: callLog.id,
+    });
+  }
 });
 
 export default router;

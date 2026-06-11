@@ -1,5 +1,5 @@
 import { Router, type IRouter } from "express";
-import { db, trainingDataTable } from "@workspace/db";
+import { db, trainingDataTable, intentTrainingTable } from "@workspace/db";
 import { eq, and } from "drizzle-orm";
 import multer from "multer";
 import mammoth from "mammoth";
@@ -311,6 +311,87 @@ router.delete("/training", async (req, res) => {
     .where(eq(trainingDataTable.userId, userId))
     .returning({ id: trainingDataTable.id });
   res.json({ deleted: deleted.length, message: `Deleted ${deleted.length} training entries.` });
+});
+
+// ── Intent-Specific Training CRUD ──────────────────────────────────────────
+
+// GET all intent training configurations for the current user
+router.get("/intent-training", async (req, res) => {
+  const userId = req.userId!;
+  try {
+    const data = await db.select().from(intentTrainingTable)
+      .where(eq(intentTrainingTable.userId, userId))
+      .orderBy(intentTrainingTable.intent);
+    res.json(data);
+  } catch (err: any) {
+    res.status(500).json({ error: `Failed to fetch intent training: ${err.message}` });
+  }
+});
+
+// Create or update (upsert) an intent training configuration
+router.post("/intent-training", async (req, res) => {
+  const userId = req.userId!;
+  const { intent, trainingContent, maxTurns, autoTransfer, transferTo, crmAgentId } = req.body;
+
+  if (!intent || trainingContent === undefined) {
+    res.status(400).json({ error: "intent and trainingContent are required" });
+    return;
+  }
+
+  try {
+    const existing = await db.query.intentTrainingTable.findFirst({
+      where: and(
+        eq(intentTrainingTable.userId, userId),
+        eq(intentTrainingTable.intent, intent)
+      )
+    });
+
+    if (existing) {
+      const [updated] = await db.update(intentTrainingTable)
+        .set({
+          trainingContent,
+          maxTurns: maxTurns !== undefined ? parseInt(maxTurns, 10) : existing.maxTurns,
+          autoTransfer: autoTransfer !== undefined ? !!autoTransfer : existing.autoTransfer,
+          transferTo: transferTo !== undefined ? (transferTo || null) : existing.transferTo,
+          crmAgentId: crmAgentId !== undefined ? (crmAgentId || null) : existing.crmAgentId,
+          updatedAt: new Date(),
+        })
+        .where(eq(intentTrainingTable.id, existing.id))
+        .returning();
+      res.json(updated);
+    } else {
+      const [inserted] = await db.insert(intentTrainingTable)
+        .values({
+          userId,
+          intent,
+          trainingContent,
+          maxTurns: maxTurns !== undefined ? parseInt(maxTurns, 10) : 8,
+          autoTransfer: autoTransfer !== undefined ? !!autoTransfer : true,
+          transferTo: transferTo || null,
+          crmAgentId: crmAgentId || null,
+        })
+        .returning();
+      res.status(201).json(inserted);
+    }
+  } catch (err: any) {
+    res.status(500).json({ error: `Failed to save intent training: ${err.message}` });
+  }
+});
+
+// Delete an intent training configuration
+router.delete("/intent-training/:id", async (req, res) => {
+  const userId = req.userId!;
+  try {
+    await db.delete(intentTrainingTable).where(
+      and(
+        eq(intentTrainingTable.id, parseInt(req.params.id, 10)),
+        eq(intentTrainingTable.userId, userId)
+      )
+    );
+    res.status(204).send();
+  } catch (err: any) {
+    res.status(500).json({ error: `Failed to delete intent training: ${err.message}` });
+  }
 });
 
 export default router;

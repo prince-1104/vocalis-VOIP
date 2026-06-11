@@ -1,5 +1,5 @@
 import { Router, type IRouter } from "express";
-import { db, apiCostLogsTable, tenantLimitsTable, tenantsTable, platformSettingsTable, DEFAULT_API_RATES } from "@workspace/db";
+import { db, apiCostLogsTable, tenantLimitsTable, tenantsTable, callLogsTable, platformSettingsTable, DEFAULT_API_RATES } from "@workspace/db";
 import { eq, and, gte, sql, desc } from "drizzle-orm";
 import { getTenantCostSummary, getTenantMonthCost } from "../lib/cost-logger";
 
@@ -36,6 +36,18 @@ router.get("/superadmin/costs", async (_req, res) => {
 
   const costMap = new Map(costRows.map(r => [r.tenantId, r]));
 
+  // Aggregate actual call counts per tenant owner from call_logs (same source as Tenants page)
+  const callCountRows = await db.execute(sql`
+    SELECT t.id as tenant_id, count(cl.id) as call_count
+    FROM tenants t
+    LEFT JOIN call_logs cl ON cl.user_id = t.owner_id AND cl.started_at >= ${monthStart.toISOString()}
+    GROUP BY t.id
+  `);
+  const callCountData = (callCountRows as any).rows || callCountRows;
+  const callCountMap = new Map<number, number>(
+    (callCountData as any[]).map((r: any) => [r.tenant_id, parseInt(r.call_count ?? "0", 10)])
+  );
+
   // Fetch limits
   const limits = await db.select().from(tenantLimitsTable);
   const limitMap = new Map(limits.map(l => [l.tenantId, l]));
@@ -61,6 +73,7 @@ router.get("/superadmin/costs", async (_req, res) => {
       ttsCostUsd: parseFloat(cost?.ttsCost ?? "0"),
       sttCostUsd: parseFloat(cost?.sttCost ?? "0"),
       apiCalls: parseInt(cost?.apiCalls ?? "0", 10),
+      callCount: callCountMap.get(t.id) ?? 0,
       usagePercent,
       status,
       limitAlertSentAt: limit?.limitAlertSentAt ?? null,
@@ -273,6 +286,15 @@ router.get("/superadmin/costs/:tenantId", async (req, res) => {
 
   const grandTotal = llmTotal + ttsTotal + sttTotal;
 
+  // Actual call count from call_logs (consistent with Tenants page)
+  const [callCountRow] = tenant.ownerId
+    ? await db
+        .select({ count: sql<string>`count(*)` })
+        .from(callLogsTable)
+        .where(and(eq(callLogsTable.userId, tenant.ownerId), gte(callLogsTable.startedAt, monthStart)))
+    : [{ count: "0" }];
+  const actualCallCount = parseInt(callCountRow?.count ?? "0", 10);
+
   // 6-month trend
   const trend: Array<{ month: string; costUsd: number }> = [];
   for (let i = 5; i >= 0; i--) {
@@ -303,6 +325,7 @@ router.get("/superadmin/costs/:tenantId", async (req, res) => {
     breakdown: rows,
     subtotals: { llm: llmTotal, tts: ttsTotal, stt: sttTotal },
     grandTotal,
+    callCount: actualCallCount,
     monthlyLimitUsd: monthlyLimit,
     hardLimit: limit?.hardLimit ?? false,
     usagePercent,

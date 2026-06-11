@@ -19,6 +19,8 @@ import adminRouter from "./routes/admin";
 import adminCostsRouter from "./routes/admin-costs";
 import invoicesRouter, { checkAndMarkOverdueInvoices } from "./routes/invoices";
 import widgetRouter from "./routes/widget";
+import crmRouter, { crmAdminRouter } from "./routes/crm";
+import { startWebhookDispatcher } from "./lib/webhook-dispatcher";
 
 const app: Express = express();
 
@@ -49,6 +51,7 @@ app.use("/api", healthRouter);
 app.use("/api", authPublicRouter);
 app.use("/api", twilioRouter);
 app.use("/api", widgetRouter);
+app.use("/api", crmRouter);            // CRM routes use their own API-key auth
 
 app.use("/api", resolveUser);
 
@@ -64,6 +67,7 @@ app.use("/api", requireRole("admin"), trainingRouter);
 app.use("/api", requireRole("admin"), scriptsRouter);
 
 app.use("/api", requireRole("admin"), dialRouter);
+app.use("/api", requireRole("admin"), crmAdminRouter);  // CRM API key management
 
 app.use("/api", requireSuperadmin, adminRouter);
 app.use("/api", requireSuperadmin, adminCostsRouter);
@@ -99,5 +103,8 @@ async function runOverdueCheck() {
 
 runOverdueCheck();
 setInterval(runOverdueCheck, OVERDUE_CHECK_INTERVAL_MS);
+
+// Start CRM webhook event dispatcher
+startWebhookDispatcher();
 
 export default app;
