@@ -33,6 +33,10 @@ export const agentConfigsTable = pgTable("agent_configs", {
   widgetEnabled: boolean("widget_enabled").notNull().default(false),
   widgetApiKey: text("widget_api_key"),
   widgetCampaignId: integer("widget_campaign_id").references(() => campaignsTable.id, { onDelete: "set null" }),
+  widgetVoiceEnabled: boolean("widget_voice_enabled").notNull().default(false),
+
+  // Twilio TwiML App for browser-based voice (Client SDK)
+  twilioTwimlAppSid: text("twilio_twiml_app_sid"),
 
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),

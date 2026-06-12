@@ -63,7 +63,7 @@ router.put("/agents", async (req, res) => {
     phoneNumber, twilioAccountSid, twilioAuthToken,
     telephonyProvider, telephonyProviderName, telephonyApiKey, telephonyApiSecret, telephonyAppId,
     greeting, personality, maxCallDuration, voicemailMessage, businessHoursOnly, aiModel,
-    widgetEnabled, widgetCampaignId,
+    widgetEnabled, widgetCampaignId, widgetVoiceEnabled,
   } = req.body;
 
   const updateData: any = { updatedAt: new Date() };
@@ -80,6 +80,7 @@ router.put("/agents", async (req, res) => {
 
   if (widgetEnabled !== undefined) updateData.widgetEnabled = widgetEnabled;
   if (widgetCampaignId !== undefined) updateData.widgetCampaignId = widgetCampaignId === null ? null : Number(widgetCampaignId);
+  if (widgetVoiceEnabled !== undefined) updateData.widgetVoiceEnabled = widgetVoiceEnabled;
 
   if (req.isSuperadmin) {
     if (phoneNumber !== undefined) updateData.phoneNumber = phoneNumber;

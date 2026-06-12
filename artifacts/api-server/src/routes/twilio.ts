@@ -497,8 +497,9 @@ const SARVAM_TTS_ESTIMATED_CHARS_PER_TURN = 200;
 
 function computeCallCost(durationSeconds: number, direction: string, model: string, language?: string | null) {
   const minutes = Math.max(1, Math.ceil(durationSeconds / 60));
-  const twilioBaseRate = direction === "outbound" ? 0.013 : 0.022;
-  const twilioSpeechRate = 0.04;
+  // Widget-voice calls use Twilio Client SDK ($0.004/min) instead of PSTN
+  const twilioBaseRate = direction === "outbound" ? 0.013 : direction === "widget-voice" ? 0.004 : 0.022;
+  const twilioSpeechRate = direction === "widget-voice" ? 0 : 0.04;  // No speech recognition charge for Client SDK
   const twilioCost = minutes * (twilioBaseRate + twilioSpeechRate);
 
   const estimatedTurns = Math.max(1, Math.round(durationSeconds / 25));
@@ -1344,6 +1345,89 @@ router.post("/twilio/hold-music", (req, res) => {
   twiml.say(sayOptions, msg2);
   twiml.pause({ length: 8 });
   twiml.redirect({ method: "POST" }, `${getBaseUrl(req)}/api/twilio/hold-music?lang=${encodeURIComponent(queryLang)}`);
+
+  res.type("text/xml");
+  res.send(twiml.toString());
+});
+
+// ── Widget Voice: Browser-to-AI voice calls via Twilio Client SDK ──────
+// When a website visitor clicks the call button in the widget, the Twilio
+// Client JS SDK connects via WebRTC. Twilio hits this webhook to get the
+// initial TwiML. After that, the call flows through the existing /twilio/voice
+// turn loop — identical to regular phone calls.
+router.post("/twilio/widget-voice", async (req, res) => {
+  const twiml = new twilio.twiml.VoiceResponse();
+  const baseUrl = getBaseUrl(req);
+
+  // The Twilio Client SDK passes the TwiML Application SID in ApplicationSid.
+  // We also look for userId in the connect params (passed by the widget).
+  const applicationSid = req.body.ApplicationSid;
+  const callerIdentity = req.body.From || req.body.Caller || "widget-caller";
+
+  // Resolve the tenant: find the agent config with this TwiML App SID
+  let userId: number | null = null;
+  if (applicationSid) {
+    const agent = await db.query.agentConfigsTable.findFirst({
+      where: eq(agentConfigsTable.twilioTwimlAppSid as any, applicationSid),
+    });
+    if (agent) userId = agent.userId;
+  }
+
+  // Fallback: try userId from connect params
+  if (!userId) {
+    const paramUserId = req.body.userId || req.query.userId;
+    if (paramUserId) userId = parseInt(paramUserId as string, 10) || null;
+  }
+
+  if (!userId) {
+    twiml.say("We're sorry, this voice widget is not configured. Goodbye.");
+    twiml.hangup();
+    res.type("text/xml");
+    res.send(twiml.toString());
+    return;
+  }
+
+  const agentConfig = await db.query.agentConfigsTable.findFirst({
+    where: eq(agentConfigsTable.userId, userId),
+  });
+
+  const greeting = agentConfig?.greeting || "Hi, thank you for calling. How can I help you today?";
+  const voice = mapVoice(agentConfig?.voice);
+  const configuredLang = agentConfig?.language || "en-US";
+
+  // Create call log for this widget voice session
+  const [callLog] = await db.insert(callLogsTable).values({
+    userId,
+    direction: "widget-voice" as any,
+    phone: callerIdentity,
+    outcome: "answered",
+    aiModel: agentConfig?.aiModel || "gpt-4o-mini",
+    startedAt: new Date(),
+  }).returning();
+
+  // Set up <Gather> to collect the visitor's speech — identical to /twilio/inbound
+  const gather = twiml.gather({
+    input: ["speech"],
+    action: `${baseUrl}/api/twilio/voice?callLogId=${callLog.id}&history=`,
+    method: "POST",
+    speechTimeout: "auto",
+    timeout: 10,
+    language: getTwilioLang(configuredLang) as any,
+    actionOnEmptyResult: true,
+  });
+
+  // Play the greeting using the same TTS logic as inbound calls
+  const initialAudio = await renderPromptAudioForCall(greeting, configuredLang, agentConfig?.voice || "nova");
+  if (initialAudio.ttsAudioId) {
+    gather.play(`${baseUrl}/api/twilio/${initialAudio.useMp3 ? "tts-audio-mp3" : "tts-audio"}/${initialAudio.ttsAudioId}`);
+  } else {
+    gather.say({ voice: voice as any, language: getTwilioLang(configuredLang) as any }, greeting);
+  }
+
+  // Redirect if no speech detected
+  twiml.redirect({ method: "POST" }, `${baseUrl}/api/twilio/voice?callLogId=${callLog.id}&history=&silent=1`);
+
+  console.log(`[twilio/widget-voice] New widget call for user ${userId}, callLogId=${callLog.id}, caller=${callerIdentity}`);
 
   res.type("text/xml");
   res.send(twiml.toString());

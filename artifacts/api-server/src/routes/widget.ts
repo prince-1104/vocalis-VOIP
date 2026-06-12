@@ -1220,7 +1220,141 @@ router.get("/widget/config/:apiKey", async (req, res) => {
     greeting: agent.greeting || `Hi! I'm ${agent.agentName}. How can I help you today?`,
     language: agent.language || "en-US",
     personality: agent.personality,
+    voiceEnabled: !!(agent as any).widgetVoiceEnabled,
   });
+});
+
+// ── Twilio Client SDK: Voice Widget ─────────────────────────────────────
+// Enables browser-based voice calling through the web widget using Twilio's
+// Client JS SDK (WebRTC). The flow:
+//   1. Widget calls /api/widget/voice-token → gets Access Token
+//   2. Widget creates Twilio.Device, calls connect()
+//   3. Twilio hits /api/twilio/widget-voice (TwiML webhook)
+//   4. AI pipeline runs the same /api/twilio/voice loop as phone calls
+
+import twilio from "twilio";
+
+// Auto-provision a TwiML Application for the tenant's Twilio account.
+// This is required for Twilio Client SDK to route incoming connections.
+async function ensureTwimlApp(
+  agent: any,
+  baseUrl: string,
+): Promise<string | null> {
+  // Already provisioned
+  if ((agent as any).twilioTwimlAppSid) {
+    return (agent as any).twilioTwimlAppSid;
+  }
+
+  if (!agent.twilioAccountSid || !agent.twilioAuthToken) return null;
+
+  try {
+    const client = twilio(agent.twilioAccountSid, agent.twilioAuthToken);
+
+    // Check if a Dialog TwiML app already exists (prevents duplicates on re-enable)
+    const existingApps = await client.applications.list({ friendlyName: "Dialog Voice Widget", limit: 1 });
+    let appSid: string;
+
+    if (existingApps.length > 0) {
+      appSid = existingApps[0].sid;
+      // Update the voice URL in case the server URL changed
+      await client.applications(appSid).update({
+        voiceUrl: `${baseUrl}/api/twilio/widget-voice`,
+        voiceMethod: "POST",
+      });
+    } else {
+      const app = await client.applications.create({
+        friendlyName: "Dialog Voice Widget",
+        voiceUrl: `${baseUrl}/api/twilio/widget-voice`,
+        voiceMethod: "POST",
+      });
+      appSid = app.sid;
+    }
+
+    // Persist to DB
+    await db.update(agentConfigsTable)
+      .set({ twilioTwimlAppSid: appSid, updatedAt: new Date() } as any)
+      .where(eq(agentConfigsTable.userId, agent.userId));
+
+    // Invalidate cache
+    agentConfigCache.delete(agent.widgetApiKey);
+
+    console.log(`[widget/voice] Auto-provisioned TwiML App ${appSid} for user ${agent.userId}`);
+    return appSid;
+  } catch (err) {
+    console.error("[widget/voice] Failed to provision TwiML App:", err);
+    return null;
+  }
+}
+
+// Generate a Twilio Access Token for the browser-based voice widget
+router.post("/widget/voice-token", async (req, res) => {
+  const { apiKey } = req.body;
+
+  if (!apiKey) {
+    res.status(400).json({ error: "apiKey is required" });
+    return;
+  }
+
+  const agent = await getAgentByWidgetKey(apiKey);
+  if (!agent) {
+    res.status(404).json({ error: "Widget not found or disabled" });
+    return;
+  }
+
+  if (!(agent as any).widgetVoiceEnabled) {
+    res.status(403).json({ error: "Voice calling is not enabled for this widget" });
+    return;
+  }
+
+  if (!agent.twilioAccountSid || !agent.twilioAuthToken) {
+    res.status(400).json({ error: "Twilio credentials not configured" });
+    return;
+  }
+
+  // Determine the base URL for the TwiML webhook
+  const host = req.headers.host || "localhost";
+  const protocol = req.headers["x-forwarded-proto"] || req.protocol || "https";
+  const baseUrl = `${protocol}://${host}`;
+
+  // Ensure TwiML App exists (auto-create if needed)
+  const twimlAppSid = await ensureTwimlApp(agent, baseUrl);
+  if (!twimlAppSid) {
+    res.status(500).json({ error: "Could not provision TwiML Application. Check Twilio credentials." });
+    return;
+  }
+
+  try {
+    const identity = `widget_${randomUUID().slice(0, 8)}`;
+    const { AccessToken } = twilio.jwt;
+    const { VoiceGrant } = AccessToken;
+
+    const token = new AccessToken(
+      agent.twilioAccountSid,
+      // For Twilio Client SDK, we need an API Key + Secret rather than the
+      // master Auth Token. However Twilio allows using the Account SID as
+      // the API Key SID and Auth Token as the secret for development.
+      // In production, tenants should create a proper API Key in Twilio Console.
+      agent.twilioAccountSid,
+      agent.twilioAuthToken,
+      { identity, ttl: 3600 },
+    );
+
+    const voiceGrant = new VoiceGrant({
+      outgoingApplicationSid: twimlAppSid,
+      incomingAllow: false, // Widget only makes outbound calls to the AI
+    });
+    token.addGrant(voiceGrant);
+
+    console.log(`[widget/voice] Token issued for user ${agent.userId}, identity=${identity}`);
+
+    res.json({
+      token: token.toJwt(),
+      identity,
+    });
+  } catch (err: any) {
+    console.error("[widget/voice] Token generation failed:", err);
+    res.status(500).json({ error: `Token generation failed: ${err.message}` });
+  }
 });
 
 // ── Video-link suggestion ────────────────────────────────────────────────
@@ -1918,6 +2052,28 @@ router.get("/widget/loader.js", async (req, res) => {
     "#_dw-listen-bar button{border:none;background:none;color:#fca5a5;cursor:pointer;font-size:11px;padding:2px 6px;border-radius:4px;}",
     "#_dw-listen-bar button:hover{background:rgba(239,68,68,.2);}",
     "#_dw-brand{font-size:10px;color:rgba(255,255,255,.3);text-align:center;padding:4px 0 8px;letter-spacing:.5px;}",
+    "#_dw-call-btn{border:none;background:rgba(255,255,255,.15);border-radius:8px;width:30px;height:30px;cursor:pointer;display:none;align-items:center;justify-content:center;flex-shrink:0;transition:all .2s;}",
+    "#_dw-call-btn:hover{background:rgba(74,222,128,.3);}",
+    "#_dw-call-btn svg{width:16px;height:16px;fill:white;}",
+    "#_dw-call-btn.active{background:rgba(239,68,68,.4);}",
+    "#_dw-call-btn.active:hover{background:rgba(239,68,68,.6);}",
+    "#_dw-voice-overlay{display:none;flex-direction:column;align-items:center;justify-content:center;gap:16px;padding:32px 16px;flex:1;min-height:280px;}",
+    "#_dw-voice-overlay.active{display:flex;}",
+    ".dw-call-orb{width:100px;height:100px;border-radius:50%;background:linear-gradient(135deg,#7c3aed,#4f46e5);display:flex;align-items:center;justify-content:center;animation:_dw-call-pulse 2s ease-in-out infinite;position:relative;}",
+    ".dw-call-orb::after{content:'';position:absolute;inset:-6px;border-radius:50%;border:2px solid rgba(124,58,237,.3);animation:_dw-call-ring 2s ease-in-out infinite;}",
+    "@keyframes _dw-call-pulse{0%,100%{box-shadow:0 0 20px rgba(124,58,237,.4);}50%{box-shadow:0 0 40px rgba(124,58,237,.7);}}",
+    "@keyframes _dw-call-ring{0%,100%{transform:scale(1);opacity:.5;}50%{transform:scale(1.15);opacity:0;}}",
+    ".dw-call-orb svg{width:40px;height:40px;fill:white;}",
+    "#_dw-call-timer{font-size:28px;font-weight:700;color:#fff;letter-spacing:2px;font-variant-numeric:tabular-nums;}",
+    "#_dw-call-status{font-size:13px;color:rgba(255,255,255,.6);}",
+    ".dw-call-controls{display:flex;gap:16px;margin-top:8px;}",
+    ".dw-call-ctrl{width:50px;height:50px;border-radius:50%;border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .2s;}",
+    ".dw-call-ctrl svg{width:22px;height:22px;fill:white;}",
+    ".dw-call-ctrl.mute{background:rgba(255,255,255,.12);}",
+    ".dw-call-ctrl.mute:hover{background:rgba(255,255,255,.2);}",
+    ".dw-call-ctrl.mute.muted{background:rgba(239,68,68,.4);}",
+    ".dw-call-ctrl.hangup{background:#ef4444;}",
+    ".dw-call-ctrl.hangup:hover{background:#dc2626;transform:scale(1.05);}",
   ].join("");
   document.head.appendChild(style);
 
@@ -1926,11 +2082,21 @@ router.get("/widget/loader.js", async (req, res) => {
 
   var box = el("div", {id:"_dw-box"});
   var head = el("div", {id:"_dw-head"});
-  head.innerHTML = '<div class="dot"></div><span id="_dw-aname">Connecting\u2026</span><span id="_dw-mode">Voice</span>';
+  head.innerHTML = '<div class="dot"></div><span id="_dw-aname">Connecting\u2026</span><button id="_dw-call-btn" title="Voice Call"><svg viewBox="0 0 24 24"><path d="M6.62 10.79a15.05 15.05 0 006.59 6.59l2.2-2.2a1 1 0 011-.27 11.36 11.36 0 003.55.57 1 1 0 011 1V20a1 1 0 01-1 1A17 17 0 013 4a1 1 0 011-1h3.5a1 1 0 011 1 11.36 11.36 0 00.57 3.55 1 1 0 01-.27 1z"/></svg></button><span id="_dw-mode">Voice</span>';
   var msgs = el("div", {id:"_dw-msgs"});
 
   var listenBar = el("div", {id:"_dw-listen-bar"});
   listenBar.innerHTML = '<span>\uD83C\uDFA4 Listening\u2026 speak now</span><button id="_dw-cancel-listen">Cancel</button>';
+
+  // Voice call overlay
+  var voiceOverlay = el("div", {id:"_dw-voice-overlay"});
+  voiceOverlay.innerHTML = '<div class="dw-call-orb"><svg viewBox="0 0 24 24"><path d="M6.62 10.79a15.05 15.05 0 006.59 6.59l2.2-2.2a1 1 0 011-.27 11.36 11.36 0 003.55.57 1 1 0 011 1V20a1 1 0 01-1 1A17 17 0 013 4a1 1 0 011-1h3.5a1 1 0 011 1 11.36 11.36 0 00.57 3.55 1 1 0 01-.27 1z"/></svg></div>' +
+    '<div id="_dw-call-timer">00:00</div>' +
+    '<div id="_dw-call-status">Connecting...</div>' +
+    '<div class="dw-call-controls">' +
+    '<button class="dw-call-ctrl mute" id="_dw-mute-btn" title="Mute"><svg viewBox="0 0 24 24"><path d="M12 1a4 4 0 014 4v6a4 4 0 01-8 0V5a4 4 0 014-4zm-2 17.93V21h-2a1 1 0 000 2h8a1 1 0 000-2h-2v-2.07A8.001 8.001 0 0020 11a1 1 0 00-2 0 6 6 0 01-12 0 1 1 0 00-2 0 8.001 8.001 0 006 7.93z"/></svg></button>' +
+    '<button class="dw-call-ctrl hangup" id="_dw-hangup-btn" title="End Call"><svg viewBox="0 0 24 24"><path d="M12 9c-1.6 0-3.15.25-4.6.72v3.1c0 .39-.23.74-.56.9-.98.49-1.87 1.12-2.66 1.85-.18.18-.43.28-.7.28-.28 0-.53-.11-.71-.29L.29 13.08a.956.956 0 01-.29-.7c0-.28.11-.53.29-.71C3.34 8.78 7.46 7 12 7s8.66 1.78 11.71 4.67c.18.18.29.43.29.71 0 .28-.11.53-.29.71l-2.48 2.48c-.18.18-.43.29-.71.29-.27 0-.52-.1-.7-.28a11.27 11.27 0 00-2.67-1.85.996.996 0 01-.56-.9v-3.1C15.15 9.25 13.6 9 12 9z"/></svg></button>' +
+    '</div>';
 
   var form = el("form", {id:"_dw-form"});
   var input = el("input", {id:"_dw-input", type:"text", placeholder:"Type or speak\u2026", autocomplete:"off"});
@@ -1949,11 +2115,127 @@ router.get("/widget/loader.js", async (req, res) => {
   var brand = el("div", {id:"_dw-brand"}, "Powered by Dialog by NMC");
   box.appendChild(head);
   box.appendChild(msgs);
+  box.appendChild(voiceOverlay);
   box.appendChild(listenBar);
   box.appendChild(form);
   box.appendChild(brand);
   document.body.appendChild(fab);
   document.body.appendChild(box);
+
+  // ── Twilio Client SDK Voice Calling ──────────────────────────────────
+  var twilioDevice = null;
+  var twilioConnection = null;
+  var callActive = false;
+  var callMuted = false;
+  var callStartTime = null;
+  var callTimerInterval = null;
+  var voiceEnabled = false;
+
+  function formatCallTime(ms) {
+    var secs = Math.floor(ms / 1000);
+    var m = Math.floor(secs / 60).toString();
+    var s = (secs % 60).toString();
+    return (m.length < 2 ? '0' + m : m) + ':' + (s.length < 2 ? '0' + s : s);
+  }
+
+  function updateCallTimer() {
+    if (!callStartTime) return;
+    var el = document.getElementById('_dw-call-timer');
+    if (el) el.textContent = formatCallTime(Date.now() - callStartTime);
+  }
+
+  function setCallStatus(text) {
+    var el = document.getElementById('_dw-call-status');
+    if (el) el.textContent = text;
+  }
+
+  function showVoiceOverlay(show) {
+    voiceOverlay.classList.toggle('active', show);
+    msgs.style.display = show ? 'none' : '';
+    form.style.display = show ? 'none' : '';
+    listenBar.style.display = show ? 'none' : '';
+    var callBtn = document.getElementById('_dw-call-btn');
+    if (callBtn) callBtn.classList.toggle('active', show);
+  }
+
+  function endTwilioCall() {
+    if (twilioConnection) {
+      try { twilioConnection.disconnect(); } catch(e) {}
+      twilioConnection = null;
+    }
+    callActive = false;
+    callMuted = false;
+    if (callTimerInterval) { clearInterval(callTimerInterval); callTimerInterval = null; }
+    showVoiceOverlay(false);
+    var muteBtn = document.getElementById('_dw-mute-btn');
+    if (muteBtn) muteBtn.classList.remove('muted');
+  }
+
+  function loadTwilioSDK() {
+    return new Promise(function(resolve, reject) {
+      if (window.Twilio && window.Twilio.Device) { resolve(); return; }
+      var s = document.createElement('script');
+      s.src = 'https://sdk.twilio.com/js/client/v1.14/twilio.min.js';
+      s.onload = function() { resolve(); };
+      s.onerror = function() { reject(new Error('Failed to load Twilio SDK')); };
+      document.head.appendChild(s);
+    });
+  }
+
+  function startTwilioCall() {
+    if (callActive) { endTwilioCall(); return; }
+    setCallStatus('Loading...');
+    showVoiceOverlay(true);
+    var timerEl = document.getElementById('_dw-call-timer');
+    if (timerEl) timerEl.textContent = '00:00';
+
+    loadTwilioSDK().then(function() {
+      setCallStatus('Getting token...');
+      return fetch(BASE_URL + '/api/widget/voice-token', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ apiKey: API_KEY })
+      });
+    }).then(function(r) {
+      if (!r.ok) throw new Error('Token request failed');
+      return r.json();
+    }).then(function(data) {
+      setCallStatus('Connecting...');
+      twilioDevice = new window.Twilio.Device(data.token, { debug: false });
+
+      twilioDevice.on('ready', function() {
+        twilioConnection = twilioDevice.connect();
+
+        twilioConnection.on('accept', function() {
+          callActive = true;
+          callStartTime = Date.now();
+          callTimerInterval = setInterval(updateCallTimer, 1000);
+          setCallStatus('Connected — speak now');
+        });
+
+        twilioConnection.on('disconnect', function() {
+          setCallStatus('Call ended');
+          endTwilioCall();
+        });
+
+        twilioConnection.on('error', function(err) {
+          console.error('[widget/voice] Connection error:', err);
+          setCallStatus('Call error');
+          setTimeout(endTwilioCall, 2000);
+        });
+      });
+
+      twilioDevice.on('error', function(err) {
+        console.error('[widget/voice] Device error:', err);
+        setCallStatus('Connection failed');
+        setTimeout(endTwilioCall, 2000);
+      });
+    }).catch(function(err) {
+      console.error('[widget/voice] Setup error:', err);
+      setCallStatus('Failed: ' + err.message);
+      setTimeout(endTwilioCall, 3000);
+    });
+  }
 
   function escapeHtml(s) {
     return String(s)
@@ -2301,7 +2583,13 @@ router.get("/widget/loader.js", async (req, res) => {
       agentLang = cfg.language || "en-US";
       configuredLang = agentLang;
       sessionLang = agentLang === "auto" ? "en-IN" : agentLang;
+      voiceEnabled = !!cfg.voiceEnabled;
       if (nameEl) nameEl.textContent = agentName;
+      // Show the voice call button if voice calling is enabled
+      var callBtnEl = document.getElementById('_dw-call-btn');
+      if (callBtnEl && voiceEnabled) {
+        callBtnEl.style.display = 'flex';
+      }
       var modeBadge = document.getElementById("_dw-mode");
       if (modeBadge && agentLang === "auto") {
         modeBadge.textContent = "Auto";
@@ -2368,6 +2656,33 @@ router.get("/widget/loader.js", async (req, res) => {
   if (mic) {
     mic.addEventListener("click", function(){
       startListening();
+    });
+  }
+
+  // Voice call button in header
+  var callBtn = document.getElementById('_dw-call-btn');
+  if (callBtn) {
+    callBtn.addEventListener('click', function() {
+      startTwilioCall();
+    });
+  }
+
+  // Mute button
+  var muteBtn = document.getElementById('_dw-mute-btn');
+  if (muteBtn) {
+    muteBtn.addEventListener('click', function() {
+      if (!twilioConnection) return;
+      callMuted = !callMuted;
+      twilioConnection.mute(callMuted);
+      muteBtn.classList.toggle('muted', callMuted);
+    });
+  }
+
+  // Hangup button
+  var hangupBtn = document.getElementById('_dw-hangup-btn');
+  if (hangupBtn) {
+    hangupBtn.addEventListener('click', function() {
+      endTwilioCall();
     });
   }
 

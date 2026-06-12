@@ -8,7 +8,7 @@ import { getStoredToken } from "@/hooks/use-auth";
 import {
   Globe, Copy, CheckCircle2, RefreshCw, ToggleLeft, ToggleRight,
   Code2, Megaphone, Activity, Info, ExternalLink, Zap,
-  Send, MessageSquare, Bot, Loader2, Trash2
+  Send, MessageSquare, Bot, Loader2, Trash2, Phone
 } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { getGetAgentQueryKey } from "@workspace/api-client-react";
@@ -257,6 +257,9 @@ export default function WidgetSettings() {
   const widgetApiKey: string = agentAny?.widgetApiKey || "";
   const widgetEnabled: boolean = agentAny?.widgetEnabled ?? false;
   const widgetCampaignId: number | null = agentAny?.widgetCampaignId ?? null;
+  const widgetVoiceEnabled: boolean = agentAny?.widgetVoiceEnabled ?? false;
+  const twilioTwimlAppSid: string | null = agentAny?.twilioTwimlAppSid ?? null;
+  const hasTwilioCreds = !!(agentAny?.twilioAccountSid && agentAny?.twilioAuthToken);
 
   const [campaignId, setCampaignId] = useState<string>("");
   const [generatingKey, setGeneratingKey] = useState(false);
@@ -287,6 +290,23 @@ export default function WidgetSettings() {
       toast({ title: "Campaign assignment saved" });
     } catch {
       toast({ title: "Failed to save campaign assignment", variant: "destructive" });
+    }
+  }
+
+  async function toggleVoice() {
+    if (!widgetVoiceEnabled && !hasTwilioCreds) {
+      toast({
+        title: "Twilio credentials required",
+        description: "Configure your Twilio Account SID and Auth Token in Agent Settings first.",
+        variant: "destructive",
+      });
+      return;
+    }
+    try {
+      await updateAgent.mutateAsync({ widgetVoiceEnabled: !widgetVoiceEnabled } as any);
+      toast({ title: `Voice calling ${!widgetVoiceEnabled ? "enabled" : "disabled"}` });
+    } catch {
+      toast({ title: "Failed to update voice calling", variant: "destructive" });
     }
   }
 
@@ -344,6 +364,47 @@ export default function WidgetSettings() {
                 <div className="mt-3 flex items-center gap-2 bg-green-500/10 border border-green-500/20 rounded-lg p-2.5">
                   <div className="w-2 h-2 rounded-full bg-green-400 animate-pulse shrink-0" />
                   <p className="text-xs text-green-300">Active — visitors can start conversations from your website.</p>
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card className="glass-panel border-white/5">
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <Phone className="w-5 h-5 text-primary" /> Voice Calling
+                </CardTitle>
+                <CardDescription>Allow visitors to call your AI agent directly from the widget using their browser's microphone.</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <div className="flex items-center justify-between bg-white/5 border border-white/10 rounded-xl p-4">
+                  <div className="space-y-1">
+                    <p className="font-medium text-foreground">{widgetVoiceEnabled ? "Voice calls enabled" : "Voice calls disabled"}</p>
+                    <p className="text-sm text-muted-foreground">Browser-based calling via Twilio Client SDK (WebRTC).</p>
+                  </div>
+                  <button onClick={toggleVoice} disabled={updateAgent.isPending} className="shrink-0 disabled:opacity-50 hover:opacity-80 transition-opacity">
+                    {widgetVoiceEnabled
+                      ? <ToggleRight className="w-12 h-12 text-primary" />
+                      : <ToggleLeft className="w-12 h-12 text-muted-foreground" />}
+                  </button>
+                </div>
+                {widgetVoiceEnabled && (
+                  <div className="flex items-start gap-2 bg-green-500/10 border border-green-500/20 rounded-lg p-2.5">
+                    <CheckCircle2 className="w-4 h-4 text-green-400 mt-0.5 shrink-0" />
+                    <div className="text-xs text-green-300 space-y-1">
+                      <p>Voice calling is active. A 📞 button appears in the widget header.</p>
+                      {twilioTwimlAppSid && <p className="opacity-60">TwiML App: {twilioTwimlAppSid}</p>}
+                    </div>
+                  </div>
+                )}
+                {!hasTwilioCreds && !widgetVoiceEnabled && (
+                  <div className="flex items-start gap-2 bg-amber-500/10 border border-amber-500/20 rounded-lg p-2.5">
+                    <Info className="w-4 h-4 text-amber-400 mt-0.5 shrink-0" />
+                    <p className="text-xs text-amber-300">Requires Twilio credentials. Configure them in Agent Settings → Telephony.</p>
+                  </div>
+                )}
+                <div className="flex items-start gap-2 bg-white/5 border border-white/10 rounded-lg p-2.5">
+                  <Info className="w-4 h-4 text-muted-foreground mt-0.5 shrink-0" />
+                  <p className="text-xs text-muted-foreground">Voice calls cost ~$0.004/min (Twilio Client) + LLM + TTS. Cheaper than inbound phone calls.</p>
                 </div>
               </CardContent>
             </Card>
