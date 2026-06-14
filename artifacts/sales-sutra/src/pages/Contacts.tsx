@@ -43,9 +43,13 @@ export default function Contacts() {
   const handleDial = async (contactId: number, phone: string) => {
     setDialingId(contactId);
     try {
+      const token = localStorage.getItem("ss_auth_token");
       const response = await fetch(`/api/contacts/${contactId}/dial`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { 
+          "Content-Type": "application/json",
+          ...(token ? { "Authorization": `Bearer ${token}` } : {})
+        },
         body: JSON.stringify({}),
       });
       const result = await response.json();

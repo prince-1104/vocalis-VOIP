@@ -93,9 +93,13 @@ export default function Campaigns() {
   const handleDialNext = async (campaignId: number) => {
     setDialingCampaignId(campaignId);
     try {
+      const token = localStorage.getItem("ss_auth_token");
       const response = await fetch(`/api/campaigns/${campaignId}/dial-next`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { 
+          "Content-Type": "application/json",
+          ...(token ? { "Authorization": `Bearer ${token}` } : {})
+        },
         body: JSON.stringify({}),
       });
       const result = await response.json();
