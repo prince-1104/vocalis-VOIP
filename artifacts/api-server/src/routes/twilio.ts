@@ -918,7 +918,7 @@ router.post("/twilio/voice", async (req, res) => {
             });
 
             const conferenceName = `auto-transfer-${numId}-${Date.now()}`;
-            twiml.say("Let me connect you with a specialist who can help you further.");
+            twiml.say("Please wait, your call is being transferred to our specialist. Please stay on the line.");
             const dial = twiml.dial();
             dial.conference(
               {

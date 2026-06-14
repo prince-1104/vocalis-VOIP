@@ -81,7 +81,7 @@ export async function executeTransfer(
     // This modifies the in-progress call to put the caller into a conference room
     await client.calls(request.callSid).update({
       twiml: `<Response>
-        <Say>Please hold while I connect you with a specialist.</Say>
+        <Say>Please wait, your call is being transferred to our specialist. Please stay on the line.</Say>
         <Dial>
           <Conference statusCallback="${baseUrl}/api/crm/conference-status?callId=${request.callId}"
                       statusCallbackEvent="join leave end"
