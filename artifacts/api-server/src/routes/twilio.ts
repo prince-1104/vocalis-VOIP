@@ -1,7 +1,7 @@
 import { Router, type IRouter } from "express";
 import twilio from "twilio";
 import { db, agentConfigsTable, callLogsTable, trainingDataTable, callingScriptsTable, tenantsTable, intentTrainingTable, campaignsTable } from "@workspace/db";
-import { eq, and } from "drizzle-orm";
+import { eq, and, desc } from "drizzle-orm";
 import { openai } from "@workspace/integrations-openai-ai-server";
 import { randomUUID } from "crypto";
 import { crmEventBus } from "../lib/crm-event-bus";
@@ -63,6 +63,22 @@ export function invalidateSystemPromptCache(userId: number): void {
 // Invalidate agent config cache when agent settings change
 export function invalidateAgentConfigCache(userId: number): void {
   agentConfigCache.delete(userId);
+}
+
+// Dynamically resolves the active calling script for a user with hierarchical fallback:
+// 1. Specified scriptId (if valid)
+// 2. Explicit default script (isDefault = true)
+// 3. Most recently updated script
+async function resolveActiveScript(userId: number, scriptId?: number | null): Promise<any> {
+  if (scriptId) {
+    const s = await db.select().from(callingScriptsTable).where(and(eq(callingScriptsTable.userId, userId), eq(callingScriptsTable.id, scriptId))).limit(1);
+    if (s.length > 0) return s[0];
+  }
+  const defaults = await db.select().from(callingScriptsTable).where(and(eq(callingScriptsTable.userId, userId), eq(callingScriptsTable.isDefault, true))).limit(1);
+  if (defaults.length > 0) return defaults[0];
+  const all = await db.select().from(callingScriptsTable).where(eq(callingScriptsTable.userId, userId)).orderBy(desc(callingScriptsTable.updatedAt)).limit(1);
+  if (all.length > 0) return all[0];
+  return null;
 }
 
 async function getCallMeta(callLogId: string): Promise<CallMeta | null> {
@@ -166,16 +182,9 @@ function buildScriptInstruction(language?: string | null): string {
 }
 
 async function buildSystemPrompt(userId: number, agentConfig: any, scriptId?: number | null): Promise<string> {
-  let scriptQuery;
-  if (scriptId) {
-    scriptQuery = db.select().from(callingScriptsTable).where(and(eq(callingScriptsTable.userId, userId), eq(callingScriptsTable.id, scriptId))).limit(1);
-  } else {
-    scriptQuery = db.select().from(callingScriptsTable).where(and(eq(callingScriptsTable.userId, userId), eq(callingScriptsTable.isDefault, true))).limit(1);
-  }
-
-  const [trainingData, scripts] = await Promise.all([
+  const [trainingData, script] = await Promise.all([
     db.select().from(trainingDataTable).where(eq(trainingDataTable.userId, userId)).limit(KB_MAX_ENTRIES),
-    scriptQuery,
+    resolveActiveScript(userId, scriptId),
   ]);
 
   let system = `You are ${agentConfig.agentName || "SalesBot"}, an AI sales representative`;
@@ -204,8 +213,7 @@ async function buildSystemPrompt(userId: number, agentConfig: any, scriptId?: nu
     system += "\n";
   }
 
-  if (scripts.length > 0) {
-    const script = scripts[0];
+  if (script) {
     system += `CALL SCRIPT FLOW:\n`;
     system += `1. Start with the Opening line: "${script.openingLine}" (already spoken as greeting).\n`;
     if (script.pitchPoints && Array.isArray(script.pitchPoints) && (script.pitchPoints as string[]).length > 0) {
@@ -729,8 +737,7 @@ router.post("/twilio/inbound", async (req, res) => {
 
   const agentConfig = await getCachedAgentConfig(userId);
 
-  const scripts = await db.select().from(callingScriptsTable).where(and(eq(callingScriptsTable.userId, userId), eq(callingScriptsTable.isDefault, true))).limit(1);
-  const script = scripts.length > 0 ? scripts[0] : null;
+  const script = await resolveActiveScript(userId);
 
   const greeting = script?.openingLine || agentConfig?.greeting || "Hi, thank you for calling. How can I help you today?";
   const baseUrl = getBaseUrl(req);
@@ -1317,17 +1324,7 @@ router.post("/twilio/outbound-voice", async (req, res) => {
   const lang = agentConfig?.language || "en-US";
 
   const callMeta = await getCallMeta(callLogId);
-  const scriptId = callMeta?.scriptId;
-
-  let script = null;
-  if (scriptId) {
-    const s = await db.select().from(callingScriptsTable).where(and(eq(callingScriptsTable.userId, userId), eq(callingScriptsTable.id, scriptId))).limit(1);
-    if (s.length > 0) script = s[0];
-  }
-  if (!script) {
-    const s = await db.select().from(callingScriptsTable).where(and(eq(callingScriptsTable.userId, userId), eq(callingScriptsTable.isDefault, true))).limit(1);
-    if (s.length > 0) script = s[0];
-  }
+  const script = await resolveActiveScript(userId, callMeta?.scriptId);
 
   // Pre-warm system prompt cache while TTS is being generated
   getCachedSystemPrompt(userId, { ...(agentConfig || {}), language: lang }, script?.id || null).catch(() => {});
@@ -1547,15 +1544,7 @@ router.post("/twilio/widget-voice", async (req, res) => {
     }
   }
 
-  let script = null;
-  if (scriptId) {
-    const s = await db.select().from(callingScriptsTable).where(and(eq(callingScriptsTable.userId, userId), eq(callingScriptsTable.id, scriptId))).limit(1);
-    if (s.length > 0) script = s[0];
-  }
-  if (!script) {
-    const s = await db.select().from(callingScriptsTable).where(and(eq(callingScriptsTable.userId, userId), eq(callingScriptsTable.isDefault, true))).limit(1);
-    if (s.length > 0) script = s[0];
-  }
+  const script = await resolveActiveScript(userId, scriptId);
 
   const greeting = script?.openingLine || agentConfig?.greeting || "Hi, thank you for calling. How can I help you today?";
   const voice = mapVoice(agentConfig?.voice);
