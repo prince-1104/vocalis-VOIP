@@ -2,6 +2,7 @@ import { Router, type IRouter } from "express";
 import { db, agentConfigsTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
 import { randomUUID } from "crypto";
+import { invalidateSystemPromptCache, invalidateAgentConfigCache } from "./twilio";
 
 const router: IRouter = Router();
 
@@ -103,6 +104,10 @@ router.put("/agents", async (req, res) => {
     .returning();
 
   if (!config) { res.status(404).json({ error: "Agent config not found" }); return; }
+
+  // Invalidate caches so the next voice call picks up the new agent settings
+  invalidateAgentConfigCache(userId);
+  invalidateSystemPromptCache(userId);
 
   res.json(maskConfig(config, req.isSuperadmin!));
 });

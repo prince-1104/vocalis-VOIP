@@ -3,6 +3,7 @@ import { db, trainingDataTable, intentTrainingTable } from "@workspace/db";
 import { eq, and } from "drizzle-orm";
 import multer from "multer";
 import mammoth from "mammoth";
+import { invalidateSystemPromptCache } from "./twilio";
 
 const router: IRouter = Router();
 
@@ -212,6 +213,8 @@ router.post("/training", async (req, res) => {
     return;
   }
   const [item] = await db.insert(trainingDataTable).values({ userId, type, title, content }).returning();
+  // Invalidate system prompt cache so next call uses fresh training data
+  invalidateSystemPromptCache(userId);
   res.status(201).json(item);
 });
 
@@ -248,6 +251,7 @@ router.post("/training/upload", upload.single("file"), async (req, res) => {
           items: insertedRows.map(r => r[0]),
           message: `Created ${insertedRows.length} knowledge base ${insertedRows.length === 1 ? "entry" : "entries"} from structured JSON "${file.originalname}".`,
         });
+        invalidateSystemPromptCache(userId);
         return;
       }
     } catch (err: any) {
@@ -293,6 +297,7 @@ router.post("/training/upload", upload.single("file"), async (req, res) => {
     items: inserted.map(r => r[0]),
     message: `Created ${inserted.length} knowledge base ${inserted.length === 1 ? "entry" : "entries"} from "${file.originalname}".`,
   });
+  invalidateSystemPromptCache(userId);
 });
 
 // Delete a single training entry
@@ -301,6 +306,7 @@ router.delete("/training/:id", async (req, res) => {
   await db.delete(trainingDataTable).where(
     and(eq(trainingDataTable.id, parseInt(req.params.id)), eq(trainingDataTable.userId, userId))
   );
+  invalidateSystemPromptCache(userId);
   res.status(204).send();
 });
 
@@ -310,6 +316,7 @@ router.delete("/training", async (req, res) => {
   const deleted = await db.delete(trainingDataTable)
     .where(eq(trainingDataTable.userId, userId))
     .returning({ id: trainingDataTable.id });
+  invalidateSystemPromptCache(userId);
   res.json({ deleted: deleted.length, message: `Deleted ${deleted.length} training entries.` });
 });
 

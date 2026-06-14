@@ -119,6 +119,7 @@ router.post("/crm/calls", requireScope("calls:write"), async (req, res) => {
       type: "call.ringing",
       callId: callLog.id,
       callSid: call.sid,
+      userId,
       data: { phone, campaignId },
       metadata,
       timestamp: new Date().toISOString(),
@@ -777,7 +778,7 @@ crmAdminRouter.get("/crm-admin/api-keys", async (req, res) => {
   res.json({ apiKeys: keys });
 });
 
-// DELETE /api/crm-admin/api-keys/:id — Deactivate an API key
+// DELETE /api/crm-admin/api-keys/:id — Permanently delete an API key
 crmAdminRouter.delete("/crm-admin/api-keys/:id", async (req, res) => {
   const userId = req.userId!;
   const keyId = parseInt(req.params.id);
@@ -796,11 +797,10 @@ crmAdminRouter.delete("/crm-admin/api-keys/:id", async (req, res) => {
     return;
   }
 
-  await db.update(crmApiKeysTable)
-    .set({ isActive: false, updatedAt: new Date() })
-    .where(eq(crmApiKeysTable.id, keyId));
+  await db.delete(crmApiKeysTable)
+    .where(and(eq(crmApiKeysTable.id, keyId), eq(crmApiKeysTable.userId, userId)));
 
-  res.json({ success: true, message: `API key ${key.keyPrefix}... deactivated` });
+  res.json({ success: true, message: `API key ${key.keyPrefix}... deleted` });
 });
 
 // ── CRM Agents (JWT-auth for Dialer UI) ──

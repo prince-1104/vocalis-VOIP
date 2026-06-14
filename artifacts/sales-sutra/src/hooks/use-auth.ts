@@ -7,6 +7,7 @@ export interface CurrentUser {
   id?: number;
   email?: string;
   name?: string | null;
+  phone?: string | null;
   isSuperadmin?: boolean;
   role?: "admin" | "manager" | "superadmin";
   tenantId?: number;

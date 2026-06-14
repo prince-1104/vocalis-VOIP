@@ -17,6 +17,70 @@ const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY ?? "";
 const ttsAudioCache = new Map<string, Buffer>();
 const TTS_CACHE_TTL_MS = 5 * 60 * 1000;
 
+// ── Per-call in-memory caches — eliminates repeated DB queries per turn ─
+const AGENT_CONFIG_CACHE_TTL = 60_000; // 1 minute
+const SYSTEM_PROMPT_CACHE_TTL = 5 * 60_000; // 5 minutes
+
+const agentConfigCache = new Map<number, { data: any; fetchedAt: number }>();
+const systemPromptCache = new Map<string, { prompt: string; fetchedAt: number }>();
+
+// Per-call metadata: populated once in /inbound, reused each turn.
+// Key = callLogId string.
+interface CallMeta {
+  userId: number;
+  callSid?: string;
+  crmMetadata?: Record<string, unknown>;
+  liveTranscript: Array<{ role: string; content: string; timestamp: string }>;
+}
+const callMetaCache = new Map<string, CallMeta>();
+
+async function getCachedAgentConfig(userId: number): Promise<any> {
+  const cached = agentConfigCache.get(userId);
+  if (cached && Date.now() - cached.fetchedAt < AGENT_CONFIG_CACHE_TTL) return cached.data;
+  const data = await db.query.agentConfigsTable.findFirst({ where: eq(agentConfigsTable.userId, userId) });
+  agentConfigCache.set(userId, { data, fetchedAt: Date.now() });
+  return data;
+}
+
+async function getCachedSystemPrompt(userId: number, agentConfig: any): Promise<string> {
+  // Cache key includes language so auto-mode and explicit-lang configs don't collide
+  const key = `${userId}:${agentConfig.language ?? "en-US"}`;
+  const cached = systemPromptCache.get(key);
+  if (cached && Date.now() - cached.fetchedAt < SYSTEM_PROMPT_CACHE_TTL) return cached.prompt;
+  const prompt = await buildSystemPrompt(userId, agentConfig);
+  systemPromptCache.set(key, { prompt, fetchedAt: Date.now() });
+  return prompt;
+}
+
+// Invalidate prompt cache when training data changes (call this from training routes if needed)
+export function invalidateSystemPromptCache(userId: number): void {
+  for (const key of systemPromptCache.keys()) {
+    if (key.startsWith(`${userId}:`)) systemPromptCache.delete(key);
+  }
+}
+
+// Invalidate agent config cache when agent settings change
+export function invalidateAgentConfigCache(userId: number): void {
+  agentConfigCache.delete(userId);
+}
+
+async function getCallMeta(callLogId: string): Promise<CallMeta | null> {
+  const cached = callMetaCache.get(callLogId);
+  if (cached) return cached;
+  const id = parseInt(callLogId, 10);
+  if (isNaN(id)) return null;
+  const log = await db.query.callLogsTable.findFirst({ where: eq(callLogsTable.id, id) });
+  if (!log?.userId) return null;
+  const meta: CallMeta = {
+    userId: log.userId,
+    callSid: log.callSid ?? undefined,
+    crmMetadata: log.crmMetadata as Record<string, unknown> | undefined,
+    liveTranscript: (log.liveTranscript as any) || [],
+  };
+  callMetaCache.set(callLogId, meta);
+  return meta;
+}
+
 function storeTtsAudio(audioBase64: string): string {
   const id = randomUUID();
   const buf = Buffer.from(audioBase64, "base64");
@@ -136,7 +200,7 @@ async function buildSystemPrompt(userId: number, agentConfig: any): Promise<stri
   return system;
 }
 
-async function generateAIResponse(systemPrompt: string, history: {role: string, content: string}[], userMessage: string, model = "gpt-4o-mini"): Promise<string> {
+async function generateAIResponse(systemPrompt: string, history: {role: string, content: string}[], userMessage: string, model = "gpt-4o-mini"): Promise<{ text: string; inputTokens: number; outputTokens: number }> {
   const messages: any[] = [
     { role: "system", content: systemPrompt },
     ...history.map(h => ({ role: h.role, content: h.content })),
@@ -149,7 +213,11 @@ async function generateAIResponse(systemPrompt: string, history: {role: string, 
     messages,
   });
 
-  return response.choices[0]?.message?.content || "I'm sorry, I didn't catch that. Could you repeat that?";
+  return {
+    text: response.choices[0]?.message?.content || "I'm sorry, I didn't catch that. Could you repeat that?",
+    inputTokens: response.usage?.prompt_tokens ?? 0,
+    outputTokens: response.usage?.completion_tokens ?? 0,
+  };
 }
 
 async function generateOpenAITTS(text: string, voice: string = "nova"): Promise<string> {
@@ -543,11 +611,8 @@ async function resolveUserByPhone(toPhone: string): Promise<number | null> {
 }
 
 async function resolveUserFromCallLog(callLogId: string): Promise<number | null> {
-  if (!callLogId) return null;
-  const id = parseInt(callLogId, 10);
-  if (isNaN(id)) return null;
-  const log = await db.query.callLogsTable.findFirst({ where: eq(callLogsTable.id, id) });
-  return log?.userId ?? null;
+  const meta = await getCallMeta(callLogId);
+  return meta?.userId ?? null;
 }
 
 function mapVoice(voice?: string | null): string {
@@ -641,7 +706,7 @@ router.post("/twilio/inbound", async (req, res) => {
     return;
   }
 
-  const agentConfig = await db.query.agentConfigsTable.findFirst({ where: eq(agentConfigsTable.userId, userId) });
+  const agentConfig = await getCachedAgentConfig(userId);
 
   const greeting = agentConfig?.greeting || "Hi, thank you for calling. How can I help you today?";
   const baseUrl = getBaseUrl(req);
@@ -654,6 +719,17 @@ router.post("/twilio/inbound", async (req, res) => {
     aiModel: agentConfig?.aiModel || "gpt-4o-mini",
     startedAt: new Date(),
   }).returning();
+
+  // ── Pre-warm caches for the first voice turn (fire-and-forget) ──────
+  // By the time the caller finishes speaking (2–5s), these will be ready.
+  const callLogIdStr = String(callLog.id);
+  callMetaCache.set(callLogIdStr, {
+    userId,
+    callSid: req.body.CallSid ?? undefined,
+    crmMetadata: undefined,
+    liveTranscript: [],
+  });
+  getCachedSystemPrompt(userId, { ...(agentConfig || {}), language: agentConfig?.language || "en-US" }).catch(() => {});
 
   const gather = twiml.gather({
     input: ["speech"],
@@ -684,7 +760,9 @@ router.post("/twilio/voice", async (req, res) => {
   const twiml = new twilio.twiml.VoiceResponse();
   const callLogId = req.query.callLogId as string;
 
-  const userId = await resolveUserFromCallLog(callLogId);
+  // ── Resolve userId from cache (avoids DB query per turn) ────────────
+  const callMeta = await getCallMeta(callLogId);
+  const userId = callMeta?.userId;
   if (!userId) {
     twiml.say("This call session is no longer active. Goodbye.");
     res.type("text/xml");
@@ -713,7 +791,8 @@ router.post("/twilio/voice", async (req, res) => {
   } catch { }
   let humanReqCount = parseInt(req.query.humanReqCount as string) || 0;
 
-  const agentConfig = await db.query.agentConfigsTable.findFirst({ where: eq(agentConfigsTable.userId, userId) });
+  // ── Fetch agent config from cache (avoids DB query per turn) ────────
+  const agentConfig = await getCachedAgentConfig(userId);
   const baseUrl = getBaseUrl(req);
   const voice = mapVoice(agentConfig?.voice);
   const configuredLang = agentConfig?.language || "en-US";
@@ -729,6 +808,10 @@ router.post("/twilio/voice", async (req, res) => {
   let intentResult = { intent: "general_question", confidence: 1.0, needsHuman: false };
   let intentTraining = null;
 
+  // Transfer rules come from cached CRM metadata — no extra DB query needed
+  const transferRules = callMeta.crmMetadata?.__transferRules as TransferRules | undefined;
+  const hasTransferRules = !!transferRules;
+
   if (!isSilent && speechResult.trim()) {
     // 1. Detect explicit "talk to human" request
     if (detectHumanRequest(speechResult)) {
@@ -736,19 +819,33 @@ router.post("/twilio/voice", async (req, res) => {
       console.log(`[twilio/voice] Human request detected (count: ${humanReqCount})`);
     }
 
-    // 2. Classify intent and look up intent-specific training config
+    // 2. Classify intent (fast regex, LLM fallback only if transfer rules exist)
+    //    Run in parallel with intentTraining DB lookup
     try {
-      intentResult = await classifyIntent(history, speechResult);
+      const [classifyResult, intentTrainingRow] = await Promise.all([
+        classifyIntent(history, speechResult, hasTransferRules),
+        db.query.intentTrainingTable.findFirst({
+          where: and(
+            eq(intentTrainingTable.userId, userId),
+            eq(intentTrainingTable.intent, "general_question"), // placeholder — updated after classify
+          ),
+        }).catch(() => null), // non-critical
+      ]);
+      intentResult = classifyResult;
       if (intentResult.confidence >= 0.6) {
         intentTurnCounts[intentResult.intent] = (intentTurnCounts[intentResult.intent] || 0) + 1;
       }
-      
-      intentTraining = await db.query.intentTrainingTable.findFirst({
-        where: and(
-          eq(intentTrainingTable.userId, userId),
-          eq(intentTrainingTable.intent, intentResult.intent),
-        ),
-      });
+      // Fetch the correct intent training row now that we know the intent
+      if (intentResult.intent !== "general_question") {
+        intentTraining = await db.query.intentTrainingTable.findFirst({
+          where: and(
+            eq(intentTrainingTable.userId, userId),
+            eq(intentTrainingTable.intent, intentResult.intent),
+          ),
+        }).catch(() => null);
+      } else {
+        intentTraining = intentTrainingRow ?? null;
+      }
     } catch (classifyErr) {
       console.error("[twilio/voice] Intent classification error:", classifyErr);
     }
@@ -756,15 +853,14 @@ router.post("/twilio/voice", async (req, res) => {
     // 3. Check transfer rules & execute transfer if needed
     const numId = parseInt(callLogId, 10);
     if (!isNaN(numId)) {
-      const logForTransfer = await db.query.callLogsTable.findFirst({ where: eq(callLogsTable.id, numId) });
-      const meta = logForTransfer?.crmMetadata as Record<string, unknown> | undefined;
-      const transferRules = meta?.__transferRules as TransferRules | undefined;
+      const meta = callMeta.crmMetadata;
 
       // Emit intent event
       crmEventBus.emitCallEvent({
         type: "call.intent",
         callId: numId,
-        callSid: logForTransfer?.callSid || undefined,
+        callSid: callMeta.callSid || undefined,
+        userId: userId || undefined,
         data: {
           intent: intentResult.intent,
           confidence: intentResult.confidence,
@@ -809,7 +905,8 @@ router.post("/twilio/voice", async (req, res) => {
             crmEventBus.emitCallEvent({
               type: "call.transferring",
               callId: numId,
-              callSid: logForTransfer?.callSid || undefined,
+              callSid: callMeta.callSid || undefined,
+              userId: userId || undefined,
               data: {
                 transferTo: targetPhone,
                 reason: decision.reason,
@@ -859,7 +956,8 @@ router.post("/twilio/voice", async (req, res) => {
                 crmEventBus.emitCallEvent({
                   type: "call.transferred",
                   callId: numId,
-                  callSid: logForTransfer?.callSid || undefined,
+                  callSid: callMeta.callSid || undefined,
+                  userId: userId || undefined,
                   data: { conferenceSid: conferenceName, agentCallSid: agentCall.sid, transferTo: targetPhone },
                   metadata: meta,
                   timestamp: new Date().toISOString(),
@@ -900,7 +998,8 @@ router.post("/twilio/voice", async (req, res) => {
     const promptConfig = configuredLang === "auto"
       ? { ...(agentConfig || {}), language: lang }
       : (agentConfig || {});
-    const basePrompt = await buildSystemPrompt(userId, promptConfig);
+    // ── Cached system prompt — no DB queries on warm turns ───────────
+    const basePrompt = await getCachedSystemPrompt(userId, promptConfig);
 
     let systemPrompt = basePrompt;
     if (intentTraining && intentTraining.trainingContent) {
@@ -912,24 +1011,39 @@ router.post("/twilio/voice", async (req, res) => {
     }
 
     try {
-      aiResponse = await generateAIResponse(systemPrompt, history, speechResult, resolveOpenAIModel(aiModel));
+      // ── LLM call — TTS is started immediately after it resolves ─────
+      const aiResult = await generateAIResponse(systemPrompt, history, speechResult, resolveOpenAIModel(aiModel));
+      aiResponse = aiResult.text;
 
-      // Fire-and-forget: log LLM cost for this turn
+      // Start TTS generation immediately (fire-and-forget race with DB writes below)
+      const ttsPromise = generateOpenAITTS(aiResponse, agentConfig?.voice || "nova")
+        .then(b64 => storeTtsAudio(b64))
+        .catch(e => { console.error("OpenAI TTS err:", e); return null; });
+
+      // Fire-and-forget: log LLM cost
       resolveTenantIdForOwner(userId).then(tenantId => {
         if (!tenantId) return;
         const model = resolveOpenAIModel(aiModel);
-        const charsPerToken = 4;
-        const inputChars = speechResult.length + (systemPrompt?.length ?? 0);
-        const outputChars = aiResponse.length;
         return logLLMCost({
           tenantId,
           userId,
           provider: model,
-          inputTokens: Math.ceil(inputChars / charsPerToken),
-          outputTokens: Math.ceil(outputChars / charsPerToken),
+          inputTokens: aiResult.inputTokens,
+          outputTokens: aiResult.outputTokens,
           context: "twilio-voice",
         });
       }).catch(e => console.error("[twilio] LLM cost logging error:", e));
+
+      // Await TTS (started in parallel with cost logging above)
+      const ttsResult = await ttsPromise;
+      if (ttsResult) {
+        ttsAudioId = ttsResult;
+        // Fire-and-forget: log TTS cost
+        resolveTenantIdForOwner(userId).then(tenantId => {
+          if (!tenantId) return;
+          return logTTSCost({ tenantId, userId, provider: "openai", characters: aiResponse.length, context: "twilio-tts-openai" });
+        }).catch(e => console.error("[twilio] OpenAI TTS cost logging error:", e));
+      }
     } catch (err) {
       console.error("AI response error:", err);
       aiResponse = "I'm sorry, I had a technical issue. Could you please repeat that?";
@@ -942,17 +1056,17 @@ router.post("/twilio/voice", async (req, res) => {
   const encodedHistory = encodeURIComponent(JSON.stringify(newHistory.slice(-4)));
 
   // ── CRM Event Bus: emit conversation turn & Persist live transcript ──
+  // Use cached callMeta — no DB fetch needed per turn.
   if (!isSilent && speechResult.trim()) {
     const numericCallLogId = parseInt(callLogId, 10);
     if (!isNaN(numericCallLogId)) {
-      // Fetch CRM metadata for the event
-      const callLogForEvent = await db.query.callLogsTable.findFirst({ where: eq(callLogsTable.id, numericCallLogId) });
-      const crmMeta = callLogForEvent?.crmMetadata as Record<string, unknown> | undefined;
+      const crmMeta = callMeta.crmMetadata;
 
       crmEventBus.emitCallEvent({
         type: "call.turn",
         callId: numericCallLogId,
-        callSid: callLogForEvent?.callSid || undefined,
+        callSid: callMeta.callSid || undefined,
+        userId: userId || undefined,
         data: { role: "user", content: speechResult, turnIndex: newHistory.length - 2, language: lang },
         metadata: crmMeta,
         timestamp: new Date().toISOString(),
@@ -960,19 +1074,20 @@ router.post("/twilio/voice", async (req, res) => {
       crmEventBus.emitCallEvent({
         type: "call.turn",
         callId: numericCallLogId,
-        callSid: callLogForEvent?.callSid || undefined,
+        callSid: callMeta.callSid || undefined,
+        userId: userId || undefined,
         data: { role: "assistant", content: aiResponse, turnIndex: newHistory.length - 1, language: lang },
         metadata: crmMeta,
         timestamp: new Date().toISOString(),
       });
 
-      // Persist live transcript
-      const existingTranscript = (callLogForEvent?.liveTranscript as Array<{ role: string; content: string; timestamp: string }>) || [];
+      // Append to cached transcript, then persist to DB (fire-and-forget)
       const updatedTranscript = [
-        ...existingTranscript,
+        ...callMeta.liveTranscript,
         { role: "user", content: speechResult, timestamp: new Date().toISOString() },
         { role: "assistant", content: aiResponse, timestamp: new Date().toISOString() },
       ];
+      callMeta.liveTranscript = updatedTranscript; // keep cache in sync
       db.update(callLogsTable)
         .set({ liveTranscript: updatedTranscript })
         .where(eq(callLogsTable.id, numericCallLogId))
@@ -992,29 +1107,9 @@ router.post("/twilio/voice", async (req, res) => {
     actionOnEmptyResult: true,
   });
 
-  // For non-Indian languages in auto/explicit English mode, use OpenAI TTS for natural English speech.
-  let ttsUseMp3 = false;
-  if (!ttsAudioId && (lang === "auto" || lang === "en-US" || lang === "en-IN")) {
-    try {
-      const b64 = await generateOpenAITTS(aiResponse, agentConfig?.voice || "nova");
-      ttsAudioId = storeTtsAudio(b64);
-      ttsUseMp3 = true;
-
-      // Fire-and-forget: log OpenAI TTS cost
-      resolveTenantIdForOwner(userId).then(tenantId => {
-        if (!tenantId) return;
-        return logTTSCost({
-          tenantId,
-          userId,
-          provider: "openai",
-          characters: aiResponse.length,
-          context: "twilio-tts-openai",
-        });
-      }).catch(e => console.error("[twilio] OpenAI TTS cost logging error:", e));
-    } catch (e) {
-      console.error("OpenAI TTS err:", e);
-    }
-  }
+  // TTS was already generated in parallel inside the AI response block above.
+  // ttsAudioId is set if OpenAI TTS succeeded.
+  const ttsUseMp3 = ttsAudioId !== null;
 
   if (ttsAudioId) {
     gather.play(`${baseUrl}/api/twilio/${ttsUseMp3 ? "tts-audio-mp3" : "tts-audio"}/${ttsAudioId}`);
@@ -1032,7 +1127,9 @@ router.post("/twilio/voice-indic", async (req, res) => {
   const twiml = new twilio.twiml.VoiceResponse();
   const callLogId = req.query.callLogId as string;
 
-  const userId = await resolveUserFromCallLog(callLogId);
+  // ── Use cached callMeta (avoids DB query per turn) ──────────────────
+  const callMeta = await getCallMeta(callLogId);
+  const userId = callMeta?.userId;
   if (!userId) {
     twiml.say("This call session is no longer active. Goodbye.");
     res.type("text/xml");
@@ -1061,7 +1158,8 @@ router.post("/twilio/voice-indic", async (req, res) => {
   let humanReqCount = parseInt(req.query.humanReqCount as string) || 0;
   const detectedIntent = req.query.intent as string || "general_question";
 
-  const agentConfig = await db.query.agentConfigsTable.findFirst({ where: eq(agentConfigsTable.userId, userId) });
+  // ── Use cached agent config ──────────────────────────────────────────
+  const agentConfig = await getCachedAgentConfig(userId);
   const baseUrl = getBaseUrl(req);
   const voice = mapVoice(agentConfig?.voice);
   const configuredLang = agentConfig?.language || "en-US";
@@ -1074,18 +1172,21 @@ router.post("/twilio/voice-indic", async (req, res) => {
   if (!speechResult.trim()) {
     aiResponse = "I didn't quite catch that. Are you still there? Please go ahead and speak.";
   } else {
-    const systemPrompt = await buildSystemPrompt(userId, { ...(agentConfig || {}), language: lang });
-    let finalSystemPrompt = systemPrompt;
+    // ── Cached system prompt + intent training lookup in parallel ───────
+    const [systemPrompt, intentTraining] = await Promise.all([
+      getCachedSystemPrompt(userId, { ...(agentConfig || {}), language: lang }),
+      detectedIntent !== "general_question"
+        ? db.query.intentTrainingTable.findFirst({
+            where: and(
+              eq(intentTrainingTable.userId, userId),
+              eq(intentTrainingTable.intent, detectedIntent),
+            ),
+          }).catch(() => null)
+        : Promise.resolve(null),
+    ]);
 
-    // Look up intent training configuration to inject content
-    let intentTraining = null;
+    let finalSystemPrompt = systemPrompt;
     try {
-      intentTraining = await db.query.intentTrainingTable.findFirst({
-        where: and(
-          eq(intentTrainingTable.userId, userId),
-          eq(intentTrainingTable.intent, detectedIntent),
-        ),
-      });
       if (intentTraining && intentTraining.trainingContent) {
         finalSystemPrompt = systemPrompt +
           `\n\nINTENT-SPECIFIC KNOWLEDGE (${detectedIntent}):\n${intentTraining.trainingContent}\n\n` +
@@ -1113,16 +1214,16 @@ router.post("/twilio/voice-indic", async (req, res) => {
   const encodedIntentCounts = encodeURIComponent(JSON.stringify(intentTurnCounts));
 
   // ── CRM Event Bus: emit conversation turn & Persist live transcript ──
+  // Uses cached callMeta — no DB query needed per turn.
   if (speechResult.trim()) {
     const numericCallLogId = parseInt(callLogId, 10);
     if (!isNaN(numericCallLogId)) {
-      const callLogForEvent = await db.query.callLogsTable.findFirst({ where: eq(callLogsTable.id, numericCallLogId) });
-      const crmMeta = callLogForEvent?.crmMetadata as Record<string, unknown> | undefined;
+      const crmMeta = callMeta.crmMetadata;
 
       crmEventBus.emitCallEvent({
         type: "call.turn",
         callId: numericCallLogId,
-        callSid: callLogForEvent?.callSid || undefined,
+        callSid: callMeta.callSid || undefined,
         data: { role: "user", content: speechResult, turnIndex: newHistory.length - 2, language: lang },
         metadata: crmMeta,
         timestamp: new Date().toISOString(),
@@ -1130,18 +1231,18 @@ router.post("/twilio/voice-indic", async (req, res) => {
       crmEventBus.emitCallEvent({
         type: "call.turn",
         callId: numericCallLogId,
-        callSid: callLogForEvent?.callSid || undefined,
+        callSid: callMeta.callSid || undefined,
         data: { role: "assistant", content: aiResponse, turnIndex: newHistory.length - 1, language: lang },
         metadata: crmMeta,
         timestamp: new Date().toISOString(),
       });
 
-      const existingTranscript = (callLogForEvent?.liveTranscript as Array<{ role: string; content: string; timestamp: string }>) || [];
       const updatedTranscript = [
-        ...existingTranscript,
+        ...callMeta.liveTranscript,
         { role: "user", content: speechResult, timestamp: new Date().toISOString() },
         { role: "assistant", content: aiResponse, timestamp: new Date().toISOString() },
       ];
+      callMeta.liveTranscript = updatedTranscript;
       db.update(callLogsTable)
         .set({ liveTranscript: updatedTranscript })
         .where(eq(callLogsTable.id, numericCallLogId))
@@ -1183,7 +1284,12 @@ router.post("/twilio/outbound-voice", async (req, res) => {
     return;
   }
 
-  const agentConfig = await db.query.agentConfigsTable.findFirst({ where: eq(agentConfigsTable.userId, userId) });
+  // Use cached config (avoids DB queries per turn)
+  const agentConfig = await getCachedAgentConfig(userId);
+  const lang = agentConfig?.language || "en-US";
+
+  // Pre-warm system prompt cache while TTS is being generated
+  getCachedSystemPrompt(userId, { ...(agentConfig || {}), language: lang }).catch(() => {});
 
   const scripts = await db.select().from(callingScriptsTable).where(and(eq(callingScriptsTable.userId, userId), eq(callingScriptsTable.isDefault, true))).limit(1);
 
@@ -1193,7 +1299,6 @@ router.post("/twilio/outbound-voice", async (req, res) => {
 
   const baseUrl = getBaseUrl(req);
   const voice = mapVoice(agentConfig?.voice);
-  const lang = agentConfig?.language || "en-US";
 
   const gather = twiml.gather({
     input: ["speech"],

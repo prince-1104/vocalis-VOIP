@@ -24,10 +24,15 @@ router.get("/auth/me", async (req, res) => {
       })
     : null;
 
+  const tenantUser = await db.query.tenantUsersTable.findFirst({
+    where: eq(tenantUsersTable.id, req.tenantUserId!),
+  });
+
   res.json({
     id: req.tenantUserId,
     email: req.authenticatedEmail,
     name: req.authenticatedName,
+    phone: tenantUser?.phone ?? null,
     isSuperadmin: req.isSuperadmin ?? false,
     role: req.userRole,
     tenantId: req.tenantId,
@@ -42,6 +47,105 @@ router.get("/auth/me", async (req, res) => {
       plan: ownerUser.plan,
     },
   });
+});
+
+router.put("/auth/profile", async (req, res) => {
+  const tenantUserId = req.tenantUserId!;
+  const { name, email, phone } = req.body;
+
+  if (!email) {
+    res.status(400).json({ error: "Email is required" });
+    return;
+  }
+
+  const normalizedEmail = email.toLowerCase().trim();
+
+  try {
+    const currentTenantUser = await db.query.tenantUsersTable.findFirst({
+      where: eq(tenantUsersTable.id, tenantUserId),
+    });
+
+    if (!currentTenantUser) {
+      res.status(404).json({ error: "User profile not found" });
+      return;
+    }
+
+    if (normalizedEmail !== currentTenantUser.email) {
+      const existing = await db.query.tenantUsersTable.findFirst({
+        where: and(
+          eq(tenantUsersTable.email, normalizedEmail),
+          eq(tenantUsersTable.tenantId, currentTenantUser.tenantId)
+        ),
+      });
+
+      if (existing) {
+        res.status(409).json({ error: "A user with this email already exists in this tenant" });
+        return;
+      }
+    }
+
+    await db.update(tenantUsersTable)
+      .set({
+        name: name || null,
+        email: normalizedEmail,
+        phone: phone || null,
+        updatedAt: new Date(),
+      })
+      .where(eq(tenantUsersTable.id, tenantUserId));
+
+    if (currentTenantUser.userId) {
+      await db.update(usersTable)
+        .set({
+          name: name || null,
+          email: normalizedEmail,
+          updatedAt: new Date(),
+        })
+        .where(eq(usersTable.id, currentTenantUser.userId));
+    }
+
+    res.json({ success: true, message: "Profile updated successfully" });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || "Failed to update profile" });
+  }
+});
+
+router.put("/auth/profile/password", async (req, res) => {
+  const tenantUserId = req.tenantUserId!;
+  const { currentPassword, newPassword } = req.body;
+
+  if (!currentPassword || !newPassword) {
+    res.status(400).json({ error: "Current password and new password are required" });
+    return;
+  }
+
+  try {
+    const currentTenantUser = await db.query.tenantUsersTable.findFirst({
+      where: eq(tenantUsersTable.id, tenantUserId),
+    });
+
+    if (!currentTenantUser || !currentTenantUser.passwordHash) {
+      res.status(404).json({ error: "User profile not found" });
+      return;
+    }
+
+    const valid = await bcrypt.compare(currentPassword, currentTenantUser.passwordHash);
+    if (!valid) {
+      res.status(400).json({ error: "Incorrect current password" });
+      return;
+    }
+
+    const newPasswordHash = await bcrypt.hash(newPassword, 12);
+    await db.update(tenantUsersTable)
+      .set({
+        passwordHash: newPasswordHash,
+        updatedAt: new Date(),
+      })
+      .where(eq(tenantUsersTable.id, tenantUserId));
+
+    res.json({ success: true, message: "Password updated successfully" });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || "Failed to update password" });
+  }
 });
 
 router.post("/auth/logout", async (req, res) => {

@@ -232,4 +232,83 @@ router.post("/dial/phone", async (req, res) => {
   }
 });
 
+
+// ── Internal: End an active call (JWT auth — used by the Dialer UI) ──
+router.post("/dial/calls/:id/end", async (req, res) => {
+  const userId = req.userId!;
+  const callId = parseInt(req.params.id);
+
+  if (isNaN(callId)) {
+    res.status(400).json({ error: "Invalid call ID" });
+    return;
+  }
+
+  const call = await db.query.callLogsTable.findFirst({
+    where: and(eq(callLogsTable.id, callId), eq(callLogsTable.userId, userId)),
+  });
+
+  if (!call) {
+    res.status(404).json({ error: "Call not found" });
+    return;
+  }
+
+  if (call.endedAt) {
+    // Already ended — treat as success so the UI can proceed
+    res.json({ success: true, message: "Call already ended" });
+    return;
+  }
+
+  const agentConfig = await db.query.agentConfigsTable.findFirst({
+    where: eq(agentConfigsTable.userId, userId),
+  });
+
+  try {
+    if (call.callSid && agentConfig?.twilioAccountSid && agentConfig?.twilioAuthToken) {
+      const client = getTwilioClient(agentConfig.twilioAccountSid, agentConfig.twilioAuthToken);
+      await client.calls(call.callSid).update({ status: "completed" });
+    }
+
+    await db.update(callLogsTable)
+      .set({ endedAt: new Date(), outcome: "answered" })
+      .where(eq(callLogsTable.id, callId));
+
+    res.json({ success: true, message: `Call ${callId} ended` });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || "Failed to end call" });
+  }
+});
+
+// ── Internal: Poll call status + live transcript (JWT auth — used by Dialer UI) ──
+router.get("/calls/:id", async (req, res) => {
+  const userId = req.userId!;
+  const callId = parseInt(req.params.id);
+
+  if (isNaN(callId)) {
+    res.status(400).json({ error: "Invalid call ID" });
+    return;
+  }
+
+  const call = await db.query.callLogsTable.findFirst({
+    where: and(eq(callLogsTable.id, callId), eq(callLogsTable.userId, userId)),
+  });
+
+  if (!call) {
+    res.status(404).json({ error: "Call not found" });
+    return;
+  }
+
+  res.json({
+    callId: call.id,
+    callSid: call.callSid,
+    phone: call.phone,
+    status: call.endedAt ? "completed" : "active",
+    liveTranscript: call.liveTranscript || [],
+    transcript: call.transcript,
+    transferredTo: call.transferredTo,
+    endedAt: call.endedAt,
+    startedAt: call.startedAt,
+    duration: call.duration,
+  });
+});
+
 export default router;

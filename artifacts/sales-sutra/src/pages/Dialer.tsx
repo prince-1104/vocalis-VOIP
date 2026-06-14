@@ -15,7 +15,7 @@ import {
   Phone, PhoneOff, PhoneForwarded, Mic, MicOff, UserCheck,
   Clock, Send, AlertTriangle, CheckCircle2, XCircle,
   Loader2, Wifi, WifiOff, Bot, User, ArrowRight,
-  Key, Copy, Eye, EyeOff, RefreshCw, Plus,
+  Key, Copy, Eye, EyeOff, RefreshCw, Plus, Trash2,
   Volume2,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
@@ -82,13 +82,23 @@ function formatDuration(startTime: number | null): string {
 // DIALER PAGE COMPONENT
 // ═══════════════════════════════════════════════════════════════════
 
-export default function Dialer() {
-  const { toast } = useToast();
-  const queryClient = useQueryClient();
-  const transcriptEndRef = useRef<HTMLDivElement>(null);
-  const wsRef = useRef<WebSocket | null>(null);
+const SESSION_KEY = "dialog_dialer_call_state";
 
-  const [callState, setCallState] = useState<CallState>({
+function loadStoredCallState(): CallState {
+  try {
+    const raw = sessionStorage.getItem(SESSION_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as CallState;
+      // Don't restore a stale ended/idle state — start fresh
+      if (parsed.status === "ended" || parsed.status === "idle") return getDefaultCallState();
+      return parsed;
+    }
+  } catch { /* ignore */ }
+  return getDefaultCallState();
+}
+
+function getDefaultCallState(): CallState {
+  return {
     callId: null,
     callSid: null,
     phone: "",
@@ -97,14 +107,37 @@ export default function Dialer() {
     liveTranscript: [],
     intent: null,
     transferredTo: null,
-  });
+  };
+}
+
+export default function Dialer() {
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+  const transcriptEndRef = useRef<HTMLDivElement>(null);
+  const wsRef = useRef<WebSocket | null>(null);
+  // Stores the cleanup fn for the live-transcript poll so we can stop it from anywhere
+  const pollCleanupRef = useRef<(() => void) | null>(null);
+
+  const [callState, setCallState] = useState<CallState>(loadStoredCallState);
 
   const [elapsed, setElapsed] = useState("00:00");
   const [wsConnected, setWsConnected] = useState(false);
-  const [dialInput, setDialInput] = useState("");
+  // Initialise dialInput from stored phone so the number shows when navigating back
+  const [dialInput, setDialInput] = useState(() => {
+    const stored = loadStoredCallState();
+    return stored.phone || "";
+  });
   const [selectedAgent, setSelectedAgent] = useState<string>("");
   const [transferReason, setTransferReason] = useState("");
 
+  // ── Persist call state to sessionStorage on every change ──
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(SESSION_KEY, JSON.stringify(callState));
+    } catch { /* ignore quota errors */ }
+  }, [callState]);
+
+  // ── Timer for elapsed call duration ──
   useEffect(() => {
     if (callState.status === "active" && callState.startTime) {
       const interval = setInterval(() => setElapsed(formatDuration(callState.startTime)), 1000);
@@ -118,16 +151,14 @@ export default function Dialer() {
     transcriptEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [callState.liveTranscript]);
 
-  // ── WebSocket for live events ──
-  const connectWebSocket = useCallback((callId: number) => {
-    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const wsUrl = `${protocol}//${window.location.host}/ws/crm/calls/${callId}?apiKey=internal`;
-    
-    // For internal use, we'll poll instead if WS doesn't connect
-    // (WS requires API key auth; for the admin UI we poll the transcript endpoint)
+  // ── Core polling function (returns cleanup fn) ──
+  const startPolling = useCallback((callId: number) => {
+    let active = true;
     const pollInterval = setInterval(async () => {
+      if (!active) return;
       try {
         const res = await fetch(`${BASE}/api/calls/${callId}`, { headers: adminAuthHeaders() });
+        if (!active) return; // component may have unmounted while awaiting
         if (res.ok) {
           const data = await res.json();
           if (data.liveTranscript && Array.isArray(data.liveTranscript)) {
@@ -139,6 +170,7 @@ export default function Dialer() {
           if (data.endedAt) {
             setCallState(prev => ({ ...prev, status: "ended" }));
             clearInterval(pollInterval);
+            active = false;
           }
           if (data.transferredTo) {
             setCallState(prev => ({
@@ -151,9 +183,43 @@ export default function Dialer() {
       } catch { /* ignore */ }
     }, 2000);
 
-    setWsConnected(true);
-    return () => clearInterval(pollInterval);
+    const cleanup = () => {
+      active = false;
+      clearInterval(pollInterval);
+    };
+    return cleanup;
   }, []);
+
+  // ── Stop polling when component unmounts (e.g. navigating away briefly) ──
+  // NOTE: we intentionally do NOT clear sessionStorage here — the state
+  // is preserved so the user can navigate back and see the active call.
+  useEffect(() => {
+    return () => {
+      pollCleanupRef.current?.();
+    };
+  }, []);
+
+  // ── Re-attach polling if we remount with an active call ──
+  useEffect(() => {
+    const { callId, status } = callState;
+    if (callId && (status === "active" || status === "dialing" || status === "transferring")) {
+      const cleanup = startPolling(callId);
+      pollCleanupRef.current = cleanup;
+      return cleanup;
+    }
+    return undefined;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // intentionally run only on mount
+
+  // ── WebSocket for live events (kept for future WS upgrade; currently uses polling) ──
+  const connectWebSocket = useCallback((callId: number) => {
+    // Stop any existing poll before starting a new one
+    pollCleanupRef.current?.();
+    const cleanup = startPolling(callId);
+    pollCleanupRef.current = cleanup;
+    setWsConnected(true);
+    return cleanup;
+  }, [startPolling]);
 
   // ── Fetch CRM agents ──
   const { data: agentsData } = useQuery<{ agents: CrmAgent[] }>({
@@ -196,6 +262,7 @@ export default function Dialer() {
         ...prev,
         callId: data.callLogId,
         callSid: data.callSid,
+        phone: dialInput,
         status: "dialing",
         startTime: Date.now(),
         liveTranscript: [],
@@ -203,7 +270,7 @@ export default function Dialer() {
         transferredTo: null,
       }));
 
-      // Start polling for live transcript
+      // Start polling for live transcript after a brief connect delay
       setTimeout(() => {
         if (data.callLogId) {
           connectWebSocket(data.callLogId);
@@ -221,11 +288,22 @@ export default function Dialer() {
   const endCallMutation = useMutation({
     mutationFn: async () => {
       if (!callState.callId) throw new Error("No active call");
-      return adminFetch(`${BASE}/api/crm/calls/${callState.callId}/end`, { method: "POST" });
+      // Use the JWT-auth endpoint (dial.ts) — not the CRM API-key endpoint
+      return adminFetch(`${BASE}/api/dial/calls/${callState.callId}/end`, { method: "POST" });
     },
     onSuccess: () => {
+      // Stop polling immediately so it doesn't override the ended status
+      pollCleanupRef.current?.();
+      pollCleanupRef.current = null;
       setCallState(prev => ({ ...prev, status: "ended" }));
-      toast({ title: "Call ended" });
+      toast({ title: "📵 Call ended" });
+    },
+    onError: (err: Error) => {
+      toast({
+        title: "Failed to end call",
+        description: err.message || "Could not end the call. Please try again.",
+        variant: "destructive",
+      });
     },
   });
 
@@ -261,9 +339,23 @@ export default function Dialer() {
     },
   });
 
+  const deleteKeyMutation = useMutation({
+    mutationFn: async (keyId: number) =>
+      adminFetch(`${BASE}/api/crm-admin/api-keys/${keyId}`, { method: "DELETE" }),
+    onSuccess: () => {
+      setConfirmDeleteId(null);
+      refetchKeys();
+      toast({ title: "🗑️ API Key deleted" });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Delete failed", description: err.message, variant: "destructive" });
+    },
+  });
+
   const [newApiKey, setNewApiKey] = useState<string | null>(null);
   const [showApiKey, setShowApiKey] = useState(false);
   const [newKeyName, setNewKeyName] = useState("");
+  const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
 
   // ── Handlers ──
 
@@ -282,10 +374,12 @@ export default function Dialer() {
   }
 
   function handleNewCall() {
-    setCallState({
-      callId: null, callSid: null, phone: "", status: "idle",
-      startTime: null, liveTranscript: [], intent: null, transferredTo: null,
-    });
+    // Stop any lingering poll
+    pollCleanupRef.current?.();
+    pollCleanupRef.current = null;
+    // Clear persisted state so next mount starts fresh
+    try { sessionStorage.removeItem(SESSION_KEY); } catch { /* ignore */ }
+    setCallState(getDefaultCallState());
     setDialInput("");
     setElapsed("00:00");
     queryClient.invalidateQueries({ queryKey: ["recent-calls-dialer"] });
@@ -746,7 +840,7 @@ export default function Dialer() {
               ) : (
                 <div className="space-y-3">
                   {apiKeys.map(key => (
-                    <div key={key.id} className="flex items-center justify-between p-3 bg-white/5 rounded-lg border border-white/5">
+                    <div key={key.id} className="flex items-center justify-between p-3 bg-white/5 rounded-lg border border-white/5 hover:border-white/10 transition-colors group">
                       <div className="flex items-center gap-3">
                         <Key className="w-4 h-4 text-muted-foreground" />
                         <div>
@@ -762,6 +856,41 @@ export default function Dialer() {
                           <span className="text-xs text-muted-foreground">
                             Last used: {new Date(key.lastUsedAt).toLocaleDateString()}
                           </span>
+                        )}
+                        {/* Delete button with inline confirmation */}
+                        {confirmDeleteId === key.id ? (
+                          <div className="flex items-center gap-1.5 animate-in fade-in slide-in-from-right-2">
+                            <span className="text-xs text-red-400 font-medium">Delete?</span>
+                            <Button
+                              size="sm"
+                              variant="destructive"
+                              className="h-7 px-2.5 text-xs"
+                              onClick={() => deleteKeyMutation.mutate(key.id)}
+                              disabled={deleteKeyMutation.isPending}
+                            >
+                              {deleteKeyMutation.isPending ? (
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                              ) : "Yes, delete"}
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              className="h-7 px-2.5 text-xs hover:bg-white/10"
+                              onClick={() => setConfirmDeleteId(null)}
+                            >
+                              Cancel
+                            </Button>
+                          </div>
+                        ) : (
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            className="h-7 w-7 opacity-0 group-hover:opacity-100 transition-opacity hover:bg-red-500/10 hover:text-red-400"
+                            onClick={() => setConfirmDeleteId(key.id)}
+                            title="Delete API key"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </Button>
                         )}
                       </div>
                     </div>

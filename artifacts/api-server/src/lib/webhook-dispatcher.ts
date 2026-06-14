@@ -1,4 +1,4 @@
-import { db, webhookDeliveriesTable, crmApiKeysTable } from "@workspace/db";
+import { db, webhookDeliveriesTable, crmApiKeysTable, callLogsTable } from "@workspace/db";
 import { eq, and, lte } from "drizzle-orm";
 import { signWebhookPayload } from "./crm-auth";
 import { logger } from "./logger";
@@ -138,12 +138,25 @@ async function processDelivery(
 export function startWebhookDispatcher(): void {
   crmEventBus.onCallEvent(async (event) => {
     try {
-      // Find all active API keys for this call's owner that have webhook URLs
-      // We need to look up the call to find the userId, but the event already
-      // carries the callId. For efficiency, we fetch API keys that match.
+      // Resolve the tenant (userId) from the event or fall back to DB lookup
+      let userId = event.userId;
+      if (!userId && event.callId) {
+        const callLog = await db.query.callLogsTable.findFirst({
+          where: eq(callLogsTable.id, event.callId),
+        }).catch(() => null);
+        userId = callLog?.userId;
+      }
+
+      if (!userId) {
+        logger.warn({ event: event.type, callId: event.callId }, "Webhook dispatch skipped: could not resolve userId");
+        return;
+      }
+
+      // Find active API keys for THIS tenant that have webhook URLs configured
       const apiKeys = await db.select().from(crmApiKeysTable).where(
         and(
           eq(crmApiKeysTable.isActive, true),
+          eq(crmApiKeysTable.userId, userId),
         ),
       );
 
@@ -159,7 +172,12 @@ export function startWebhookDispatcher(): void {
 
       if (targets.length === 0) return;
 
-      // Dispatch to matching targets in parallel (fire and forget per-target)
+      logger.debug(
+        { event: event.type, callId: event.callId, userId, targets: targets.length },
+        "Dispatching webhook to CRM(s)",
+      );
+
+      // Dispatch to all of this tenant's webhook targets in parallel
       await Promise.allSettled(
         targets.map(t => processDelivery(t, event)),
       );

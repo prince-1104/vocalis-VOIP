@@ -64,6 +64,7 @@ export async function executeTransfer(
       type: "call.transferring",
       callId: request.callId,
       callSid: request.callSid,
+      userId,
       data: {
         transferTo: request.transferTo,
         reason: request.reason,
@@ -146,11 +147,13 @@ export async function executeTransfer(
       type: "call.transferred",
       callId: request.callId,
       callSid: request.callSid,
+      userId,
       data: {
         conferenceSid: conferenceName,
         agentCallSid: agentCall.sid,
         transferTo: request.transferTo,
         reason: request.reason,
+        crmAgentId: request.crmAgentId,
       },
       metadata: callLog?.crmMetadata as Record<string, unknown> | undefined,
       timestamp: new Date().toISOString(),
@@ -169,6 +172,7 @@ export async function executeTransfer(
       type: "call.error",
       callId: request.callId,
       callSid: request.callSid,
+      userId,
       data: { error: `Transfer failed: ${err.message}` },
       timestamp: new Date().toISOString(),
     });

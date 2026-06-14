@@ -682,10 +682,16 @@ function tripProvider(name: string, reason: string, cooldownMs: number) {
   console.warn(`[widget/chat] circuit-break ${name} for ${cooldownMs}ms: ${reason}`);
 }
 
+interface LLMResult {
+  content: string;
+  inputTokens: number;
+  outputTokens: number;
+}
+
 async function callDeepSeekChat(
   messages: any[],
   maxTokens: number = 250,
-): Promise<string | null> {
+): Promise<LLMResult | null> {
   if (!DEEPSEEK_API_KEY) return null;
   const tripped = isProviderTripped("deepseek");
   if (tripped) {
@@ -718,7 +724,13 @@ async function callDeepSeekChat(
       return null;
     }
     const data = await res.json() as any;
-    return data.choices?.[0]?.message?.content ?? null;
+    const content: string | null = data.choices?.[0]?.message?.content ?? null;
+    if (!content) return null;
+    return {
+      content,
+      inputTokens: data.usage?.prompt_tokens ?? 0,
+      outputTokens: data.usage?.completion_tokens ?? 0,
+    };
   } catch (err) {
     console.error("[widget/chat] DeepSeek exception:", err);
     return null;
@@ -727,7 +739,7 @@ async function callDeepSeekChat(
 
 async function callSarvamChat(
   messages: any[],
-): Promise<string | null> {
+): Promise<LLMResult | null> {
   if (!SARVAM_API_KEY) return null;
   const tripped = isProviderTripped("sarvam-m");
   if (tripped) {
@@ -758,7 +770,13 @@ async function callSarvamChat(
       return null;
     }
     const data = await res.json() as any;
-    return data.choices?.[0]?.message?.content ?? null;
+    const content: string | null = data.choices?.[0]?.message?.content ?? null;
+    if (!content) return null;
+    return {
+      content,
+      inputTokens: data.usage?.prompt_tokens ?? 0,
+      outputTokens: data.usage?.completion_tokens ?? 0,
+    };
   } catch (err) {
     console.error("[widget/chat] Sarvam-M exception:", err);
     return null;
@@ -776,7 +794,7 @@ async function generateWidgetReply(
   message: string,
   language: string,
   isVoiceRequest?: boolean,
-): Promise<{ reply: string; modelUsed: string }> {
+): Promise<{ reply: string; modelUsed: string; inputTokens: number; outputTokens: number }> {
   const normalizedLanguage = language || "en-US";
   const messages: any[] = [
     { role: "system", content: systemPrompt },
@@ -799,13 +817,13 @@ async function generateWidgetReply(
     const brevity = isVoiceRequest ? " Answer in 1-2 short spoken sentences ONLY. NEVER read out phone numbers, email addresses, social media handles, URLs, or app store links — just say 'you can find contact details on the website'. Be warm and natural." : " Keep your answer brief and conversational — 2-3 sentences max.";
     const styleSystem = `Reply ONLY in natural ${langInfo.name} written in NATIVE ${langInfo.script}. Output MUST be in ${langInfo.script}. NEVER romanize. NEVER use Latin/English letters except for brand names like "BBMP", "e-Khata", "ePID" or URLs. If you cannot produce native script, output nothing. Provide the answer from the knowledge base — include key details. The user's input may mix scripts or use transliteration — understand their intent and ANSWER the question. NEVER reply with a clarification question if the intent is clear.${brevity}`;
     const llmMaxTokens = isVoiceRequest ? 100 : 150;
-    const reply = await callDeepSeekChat([{ role: "system", content: styleSystem }, ...messages], llmMaxTokens);
-    if (reply) {
-      const normalized = normalizeIndicReply(reply, normalizedLanguage);
+    const result = await callDeepSeekChat([{ role: "system", content: styleSystem }, ...messages], llmMaxTokens);
+    if (result) {
+      const normalized = normalizeIndicReply(result.content, normalizedLanguage);
       // DeepSeek V3 reliably produces native script — skip the expensive
       // ensureNativeScript check (~600ms gpt-4o-mini call) for both voice
       // and text paths. Only Sarvam-M or GPT fallbacks might need the check.
-      return { reply: normalized, modelUsed: "deepseek-chat" };
+      return { reply: normalized, modelUsed: "deepseek-chat", inputTokens: result.inputTokens, outputTokens: result.outputTokens };
     }
   }
 
@@ -813,18 +831,20 @@ async function generateWidgetReply(
   if (langInfo && SARVAM_API_KEY) {
     const brevity = isVoiceRequest ? " Answer in 1-2 short spoken sentences ONLY. NEVER read out phone numbers, email addresses, social media handles, URLs, or app store links — just say 'you can find contact details on the website'. Be warm and natural." : " Keep your answer brief and conversational — 2-3 sentences max.";
     const styleSystem = `Reply ONLY in natural ${langInfo.name} written in NATIVE ${langInfo.script}. Output MUST be in ${langInfo.script}. NEVER romanize. NEVER use Latin/English letters except for brand names like "BBMP", "e-Khata", "ePID" or URLs. If you cannot produce native script, output nothing. Provide the answer from the knowledge base — include key details. The user's input may be transliterated — understand the intent and ANSWER the question directly. NEVER respond with a clarification request when the user has already asked something specific.${brevity}`;
-    const reply = await callSarvamChat([{ role: "system", content: styleSystem }, ...messages]);
-    if (reply) {
-      const normalized = normalizeIndicReply(reply, normalizedLanguage);
-      if (isVoiceRequest) return { reply: normalized, modelUsed: "sarvam-m" };
+    const result = await callSarvamChat([{ role: "system", content: styleSystem }, ...messages]);
+    if (result) {
+      const normalized = normalizeIndicReply(result.content, normalizedLanguage);
+      if (isVoiceRequest) return { reply: normalized, modelUsed: "sarvam-m", inputTokens: result.inputTokens, outputTokens: result.outputTokens };
       const fixed = await ensureNativeScript(normalized, normalizedLanguage);
-      return { reply: fixed.reply, modelUsed: fixed.rewrote ? "sarvam-m+rewrite" : "sarvam-m" };
+      return { reply: fixed.reply, modelUsed: fixed.rewrote ? "sarvam-m+rewrite" : "sarvam-m", inputTokens: result.inputTokens, outputTokens: result.outputTokens };
     }
   }
 
   // --- English (or any fallback): gpt-4o-mini (fast & multilingual) ---
   let reply = "";
   let modelUsed = "gpt-4o-mini";
+  let inputTokens = 0;
+  let outputTokens = 0;
   try {
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
@@ -832,13 +852,17 @@ async function generateWidgetReply(
       messages,
     });
     reply = completion.choices[0]?.message?.content || "I'm sorry, I couldn't process that. Could you try again?";
+    inputTokens = completion.usage?.prompt_tokens ?? 0;
+    outputTokens = completion.usage?.completion_tokens ?? 0;
   } catch (err: any) {
     console.warn(`[widget/chat] OpenAI failed, falling back to DeepSeek: ${err.message}`);
     if (DEEPSEEK_API_KEY) {
-      const dsReply = await callDeepSeekChat(messages);
-      if (dsReply) {
-        reply = dsReply;
+      const dsResult = await callDeepSeekChat(messages);
+      if (dsResult) {
+        reply = dsResult.content;
         modelUsed = "deepseek-chat";
+        inputTokens = dsResult.inputTokens;
+        outputTokens = dsResult.outputTokens;
       } else {
         throw err;
       }
@@ -853,10 +877,10 @@ async function generateWidgetReply(
   // ensureNativeScript safety net when the language is non-English to keep
   // the English fast-path latency-free.
   if (!isIndianLanguage(normalizedLanguage) || isVoiceRequest) {
-    return { reply: normalized, modelUsed };
+    return { reply: normalized, modelUsed, inputTokens, outputTokens };
   }
   const fixed = await ensureNativeScript(normalized, normalizedLanguage);
-  return { reply: fixed.reply, modelUsed: fixed.rewrote ? `${modelUsed}+rewrite` : modelUsed };
+  return { reply: fixed.reply, modelUsed: fixed.rewrote ? `${modelUsed}+rewrite` : modelUsed, inputTokens, outputTokens };
 }
 
 // ── Agent config cache (60s TTL) ─────────────────────────────────────────
@@ -1697,6 +1721,8 @@ router.post("/widget/chat", async (req, res) => {
   let reply = "";
   let modelUsed = "gpt-4o-mini";
   let systemPrompt = "";
+  let llmInputTokens = 0;
+  let llmOutputTokens = 0;
 
   // ── Voice fast-path: direct KB match skips LLM entirely ────────────────
   // For voice, try to match the user's question against FAQ/objection entries
@@ -1726,6 +1752,9 @@ router.post("/widget/chat", async (req, res) => {
       );
       reply = generation.reply;
       modelUsed = generation.modelUsed;
+      // Capture real token counts for accurate cost logging
+      llmInputTokens = generation.inputTokens;
+      llmOutputTokens = generation.outputTokens;
     } catch (err) {
       console.error("Widget AI error:", err);
       reply = "Sorry, I'm having a moment. Please try again shortly.";
@@ -1746,21 +1775,26 @@ router.post("/widget/chat", async (req, res) => {
     billedCostUsd: "0",
   }).catch(() => {});
 
-  // ── Fire-and-forget cost logging ──────────────────────────────────────
+  // ── Fire-and-forget cost logging — use real token counts from API response ──
   resolveTenantIdForOwner(agent.userId).then(tenantId => {
     if (!tenantId) return;
-    const charsPerToken = isIndianLanguage(effectiveLanguage) ? 2 : 4;
-    const inputChars = message.length + (systemPrompt?.length ?? 0);
-    const outputChars = reply.length;
-    const estInputTokens = Math.ceil(inputChars / charsPerToken);
-    const estOutputTokens = Math.ceil(outputChars / charsPerToken);
     const baseModel = modelUsed.replace(/\+rewrite$/, "");
+    // Fall back to character estimation only when real tokens were not captured
+    // (e.g. direct-kb fast path which skips LLM entirely)
+    let finalInputTokens = llmInputTokens;
+    let finalOutputTokens = llmOutputTokens;
+    if (finalInputTokens === 0 && finalOutputTokens === 0 && modelUsed !== "direct-kb") {
+      const charsPerToken = isIndianLanguage(effectiveLanguage) ? 3 : 4;
+      finalInputTokens = Math.ceil((message.length + (systemPrompt?.length ?? 0)) / charsPerToken);
+      finalOutputTokens = Math.ceil(reply.length / charsPerToken);
+    }
+    if (modelUsed === "direct-kb") return; // no LLM cost for KB fast-path
     return logLLMCost({
       tenantId,
       userId: agent.userId,
       provider: baseModel,
-      inputTokens: estInputTokens,
-      outputTokens: estOutputTokens,
+      inputTokens: finalInputTokens,
+      outputTokens: finalOutputTokens,
       context: "widget-chat",
     });
   }).catch((e) => console.error("[widget] cost logging error:", e));

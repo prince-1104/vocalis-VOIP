@@ -14,6 +14,7 @@ export interface CRMCallEvent {
     | "call.error";
   callId: number;
   callSid?: string;
+  userId?: number;              // tenant owner — used to scope webhook delivery
   data: Record<string, unknown>;
   metadata?: Record<string, unknown>;   // opaque CRM metadata echoed back
   timestamp: string;
