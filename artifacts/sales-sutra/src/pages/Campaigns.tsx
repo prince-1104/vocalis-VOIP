@@ -1,12 +1,12 @@
 import React, { useState } from "react";
-import { useCampaignsList, useCreateCampaignMutation, useStartCampaignMutation, usePauseCampaignMutation } from "@/hooks/use-campaigns";
+import { useCampaignsList, useCreateCampaignMutation, useStartCampaignMutation, usePauseCampaignMutation, useUpdateCampaignMutation } from "@/hooks/use-campaigns";
 import { useScriptsList } from "@/hooks/use-scripts";
 import { Card, CardContent, CardHeader, CardTitle, CardFooter } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { StatusBadge } from "@/components/ui-custom/StatusBadge";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
-import { Megaphone, Play, Pause, PhoneCall, Loader2, Activity, Users } from "lucide-react";
+import { Megaphone, Play, Pause, PhoneCall, Loader2, Activity, Users, Edit } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { useQueryClient } from "@tanstack/react-query";
 
@@ -20,6 +20,15 @@ export default function Campaigns() {
   const queryClient = useQueryClient();
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [dialingCampaignId, setDialingCampaignId] = useState<number | null>(null);
+  
+  const updateCampaign = useUpdateCampaignMutation();
+  const [editingCampaign, setEditingCampaign] = useState<any | null>(null);
+  const [editFormData, setEditFormData] = useState({
+    name: "",
+    description: "",
+    scriptId: 0,
+    maxConcurrentCalls: 1
+  });
 
   const [formData, setFormData] = useState({
     name: "",
@@ -27,6 +36,30 @@ export default function Campaigns() {
     scriptId: 0,
     maxConcurrentCalls: 1
   });
+
+  const handleEditClick = (campaign: any) => {
+    setEditingCampaign(campaign);
+    setEditFormData({
+      name: campaign.name,
+      description: campaign.description || "",
+      scriptId: campaign.scriptId || 0,
+      maxConcurrentCalls: campaign.maxConcurrentCalls || 1
+    });
+  };
+
+  const handleEditSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editFormData.scriptId && scripts && scripts.length > 0) {
+      editFormData.scriptId = scripts[0].id;
+    }
+    try {
+      await updateCampaign.mutateAsync({ id: editingCampaign.id, data: editFormData });
+      toast({ title: "Campaign updated" });
+      setEditingCampaign(null);
+    } catch (err: any) {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -176,7 +209,17 @@ export default function Campaigns() {
                       <CardTitle className="text-lg font-display">{campaign.name}</CardTitle>
                       <p className="text-sm text-muted-foreground mt-1 line-clamp-1">{campaign.description || 'No description'}</p>
                     </div>
-                    <StatusBadge status={campaign.status} />
+                    <div className="flex items-center gap-2">
+                      <StatusBadge status={campaign.status} />
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="w-8 h-8 rounded-full border border-white/10 bg-white/5 hover:bg-white/10 text-muted-foreground hover:text-white transition-colors"
+                        onClick={() => handleEditClick(campaign)}
+                      >
+                        <Edit className="w-3.5 h-3.5" />
+                      </Button>
+                    </div>
                   </div>
                 </CardHeader>
                 <CardContent className="space-y-4">
@@ -252,6 +295,65 @@ export default function Campaigns() {
           </div>
         </Card>
       )}
+
+      <Dialog open={editingCampaign !== null} onOpenChange={(open) => !open && setEditingCampaign(null)}>
+        <DialogContent className="glass-panel sm:max-w-[500px] border-white/10">
+          <DialogHeader>
+            <DialogTitle>Edit Campaign</DialogTitle>
+          </DialogHeader>
+          {editingCampaign && (
+            <form onSubmit={handleEditSubmit} className="space-y-4 mt-4">
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Campaign Name</label>
+                <Input 
+                  required 
+                  value={editFormData.name} 
+                  onChange={e => setEditFormData({...editFormData, name: e.target.value})} 
+                  className="bg-background/50 border-white/10" 
+                  placeholder="Q4 Outreach"
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Description</label>
+                <Input 
+                  value={editFormData.description} 
+                  onChange={e => setEditFormData({...editFormData, description: e.target.value})} 
+                  className="bg-background/50 border-white/10" 
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Calling Script</label>
+                <select 
+                  className="w-full flex h-10 w-full items-center justify-between rounded-md border border-white/10 bg-background/50 px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                  value={editFormData.scriptId}
+                  onChange={e => setEditFormData({...editFormData, scriptId: parseInt(e.target.value)})}
+                  required
+                >
+                  <option value={0} disabled>Select a script...</option>
+                  {scripts?.map(script => (
+                    <option key={script.id} value={script.id}>{script.name}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Max Concurrent Calls</label>
+                <Input 
+                  type="number"
+                  min="1"
+                  max="10"
+                  value={editFormData.maxConcurrentCalls} 
+                  onChange={e => setEditFormData({...editFormData, maxConcurrentCalls: parseInt(e.target.value)})} 
+                  className="bg-background/50 border-white/10" 
+                />
+                <p className="text-xs text-muted-foreground">Determines how many calls the agent can handle simultaneously.</p>
+              </div>
+              <Button type="submit" className="w-full mt-4" disabled={updateCampaign.isPending}>
+                {updateCampaign.isPending ? "Saving..." : "Save Changes"}
+              </Button>
+            </form>
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

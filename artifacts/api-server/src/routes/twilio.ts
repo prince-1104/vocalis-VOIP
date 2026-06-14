@@ -1,6 +1,6 @@
 import { Router, type IRouter } from "express";
 import twilio from "twilio";
-import { db, agentConfigsTable, callLogsTable, trainingDataTable, callingScriptsTable, tenantsTable, intentTrainingTable } from "@workspace/db";
+import { db, agentConfigsTable, callLogsTable, trainingDataTable, callingScriptsTable, tenantsTable, intentTrainingTable, campaignsTable } from "@workspace/db";
 import { eq, and } from "drizzle-orm";
 import { openai } from "@workspace/integrations-openai-ai-server";
 import { randomUUID } from "crypto";
@@ -31,6 +31,7 @@ interface CallMeta {
   callSid?: string;
   crmMetadata?: Record<string, unknown>;
   liveTranscript: Array<{ role: string; content: string; timestamp: string }>;
+  scriptId?: number | null;
 }
 const callMetaCache = new Map<string, CallMeta>();
 
@@ -42,12 +43,12 @@ async function getCachedAgentConfig(userId: number): Promise<any> {
   return data;
 }
 
-async function getCachedSystemPrompt(userId: number, agentConfig: any): Promise<string> {
-  // Cache key includes language so auto-mode and explicit-lang configs don't collide
-  const key = `${userId}:${agentConfig.language ?? "en-US"}`;
+async function getCachedSystemPrompt(userId: number, agentConfig: any, scriptId?: number | null): Promise<string> {
+  // Cache key includes language and scriptId so prompt configurations don't collide
+  const key = `${userId}:${agentConfig.language ?? "en-US"}:${scriptId ?? "default"}`;
   const cached = systemPromptCache.get(key);
   if (cached && Date.now() - cached.fetchedAt < SYSTEM_PROMPT_CACHE_TTL) return cached.prompt;
-  const prompt = await buildSystemPrompt(userId, agentConfig);
+  const prompt = await buildSystemPrompt(userId, agentConfig, scriptId);
   systemPromptCache.set(key, { prompt, fetchedAt: Date.now() });
   return prompt;
 }
@@ -71,11 +72,22 @@ async function getCallMeta(callLogId: string): Promise<CallMeta | null> {
   if (isNaN(id)) return null;
   const log = await db.query.callLogsTable.findFirst({ where: eq(callLogsTable.id, id) });
   if (!log?.userId) return null;
+
+  // Resolve scriptId if call is part of a campaign
+  let scriptId = null;
+  if (log.campaignId) {
+    const campaign = await db.query.campaignsTable.findFirst({ where: eq(campaignsTable.id, log.campaignId) });
+    if (campaign?.scriptId) {
+      scriptId = campaign.scriptId;
+    }
+  }
+
   const meta: CallMeta = {
     userId: log.userId,
     callSid: log.callSid ?? undefined,
     crmMetadata: log.crmMetadata as Record<string, unknown> | undefined,
     liveTranscript: (log.liveTranscript as any) || [],
+    scriptId,
   };
   callMetaCache.set(callLogId, meta);
   return meta;
@@ -153,10 +165,17 @@ function buildScriptInstruction(language?: string | null): string {
   return "";
 }
 
-async function buildSystemPrompt(userId: number, agentConfig: any): Promise<string> {
+async function buildSystemPrompt(userId: number, agentConfig: any, scriptId?: number | null): Promise<string> {
+  let scriptQuery;
+  if (scriptId) {
+    scriptQuery = db.select().from(callingScriptsTable).where(and(eq(callingScriptsTable.userId, userId), eq(callingScriptsTable.id, scriptId))).limit(1);
+  } else {
+    scriptQuery = db.select().from(callingScriptsTable).where(and(eq(callingScriptsTable.userId, userId), eq(callingScriptsTable.isDefault, true))).limit(1);
+  }
+
   const [trainingData, scripts] = await Promise.all([
     db.select().from(trainingDataTable).where(eq(trainingDataTable.userId, userId)).limit(KB_MAX_ENTRIES),
-    db.select().from(callingScriptsTable).where(and(eq(callingScriptsTable.userId, userId), eq(callingScriptsTable.isDefault, true))).limit(1),
+    scriptQuery,
   ]);
 
   let system = `You are ${agentConfig.agentName || "SalesBot"}, an AI sales representative`;
@@ -187,12 +206,14 @@ async function buildSystemPrompt(userId: number, agentConfig: any): Promise<stri
 
   if (scripts.length > 0) {
     const script = scripts[0];
-    system += `CALL SCRIPT:\n`;
-    system += `Opening: "${script.openingLine}"\n`;
+    system += `CALL SCRIPT FLOW:\n`;
+    system += `1. Start with the Opening line: "${script.openingLine}" (already spoken as greeting).\n`;
     if (script.pitchPoints && Array.isArray(script.pitchPoints) && (script.pitchPoints as string[]).length > 0) {
-      system += `Key points: ${(script.pitchPoints as string[]).slice(0, 3).join(" | ")}\n`;
+      system += `2. If the user agrees/shows interest, pitch these key points: ${(script.pitchPoints as string[]).slice(0, 3).join(" | ")}\n`;
     }
-    if (script.closingLine) system += `Closing: "${script.closingLine}"\n`;
+    if (script.closingLine) {
+      system += `3. Wrap up the call or end the conversation by using the exact Closing line: "${script.closingLine}". Do NOT deviate from this phrasing when concluding.\n`;
+    }
     system += "\n";
   }
 
@@ -708,7 +729,10 @@ router.post("/twilio/inbound", async (req, res) => {
 
   const agentConfig = await getCachedAgentConfig(userId);
 
-  const greeting = agentConfig?.greeting || "Hi, thank you for calling. How can I help you today?";
+  const scripts = await db.select().from(callingScriptsTable).where(and(eq(callingScriptsTable.userId, userId), eq(callingScriptsTable.isDefault, true))).limit(1);
+  const script = scripts.length > 0 ? scripts[0] : null;
+
+  const greeting = script?.openingLine || agentConfig?.greeting || "Hi, thank you for calling. How can I help you today?";
   const baseUrl = getBaseUrl(req);
 
   const [callLog] = await db.insert(callLogsTable).values({
@@ -728,14 +752,16 @@ router.post("/twilio/inbound", async (req, res) => {
     callSid: req.body.CallSid ?? undefined,
     crmMetadata: undefined,
     liveTranscript: [],
+    scriptId: script?.id || null,
   });
-  getCachedSystemPrompt(userId, { ...(agentConfig || {}), language: agentConfig?.language || "en-US" }).catch(() => {});
+  getCachedSystemPrompt(userId, { ...(agentConfig || {}), language: agentConfig?.language || "en-US" }, script?.id || null).catch(() => {});
 
   const gather = twiml.gather({
     input: ["speech"],
     action: `${baseUrl}/api/twilio/voice?callLogId=${callLog.id}&history=`,
     method: "POST",
-    speechTimeout: "auto",
+    speechTimeout: "1.2",
+    speechModel: "phone_call",
     timeout: 10,
     language: getTwilioLang(agentConfig?.language) as any,
     actionOnEmptyResult: true,
@@ -999,7 +1025,7 @@ router.post("/twilio/voice", async (req, res) => {
       ? { ...(agentConfig || {}), language: lang }
       : (agentConfig || {});
     // ── Cached system prompt — no DB queries on warm turns ───────────
-    const basePrompt = await getCachedSystemPrompt(userId, promptConfig);
+    const basePrompt = await getCachedSystemPrompt(userId, promptConfig, callMeta?.scriptId);
 
     let systemPrompt = basePrompt;
     if (intentTraining && intentTraining.trainingContent) {
@@ -1101,7 +1127,8 @@ router.post("/twilio/voice", async (req, res) => {
     input: ["speech"],
     action: `${baseUrl}/api/twilio/voice?callLogId=${callLogId}&history=${encodedHistory}&intentCounts=${encodedIntentCounts}&humanReqCount=${humanReqCount}`,
     method: "POST",
-    speechTimeout: "auto",
+    speechTimeout: "1.2",
+    speechModel: "phone_call",
     timeout: 10,
     language: getTwilioLang(lang) as any,
     actionOnEmptyResult: true,
@@ -1174,7 +1201,7 @@ router.post("/twilio/voice-indic", async (req, res) => {
   } else {
     // ── Cached system prompt + intent training lookup in parallel ───────
     const [systemPrompt, intentTraining] = await Promise.all([
-      getCachedSystemPrompt(userId, { ...(agentConfig || {}), language: lang }),
+      getCachedSystemPrompt(userId, { ...(agentConfig || {}), language: lang }, callMeta?.scriptId),
       detectedIntent !== "general_question"
         ? db.query.intentTrainingTable.findFirst({
             where: and(
@@ -1254,7 +1281,8 @@ router.post("/twilio/voice-indic", async (req, res) => {
     input: ["speech"],
     action: `${baseUrl}/api/twilio/voice?callLogId=${callLogId}&history=${encodedHistory}&intentCounts=${encodedIntentCounts}&humanReqCount=${humanReqCount}`,
     method: "POST",
-    speechTimeout: "auto",
+    speechTimeout: "1.2",
+    speechModel: "phone_call",
     timeout: 10,
     language: getTwilioLang(lang) as any,
     actionOnEmptyResult: true,
@@ -1288,13 +1316,24 @@ router.post("/twilio/outbound-voice", async (req, res) => {
   const agentConfig = await getCachedAgentConfig(userId);
   const lang = agentConfig?.language || "en-US";
 
+  const callMeta = await getCallMeta(callLogId);
+  const scriptId = callMeta?.scriptId;
+
+  let script = null;
+  if (scriptId) {
+    const s = await db.select().from(callingScriptsTable).where(and(eq(callingScriptsTable.userId, userId), eq(callingScriptsTable.id, scriptId))).limit(1);
+    if (s.length > 0) script = s[0];
+  }
+  if (!script) {
+    const s = await db.select().from(callingScriptsTable).where(and(eq(callingScriptsTable.userId, userId), eq(callingScriptsTable.isDefault, true))).limit(1);
+    if (s.length > 0) script = s[0];
+  }
+
   // Pre-warm system prompt cache while TTS is being generated
-  getCachedSystemPrompt(userId, { ...(agentConfig || {}), language: lang }).catch(() => {});
+  getCachedSystemPrompt(userId, { ...(agentConfig || {}), language: lang }, script?.id || null).catch(() => {});
 
-  const scripts = await db.select().from(callingScriptsTable).where(and(eq(callingScriptsTable.userId, userId), eq(callingScriptsTable.isDefault, true))).limit(1);
-
-  const openingLine = scripts.length > 0
-    ? scripts[0].openingLine
+  const openingLine = script
+    ? script.openingLine
     : agentConfig?.greeting || "Hi, I'm calling on behalf of our company. Is this a good time to speak?";
 
   const baseUrl = getBaseUrl(req);
@@ -1304,7 +1343,8 @@ router.post("/twilio/outbound-voice", async (req, res) => {
     input: ["speech"],
     action: `${baseUrl}/api/twilio/voice?callLogId=${callLogId}&history=`,
     method: "POST",
-    speechTimeout: "auto",
+    speechTimeout: "1.2",
+    speechModel: "phone_call",
     timeout: 10,
     language: getTwilioLang(lang) as any,
     actionOnEmptyResult: true,
@@ -1496,7 +1536,28 @@ router.post("/twilio/widget-voice", async (req, res) => {
     where: eq(agentConfigsTable.userId, userId),
   });
 
-  const greeting = agentConfig?.greeting || "Hi, thank you for calling. How can I help you today?";
+  // Resolve scriptId if widget has a campaign
+  let scriptId: number | null = null;
+  if (agentConfig?.widgetCampaignId) {
+    const campaign = await db.query.campaignsTable.findFirst({
+      where: eq(campaignsTable.id, agentConfig.widgetCampaignId),
+    });
+    if (campaign?.scriptId) {
+      scriptId = campaign.scriptId;
+    }
+  }
+
+  let script = null;
+  if (scriptId) {
+    const s = await db.select().from(callingScriptsTable).where(and(eq(callingScriptsTable.userId, userId), eq(callingScriptsTable.id, scriptId))).limit(1);
+    if (s.length > 0) script = s[0];
+  }
+  if (!script) {
+    const s = await db.select().from(callingScriptsTable).where(and(eq(callingScriptsTable.userId, userId), eq(callingScriptsTable.isDefault, true))).limit(1);
+    if (s.length > 0) script = s[0];
+  }
+
+  const greeting = script?.openingLine || agentConfig?.greeting || "Hi, thank you for calling. How can I help you today?";
   const voice = mapVoice(agentConfig?.voice);
   const configuredLang = agentConfig?.language || "en-US";
 
@@ -1510,12 +1571,23 @@ router.post("/twilio/widget-voice", async (req, res) => {
     startedAt: new Date(),
   }).returning();
 
+  const callLogIdStr = String(callLog.id);
+  callMetaCache.set(callLogIdStr, {
+    userId,
+    callSid: req.body.CallSid ?? undefined,
+    crmMetadata: undefined,
+    liveTranscript: [],
+    scriptId: script?.id || null,
+  });
+  getCachedSystemPrompt(userId, { ...(agentConfig || {}), language: configuredLang }, script?.id || null).catch(() => {});
+
   // Set up <Gather> to collect the visitor's speech — identical to /twilio/inbound
   const gather = twiml.gather({
     input: ["speech"],
     action: `${baseUrl}/api/twilio/voice?callLogId=${callLog.id}&history=`,
     method: "POST",
-    speechTimeout: "auto",
+    speechTimeout: "1.2",
+    speechModel: "phone_call",
     timeout: 10,
     language: getTwilioLang(configuredLang) as any,
     actionOnEmptyResult: true,

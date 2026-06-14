@@ -55,3 +55,18 @@ export function usePauseCampaignMutation() {
     }
   };
 }
+
+export function useUpdateCampaignMutation() {
+  const queryClient = useQueryClient();
+  const mutation = useUpdateCampaign();
+  
+  return {
+    ...mutation,
+    mutateAsync: async (params: { id: number; data: UpdateCampaignRequest }) => {
+      const result = await mutation.mutateAsync(params);
+      queryClient.invalidateQueries({ queryKey: getListCampaignsQueryKey() });
+      return result;
+    }
+  };
+}
+
