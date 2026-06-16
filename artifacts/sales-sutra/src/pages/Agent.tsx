@@ -297,6 +297,10 @@ export default function AgentSettings() {
     setAutoAiMode(checked);
     if (checked) {
       form.setValue("language", "auto", { shouldDirty: true, shouldValidate: true });
+    } else {
+      if (form.getValues("language") === "auto") {
+        form.setValue("language", "en-US", { shouldDirty: true, shouldValidate: true });
+      }
     }
   };
 
@@ -424,9 +428,11 @@ export default function AgentSettings() {
                   )}
                 </label>
                 <select {...form.register("language")} className={selectCls} disabled={autoAiMode}>
-                  <optgroup label="Smart">
-                    <option value="auto">Auto-Detect (English + Hindi + Kannada + more)</option>
-                  </optgroup>
+                  {autoAiMode && (
+                    <optgroup label="Smart">
+                      <option value="auto">Auto-Detect (English + Hindi + Kannada + more)</option>
+                    </optgroup>
+                  )}
                   <optgroup label="Single language">
                     <option value="en-US">English (US)</option>
                     <option value="hi-IN">Hindi — हिन्दी</option>
