@@ -14,6 +14,7 @@ export * from "./callingScript";
 export * from "./callListResponse";
 export * from "./callLog";
 export * from "./callLogDirection";
+export * from "./callLogLiveTranscriptItem";
 export * from "./callLogOutcome";
 export * from "./campaign";
 export * from "./campaignStatus";

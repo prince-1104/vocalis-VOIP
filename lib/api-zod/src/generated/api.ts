@@ -198,6 +198,8 @@ export const ListCampaignsResponseItem = zod.object({
   status: zod.enum(["draft", "active", "paused", "completed"]),
   scriptId: zod.number().optional(),
   isAutomatic: zod.boolean().optional(),
+  maxRetries: zod.number().optional(),
+  retryIntervalMinutes: zod.number().optional(),
   contactIds: zod.array(zod.number()).optional(),
   totalContacts: zod.number().optional(),
   calledCount: zod.number().optional(),
@@ -215,6 +217,8 @@ export const ListCampaignsResponse = zod.array(ListCampaignsResponseItem);
  * @summary Create a campaign
  */
 export const createCampaignBodyIsAutomaticDefault = false;
+export const createCampaignBodyMaxRetriesDefault = 0;
+export const createCampaignBodyRetryIntervalMinutesDefault = 10;
 export const createCampaignBodyMaxConcurrentCallsDefault = 1;
 
 export const CreateCampaignBody = zod.object({
@@ -222,6 +226,10 @@ export const CreateCampaignBody = zod.object({
   description: zod.string().optional(),
   scriptId: zod.number().optional(),
   isAutomatic: zod.boolean().default(createCampaignBodyIsAutomaticDefault),
+  maxRetries: zod.number().default(createCampaignBodyMaxRetriesDefault),
+  retryIntervalMinutes: zod
+    .number()
+    .default(createCampaignBodyRetryIntervalMinutesDefault),
   contactIds: zod.array(zod.number()).optional(),
   startTime: zod.string().optional(),
   endTime: zod.string().optional(),
@@ -245,6 +253,8 @@ export const GetCampaignResponse = zod.object({
   status: zod.enum(["draft", "active", "paused", "completed"]),
   scriptId: zod.number().optional(),
   isAutomatic: zod.boolean().optional(),
+  maxRetries: zod.number().optional(),
+  retryIntervalMinutes: zod.number().optional(),
   contactIds: zod.array(zod.number()).optional(),
   totalContacts: zod.number().optional(),
   calledCount: zod.number().optional(),
@@ -269,6 +279,8 @@ export const UpdateCampaignBody = zod.object({
   description: zod.string().optional(),
   scriptId: zod.number().optional(),
   isAutomatic: zod.boolean().optional(),
+  maxRetries: zod.number().optional(),
+  retryIntervalMinutes: zod.number().optional(),
   contactIds: zod.array(zod.number()).optional(),
   startTime: zod.string().optional(),
   endTime: zod.string().optional(),
@@ -283,6 +295,8 @@ export const UpdateCampaignResponse = zod.object({
   status: zod.enum(["draft", "active", "paused", "completed"]),
   scriptId: zod.number().optional(),
   isAutomatic: zod.boolean().optional(),
+  maxRetries: zod.number().optional(),
+  retryIntervalMinutes: zod.number().optional(),
   contactIds: zod.array(zod.number()).optional(),
   totalContacts: zod.number().optional(),
   calledCount: zod.number().optional(),
@@ -309,6 +323,8 @@ export const StartCampaignResponse = zod.object({
   status: zod.enum(["draft", "active", "paused", "completed"]),
   scriptId: zod.number().optional(),
   isAutomatic: zod.boolean().optional(),
+  maxRetries: zod.number().optional(),
+  retryIntervalMinutes: zod.number().optional(),
   contactIds: zod.array(zod.number()).optional(),
   totalContacts: zod.number().optional(),
   calledCount: zod.number().optional(),
@@ -335,6 +351,8 @@ export const PauseCampaignResponse = zod.object({
   status: zod.enum(["draft", "active", "paused", "completed"]),
   scriptId: zod.number().optional(),
   isAutomatic: zod.boolean().optional(),
+  maxRetries: zod.number().optional(),
+  retryIntervalMinutes: zod.number().optional(),
   contactIds: zod.array(zod.number()).optional(),
   totalContacts: zod.number().optional(),
   calledCount: zod.number().optional(),
@@ -391,6 +409,15 @@ export const ListCallsResponse = zod.object({
         ])
         .optional(),
       transcript: zod.string().optional(),
+      liveTranscript: zod
+        .array(
+          zod.object({
+            role: zod.string().optional(),
+            content: zod.string().optional(),
+            timestamp: zod.string().optional(),
+          }),
+        )
+        .optional(),
       recordingUrl: zod.string().optional(),
       aiSummary: zod.string().optional(),
       startedAt: zod.date(),
@@ -450,6 +477,15 @@ export const GetCallResponse = zod.object({
     ])
     .optional(),
   transcript: zod.string().optional(),
+  liveTranscript: zod
+    .array(
+      zod.object({
+        role: zod.string().optional(),
+        content: zod.string().optional(),
+        timestamp: zod.string().optional(),
+      }),
+    )
+    .optional(),
   recordingUrl: zod.string().optional(),
   aiSummary: zod.string().optional(),
   startedAt: zod.date(),

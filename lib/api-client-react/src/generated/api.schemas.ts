@@ -126,6 +126,8 @@ export interface Campaign {
   status: CampaignStatus;
   scriptId?: number;
   isAutomatic?: boolean;
+  maxRetries?: number;
+  retryIntervalMinutes?: number;
   contactIds?: number[];
   totalContacts?: number;
   calledCount?: number;
@@ -145,6 +147,8 @@ export interface CreateCampaignRequest {
   description?: string;
   scriptId?: number;
   isAutomatic?: boolean;
+  maxRetries?: number;
+  retryIntervalMinutes?: number;
   contactIds?: number[];
   startTime?: string;
   endTime?: string;
@@ -157,6 +161,8 @@ export interface UpdateCampaignRequest {
   description?: string;
   scriptId?: number;
   isAutomatic?: boolean;
+  maxRetries?: number;
+  retryIntervalMinutes?: number;
   contactIds?: number[];
   startTime?: string;
   endTime?: string;
@@ -185,6 +191,12 @@ export const CallLogOutcome = {
   callback_requested: "callback_requested",
 } as const;
 
+export type CallLogLiveTranscriptItem = {
+  role?: string;
+  content?: string;
+  timestamp?: string;
+};
+
 export interface CallLog {
   id: number;
   contactId?: number;
@@ -195,6 +207,7 @@ export interface CallLog {
   duration?: number;
   outcome?: CallLogOutcome;
   transcript?: string;
+  liveTranscript?: CallLogLiveTranscriptItem[];
   recordingUrl?: string;
   aiSummary?: string;
   startedAt: string;

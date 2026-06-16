@@ -683,6 +683,10 @@ components:
           type: integer
         isAutomatic:
           type: boolean
+        maxRetries:
+          type: integer
+        retryIntervalMinutes:
+          type: integer
         contactIds:
           type: array
           items:
@@ -726,6 +730,12 @@ components:
         isAutomatic:
           type: boolean
           default: false
+        maxRetries:
+          type: integer
+          default: 0
+        retryIntervalMinutes:
+          type: integer
+          default: 10
         contactIds:
           type: array
           items:
@@ -753,6 +763,10 @@ components:
           type: integer
         isAutomatic:
           type: boolean
+        maxRetries:
+          type: integer
+        retryIntervalMinutes:
+          type: integer
         contactIds:
           type: array
           items:
@@ -788,6 +802,17 @@ components:
           enum: [answered, no_answer, busy, voicemail, interested, not_interested, callback_requested]
         transcript:
           type: string
+        liveTranscript:
+          type: array
+          items:
+            type: object
+            properties:
+              role:
+                type: string
+              content:
+                type: string
+              timestamp:
+                type: string
         recordingUrl:
           type: string
         aiSummary:

@@ -38,13 +38,15 @@ router.get("/campaigns", async (req, res) => {
 
 router.post("/campaigns", async (req, res) => {
   const userId = req.userId!;
-  const { name, description, scriptId, contactIds, startTime, endTime, timezone, maxConcurrentCalls, isAutomatic } = req.body;
+  const { name, description, scriptId, contactIds, startTime, endTime, timezone, maxConcurrentCalls, isAutomatic, maxRetries, retryIntervalMinutes } = req.body;
   const [campaign] = await db.insert(campaignsTable).values({
     userId, name, description, scriptId,
     totalContacts: contactIds?.length || 0,
     startTime, endTime, timezone,
     maxConcurrentCalls: maxConcurrentCalls || 1,
     isAutomatic: isAutomatic || false,
+    maxRetries: maxRetries !== undefined ? parseInt(maxRetries, 10) : 0,
+    retryIntervalMinutes: retryIntervalMinutes !== undefined ? parseInt(retryIntervalMinutes, 10) : 10,
     status: "draft",
   }).returning();
 
@@ -79,7 +81,7 @@ router.get("/campaigns/:id", async (req, res) => {
 router.put("/campaigns/:id", async (req, res) => {
   const userId = req.userId!;
   const campaignId = parseInt(req.params.id);
-  const { name, description, scriptId, startTime, endTime, timezone, maxConcurrentCalls, isAutomatic, contactIds } = req.body;
+  const { name, description, scriptId, startTime, endTime, timezone, maxConcurrentCalls, isAutomatic, maxRetries, retryIntervalMinutes, contactIds } = req.body;
   
   const existingCampaign = await db.query.campaignsTable.findFirst({
     where: and(eq(campaignsTable.id, campaignId), eq(campaignsTable.userId, userId)),
@@ -107,6 +109,8 @@ router.put("/campaigns/:id", async (req, res) => {
       timezone,
       maxConcurrentCalls,
       isAutomatic: isAutomatic !== undefined ? isAutomatic : existingCampaign.isAutomatic,
+      maxRetries: maxRetries !== undefined ? parseInt(maxRetries, 10) : existingCampaign.maxRetries,
+      retryIntervalMinutes: retryIntervalMinutes !== undefined ? parseInt(retryIntervalMinutes, 10) : existingCampaign.retryIntervalMinutes,
       totalContacts,
       updatedAt: new Date()
     })

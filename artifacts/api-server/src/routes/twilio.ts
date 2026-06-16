@@ -1,7 +1,7 @@
 import { Router, type IRouter } from "express";
 import twilio from "twilio";
-import { db, agentConfigsTable, callLogsTable, trainingDataTable, callingScriptsTable, tenantsTable, intentTrainingTable, campaignsTable } from "@workspace/db";
-import { eq, and, desc } from "drizzle-orm";
+import { db, agentConfigsTable, callLogsTable, trainingDataTable, callingScriptsTable, tenantsTable, intentTrainingTable, campaignsTable, campaignContactsTable } from "@workspace/db";
+import { eq, and, desc, sql } from "drizzle-orm";
 import { openai } from "@workspace/integrations-openai-ai-server";
 import { randomUUID } from "crypto";
 import { crmEventBus } from "../lib/crm-event-bus";
@@ -1567,16 +1567,50 @@ router.post("/twilio/status", async (req, res) => {
         timestamp: new Date().toISOString(),
       });
 
-      if (existingLog.campaignId) {
+      if (existingLog.campaignId && existingLog.contactId) {
         const campaign = await db.query.campaignsTable.findFirst({
           where: eq(campaignsTable.id, existingLog.campaignId),
         });
 
-        if (campaign && campaign.status === "active" && campaign.isAutomatic) {
-          const baseUrl = getBaseUrl(req);
-          dialNextForCampaign(campaign.id, existingLog.userId, baseUrl).catch((err) => {
-            console.error(`[twilio/status] Auto dialing next contact failed for campaign ${campaign.id}:`, err);
+        if (campaign) {
+          const resolvedOutcome = outcomeMap[callStatus] || "no_answer";
+
+          const campaignContact = await db.query.campaignContactsTable.findFirst({
+            where: and(
+              eq(campaignContactsTable.campaignId, existingLog.campaignId),
+              eq(campaignContactsTable.contactId, existingLog.contactId)
+            )
           });
+
+          if (campaignContact) {
+            if (resolvedOutcome === "answered") {
+              await db.update(campaignContactsTable)
+                .set({ status: "answered" })
+                .where(eq(campaignContactsTable.id, campaignContact.id));
+
+              await db.update(campaignsTable)
+                .set({ answeredCount: sql`${campaignsTable.answeredCount} + 1` })
+                .where(eq(campaignsTable.id, campaign.id));
+            } else {
+              if (campaignContact.attempts >= 1 + campaign.maxRetries) {
+                await db.update(campaignContactsTable)
+                  .set({ status: "failed" })
+                  .where(eq(campaignContactsTable.id, campaignContact.id));
+              } else {
+                const nextTime = new Date(Date.now() + campaign.retryIntervalMinutes * 60 * 1000);
+                await db.update(campaignContactsTable)
+                  .set({ status: "retrying", nextAttemptAt: nextTime })
+                  .where(eq(campaignContactsTable.id, campaignContact.id));
+              }
+            }
+          }
+
+          if (campaign.status === "active" && campaign.isAutomatic) {
+            const baseUrl = getBaseUrl(req);
+            dialNextForCampaign(campaign.id, existingLog.userId, baseUrl).catch((err) => {
+              console.error(`[twilio/status] Auto dialing next contact failed for campaign ${campaign.id}:`, err);
+            });
+          }
         }
       }
     }

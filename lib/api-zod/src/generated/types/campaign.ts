@@ -14,6 +14,8 @@ export interface Campaign {
   status: CampaignStatus;
   scriptId?: number;
   isAutomatic?: boolean;
+  maxRetries?: number;
+  retryIntervalMinutes?: number;
   contactIds?: number[];
   totalContacts?: number;
   calledCount?: number;

@@ -11,6 +11,8 @@ export interface CreateCampaignRequest {
   description?: string;
   scriptId?: number;
   isAutomatic?: boolean;
+  maxRetries?: number;
+  retryIntervalMinutes?: number;
   contactIds?: number[];
   startTime?: string;
   endTime?: string;

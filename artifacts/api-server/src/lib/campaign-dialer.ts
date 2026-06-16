@@ -1,6 +1,6 @@
 import twilio from "twilio";
 import { db, agentConfigsTable, callLogsTable, contactsTable, campaignsTable, campaignContactsTable, tenantsTable, sipTrunkConfigsTable } from "@workspace/db";
-import { eq, and } from "drizzle-orm";
+import { eq, and, ne, lt, or, lte, sql } from "drizzle-orm";
 import { decrypt } from "./encryption";
 
 function getTwilioClient(accountSid: string, authToken: string) {
@@ -38,27 +38,83 @@ export async function dialNextForCampaign(
     throw new Error("Campaign is not active");
   }
 
-  const contactLinks = await db.select().from(campaignContactsTable)
-    .where(eq(campaignContactsTable.campaignId, campaign.id));
+  const now = new Date();
+  const pendingLinks = await db
+    .select({
+      linkId: campaignContactsTable.id,
+      contactId: campaignContactsTable.contactId,
+      status: campaignContactsTable.status,
+      attempts: campaignContactsTable.attempts,
+      firstName: contactsTable.firstName,
+      lastName: contactsTable.lastName,
+      phone: contactsTable.phone,
+    })
+    .from(campaignContactsTable)
+    .innerJoin(contactsTable, eq(campaignContactsTable.contactId, contactsTable.id))
+    .where(
+      and(
+        eq(campaignContactsTable.campaignId, campaign.id),
+        ne(campaignContactsTable.status, "answered"),
+        lt(campaignContactsTable.attempts, 1 + campaign.maxRetries),
+        or(
+          eq(campaignContactsTable.status, "pending"),
+          and(
+            eq(campaignContactsTable.status, "retrying"),
+            lte(campaignContactsTable.nextAttemptAt, now)
+          )
+        )
+      )
+    )
+    .orderBy(campaignContactsTable.createdAt);
 
-  const pendingContacts = [];
-  for (const link of contactLinks) {
-    const contact = await db.query.contactsTable.findFirst({
-      where: and(eq(contactsTable.id, link.contactId), eq(contactsTable.status, "pending")),
-    });
-    if (contact) {
-      pendingContacts.push(contact);
+  const nextLink = pendingLinks[0];
+
+  if (!nextLink) {
+    const activeLinksCount = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(campaignContactsTable)
+      .where(
+        and(
+          eq(campaignContactsTable.campaignId, campaign.id),
+          ne(campaignContactsTable.status, "answered"),
+          lt(campaignContactsTable.attempts, 1 + campaign.maxRetries)
+        )
+      );
+
+    const remainingCount = Number(activeLinksCount[0]?.count || 0);
+
+    if (remainingCount === 0) {
+      await db.update(campaignsTable)
+        .set({ status: "completed", updatedAt: new Date() })
+        .where(eq(campaignsTable.id, campaign.id));
+      return { done: true, message: "All contacts have been called and retries exhausted. Campaign marked as completed." };
+    } else {
+      return { done: true, message: `No contacts available to dial right now. ${remainingCount} contacts scheduled for future retries.` };
     }
   }
 
-  const nextContact = pendingContacts[0];
+  const nextContact = {
+    id: nextLink.contactId,
+    phone: nextLink.phone,
+    firstName: nextLink.firstName,
+    lastName: nextLink.lastName,
+  };
 
-  if (!nextContact) {
-    await db.update(campaignsTable)
-      .set({ status: "completed", updatedAt: new Date() })
-      .where(eq(campaignsTable.id, campaign.id));
-    return { done: true, message: "All contacts have been called. Campaign marked as completed." };
-  }
+  await db.update(contactsTable)
+    .set({ status: "called", lastCalledAt: new Date(), updatedAt: new Date() })
+    .where(eq(contactsTable.id, nextContact.id));
+
+  await db.update(campaignContactsTable)
+    .set({
+      status: "calling",
+      attempts: nextLink.attempts + 1,
+      lastAttemptAt: new Date(),
+    })
+    .where(eq(campaignContactsTable.id, nextLink.linkId));
+
+  await db.update(campaignsTable)
+    .set({ calledCount: campaign.calledCount + 1, updatedAt: new Date() })
+    .where(eq(campaignsTable.id, campaign.id));
 
   const agentConfig = await db.query.agentConfigsTable.findFirst({ where: eq(agentConfigsTable.userId, userId) });
 
@@ -116,14 +172,6 @@ export async function dialNextForCampaign(
     startedAt: new Date(),
   }).returning();
 
-  await db.update(contactsTable)
-    .set({ status: "called", lastCalledAt: new Date(), updatedAt: new Date() })
-    .where(eq(contactsTable.id, nextContact.id));
-
-  await db.update(campaignsTable)
-    .set({ calledCount: campaign.calledCount + 1, updatedAt: new Date() })
-    .where(eq(campaignsTable.id, campaign.id));
-
   const call = await client.calls.create({
     to: toPhone,
     from: fromPhone,
@@ -151,6 +199,6 @@ export async function dialNextForCampaign(
       firstName: nextContact.firstName,
       lastName: nextContact.lastName,
     },
-    remaining: pendingContacts.length - 1,
+    remaining: pendingLinks.length - 1,
   };
 }

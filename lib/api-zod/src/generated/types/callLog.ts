@@ -6,6 +6,7 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { CallLogDirection } from "./callLogDirection";
+import type { CallLogLiveTranscriptItem } from "./callLogLiveTranscriptItem";
 import type { CallLogOutcome } from "./callLogOutcome";
 import type { Contact } from "./contact";
 
@@ -19,6 +20,7 @@ export interface CallLog {
   duration?: number;
   outcome?: CallLogOutcome;
   transcript?: string;
+  liveTranscript?: CallLogLiveTranscriptItem[];
   recordingUrl?: string;
   aiSummary?: string;
   startedAt: Date;

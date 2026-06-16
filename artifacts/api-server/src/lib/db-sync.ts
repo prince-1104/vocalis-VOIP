@@ -60,6 +60,12 @@ export async function syncDatabase() {
       'ALTER TABLE "api_cost_logs" ADD COLUMN IF NOT EXISTS "minutes" real;',
       'ALTER TABLE "api_cost_logs" ADD COLUMN IF NOT EXISTS "user_id" integer DEFAULT 0;',
       'ALTER TABLE "campaigns" ADD COLUMN IF NOT EXISTS "is_automatic" boolean DEFAULT false NOT NULL;',
+      'ALTER TABLE "campaigns" ADD COLUMN IF NOT EXISTS "max_retries" integer DEFAULT 0 NOT NULL;',
+      'ALTER TABLE "campaigns" ADD COLUMN IF NOT EXISTS "retry_interval_minutes" integer DEFAULT 10 NOT NULL;',
+      'ALTER TABLE "campaign_contacts" ADD COLUMN IF NOT EXISTS "status" text DEFAULT \'pending\' NOT NULL;',
+      'ALTER TABLE "campaign_contacts" ADD COLUMN IF NOT EXISTS "attempts" integer DEFAULT 0 NOT NULL;',
+      'ALTER TABLE "campaign_contacts" ADD COLUMN IF NOT EXISTS "last_attempt_at" timestamp;',
+      'ALTER TABLE "campaign_contacts" ADD COLUMN IF NOT EXISTS "next_attempt_at" timestamp;',
       'ALTER TABLE "tenants" ADD COLUMN IF NOT EXISTS "telephony_type" text DEFAULT \'TWILIO\' NOT NULL;'
     ];
 
