@@ -309,7 +309,7 @@ export default function AgentSettings() {
       const payload: any = {
         agentName: data.agentName,
         voice: data.voice,
-        language: autoAiMode ? "auto" : data.language,
+        language: autoAiMode ? "auto" : (data.language === "auto" ? "en-US" : data.language),
         personality: data.personality, aiModel: data.aiModel,
         greeting: data.greeting, voicemailMessage: data.voicemailMessage,
       };

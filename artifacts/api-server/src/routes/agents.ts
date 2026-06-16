@@ -60,9 +60,9 @@ router.get("/agents", async (req, res) => {
 
   res.json(maskConfig(config, req.isSuperadmin!));
 });
-
 router.put("/agents", async (req, res) => {
   const userId = req.userId!;
+  console.log("PUT /agents userId:", userId, "body:", req.body);
   const {
     agentName, voice, language,
     phoneNumber, twilioAccountSid, twilioAuthToken,
@@ -86,6 +86,16 @@ router.put("/agents", async (req, res) => {
   if (widgetEnabled !== undefined) updateData.widgetEnabled = widgetEnabled;
   if (widgetCampaignId !== undefined) updateData.widgetCampaignId = widgetCampaignId === null ? null : Number(widgetCampaignId);
   if (widgetVoiceEnabled !== undefined) updateData.widgetVoiceEnabled = widgetVoiceEnabled;
+
+  // Defensive fallback: if a specific premium AI model is chosen, but language is somehow set to "auto"
+  // (e.g., due to frontend cache or state mismatch), force the language to "en-US" to disable Auto-AI Mode.
+  const currentConfig = await db.query.agentConfigsTable.findFirst({ where: eq(agentConfigsTable.userId, userId) });
+  const resolvedModel = updateData.aiModel !== undefined ? updateData.aiModel : (currentConfig?.aiModel || "gpt-4o-mini");
+  const resolvedLanguage = updateData.language !== undefined ? updateData.language : (currentConfig?.language || "en-US");
+
+  if (resolvedLanguage === "auto" && resolvedModel !== "gemini-1.5-pro" && resolvedModel !== "gpt-4o-mini") {
+    updateData.language = "en-US";
+  }
 
   if (req.isSuperadmin) {
     if (phoneNumber !== undefined) updateData.phoneNumber = phoneNumber;
