@@ -593,7 +593,7 @@ async function generateAIResponseIndic(
 
   let ttsAudioId: string | null = null;
   try {
-    ttsAudioId = await callSarvamTTS(text, lang);
+    ttsAudioId = await withTimeout(callSarvamTTS(text, lang), 2500, "Sarvam TTS timeout");
 
     // Fire-and-forget: log Sarvam TTS cost
     if (userId && ttsAudioId) {
@@ -622,7 +622,7 @@ async function renderPromptAudioForCall(
 ): Promise<{ ttsAudioId: string | null; useMp3: boolean }> {
   if (isIndianLanguage(lang)) {
     try {
-      const sarvamTtsId = await callSarvamTTS(text, lang);
+      const sarvamTtsId = await withTimeout(callSarvamTTS(text, lang), 2500, "Greeting Sarvam TTS timeout");
       if (sarvamTtsId) {
         return { ttsAudioId: sarvamTtsId, useMp3: false };
       }
@@ -633,7 +633,7 @@ async function renderPromptAudioForCall(
 
   if (lang === "auto") {
     try {
-      const b64 = await generateOpenAITTS(text, voice || "nova");
+      const b64 = await withTimeout(generateOpenAITTS(text, voice || "nova"), 2500, "Greeting OpenAI TTS timeout");
       const ttsId = storeTtsAudio(b64);
       return { ttsAudioId: ttsId, useMp3: true };
     } catch (err) {
@@ -849,7 +849,7 @@ router.post("/twilio/inbound", async (req, res) => {
     input: ["speech"],
     action: `${baseUrl}/api/twilio/voice?callLogId=${callLog.id}&history=`,
     method: "POST",
-    speechTimeout: "2",
+    speechTimeout: "1.5",
     speechModel: "phone_call",
     enhanced: true,
     timeout: 10,
@@ -1144,9 +1144,12 @@ router.post("/twilio/voice", async (req, res) => {
       // Start TTS generation immediately (fire-and-forget race with DB writes below)
       const useSarvamTts = isIndianLanguage(lang);
       const ttsStart = Date.now();
-      const ttsPromise = (useSarvamTts
-        ? callSarvamTTS(aiResponse, lang)
-        : generateOpenAITTS(aiResponse, agentConfig?.voice || "nova").then(b64 => storeTtsAudio(b64))
+      const ttsPromise = withTimeout(
+        useSarvamTts
+          ? callSarvamTTS(aiResponse, lang)
+          : generateOpenAITTS(aiResponse, agentConfig?.voice || "nova").then(b64 => storeTtsAudio(b64)),
+        2500,
+        "TTS generation timeout"
       ).catch(e => { console.error("TTS generation err:", e); return null; });
 
       // Fire-and-forget: log LLM cost
@@ -1240,7 +1243,7 @@ router.post("/twilio/voice", async (req, res) => {
     input: ["speech"],
     action: `${baseUrl}/api/twilio/voice?callLogId=${callLogId}&history=${encodedHistory}&intentCounts=${encodedIntentCounts}&humanReqCount=${humanReqCount}`,
     method: "POST",
-    speechTimeout: "2",
+    speechTimeout: "1.5",
     speechModel: "phone_call",
     enhanced: true,
     timeout: 10,
@@ -1405,7 +1408,7 @@ router.post("/twilio/voice-indic", async (req, res) => {
     input: ["speech"],
     action: `${baseUrl}/api/twilio/voice?callLogId=${callLogId}&history=${encodedHistory}&intentCounts=${encodedIntentCounts}&humanReqCount=${humanReqCount}`,
     method: "POST",
-    speechTimeout: "2",
+    speechTimeout: "1.5",
     speechModel: "phone_call",
     enhanced: true,
     timeout: 10,
@@ -1460,7 +1463,7 @@ router.post("/twilio/outbound-voice", async (req, res) => {
     input: ["speech"],
     action: `${baseUrl}/api/twilio/voice?callLogId=${callLogId}&history=`,
     method: "POST",
-    speechTimeout: "2",
+    speechTimeout: "1.5",
     speechModel: "phone_call",
     enhanced: true,
     timeout: 10,
@@ -1703,7 +1706,7 @@ router.post("/twilio/widget-voice", async (req, res) => {
     input: ["speech"],
     action: `${baseUrl}/api/twilio/voice?callLogId=${callLog.id}&history=`,
     method: "POST",
-    speechTimeout: "2",
+    speechTimeout: "1.5",
     speechModel: "phone_call",
     enhanced: true,
     timeout: 10,
