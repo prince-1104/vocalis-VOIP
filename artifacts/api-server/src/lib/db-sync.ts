@@ -35,13 +35,32 @@ export async function syncDatabase() {
       );
     `);
 
+    // Ensure sip_trunk_configs exists
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS "sip_trunk_configs" (
+        "id" serial PRIMARY KEY NOT NULL,
+        "tenant_id" integer NOT NULL UNIQUE REFERENCES "tenants"("id") ON DELETE CASCADE,
+        "sip_domain" text NOT NULL,
+        "sip_username" text NOT NULL,
+        "sip_password" text NOT NULL,
+        "phone_number" text NOT NULL,
+        "outbound_proxy" text,
+        "transport" text DEFAULT 'UDP' NOT NULL,
+        "termination_uri" text,
+        "is_enabled" boolean DEFAULT false NOT NULL,
+        "created_at" timestamp DEFAULT now() NOT NULL,
+        "updated_at" timestamp DEFAULT now() NOT NULL
+      );
+    `);
+
     // 3. Add columns that might be missing from older schema versions
     const alterQueries = [
       'ALTER TABLE "api_cost_logs" ADD COLUMN IF NOT EXISTS "context" text;',
       'ALTER TABLE "api_cost_logs" ADD COLUMN IF NOT EXISTS "characters" integer;',
       'ALTER TABLE "api_cost_logs" ADD COLUMN IF NOT EXISTS "minutes" real;',
       'ALTER TABLE "api_cost_logs" ADD COLUMN IF NOT EXISTS "user_id" integer DEFAULT 0;',
-      'ALTER TABLE "campaigns" ADD COLUMN IF NOT EXISTS "is_automatic" boolean DEFAULT false NOT NULL;'
+      'ALTER TABLE "campaigns" ADD COLUMN IF NOT EXISTS "is_automatic" boolean DEFAULT false NOT NULL;',
+      'ALTER TABLE "tenants" ADD COLUMN IF NOT EXISTS "telephony_type" text DEFAULT \'TWILIO\' NOT NULL;'
     ];
 
     for (const q of alterQueries) {

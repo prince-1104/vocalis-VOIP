@@ -1,6 +1,7 @@
 import twilio from "twilio";
-import { db, agentConfigsTable, callLogsTable, contactsTable, campaignsTable, campaignContactsTable } from "@workspace/db";
+import { db, agentConfigsTable, callLogsTable, contactsTable, campaignsTable, campaignContactsTable, tenantsTable, sipTrunkConfigsTable } from "@workspace/db";
 import { eq, and } from "drizzle-orm";
+import { decrypt } from "./encryption";
 
 function getTwilioClient(accountSid: string, authToken: string) {
   return twilio(accountSid, authToken);
@@ -61,8 +62,45 @@ export async function dialNextForCampaign(
 
   const agentConfig = await db.query.agentConfigsTable.findFirst({ where: eq(agentConfigsTable.userId, userId) });
 
-  if (!agentConfig?.twilioAccountSid || !agentConfig?.twilioAuthToken || !agentConfig?.phoneNumber) {
+  if (!agentConfig?.twilioAccountSid || !agentConfig?.twilioAuthToken) {
     throw new Error("Twilio not fully configured. Check AI Agent settings.");
+  }
+
+  const tenant = await db.query.tenantsTable.findFirst({
+    where: eq(tenantsTable.ownerId, userId),
+  });
+
+  if (!tenant) {
+    throw new Error("Tenant not found for user.");
+  }
+
+  let toPhone = nextContact.phone;
+  let fromPhone: string;
+  let sipAuthUsername: string | undefined;
+  let sipAuthPassword: string | undefined;
+
+  if (tenant.telephonyType === "SIP_TRUNK") {
+    const sipConfig = await db.query.sipTrunkConfigsTable.findFirst({
+      where: eq(sipTrunkConfigsTable.tenantId, tenant.id),
+    });
+
+    if (!sipConfig || !sipConfig.isEnabled) {
+      throw new Error("SIP Trunk configuration is disabled or not found.");
+    }
+
+    toPhone = `sip:${nextContact.phone}@${sipConfig.sipDomain}`;
+    fromPhone = sipConfig.phoneNumber;
+    sipAuthUsername = sipConfig.sipUsername;
+    try {
+      sipAuthPassword = decrypt(sipConfig.sipPassword);
+    } catch (err) {
+      throw new Error("Failed to decrypt SIP password.");
+    }
+  } else {
+    if (!agentConfig.phoneNumber) {
+      throw new Error("Twilio phone number not configured. Check AI Agent settings.");
+    }
+    fromPhone = agentConfig.phoneNumber;
   }
 
   const client = getTwilioClient(agentConfig.twilioAccountSid, agentConfig.twilioAuthToken);
@@ -87,14 +125,15 @@ export async function dialNextForCampaign(
     .where(eq(campaignsTable.id, campaign.id));
 
   const call = await client.calls.create({
-    to: nextContact.phone,
-    from: agentConfig.phoneNumber,
+    to: toPhone,
+    from: fromPhone,
     url: `${baseUrl}/api/twilio/outbound-voice?callLogId=${callLog.id}&userId=${userId}`,
     statusCallback: `${baseUrl}/api/twilio/status?callLogId=${callLog.id}`,
     statusCallbackMethod: "POST",
     statusCallbackEvent: ["completed", "no-answer", "busy", "failed"],
     machineDetection: "Enable",
     asyncAmd: "true",
+    ...(sipAuthUsername && sipAuthPassword ? { sipAuthUsername, sipAuthPassword } : {}),
   });
 
   // Store the actual Call SID in the call logs

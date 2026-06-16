@@ -1,8 +1,9 @@
 import { Router, type IRouter } from "express";
 import twilio from "twilio";
-import { db, agentConfigsTable, callLogsTable, contactsTable, campaignsTable, campaignContactsTable, callingScriptsTable } from "@workspace/db";
+import { db, agentConfigsTable, callLogsTable, contactsTable, campaignsTable, campaignContactsTable, callingScriptsTable, tenantsTable, sipTrunkConfigsTable } from "@workspace/db";
 import { eq, and } from "drizzle-orm";
 import { dialNextForCampaign } from "../lib/campaign-dialer";
+import { decrypt } from "../lib/encryption";
 
 const router: IRouter = Router();
 
@@ -39,9 +40,45 @@ router.post("/contacts/:id/dial", async (req, res) => {
     return;
   }
 
-  if (!agentConfig.phoneNumber) {
-    res.status(400).json({ error: "Twilio phone number not configured. Please set it in AI Agent settings." });
+  const tenant = await db.query.tenantsTable.findFirst({
+    where: eq(tenantsTable.ownerId, userId),
+  });
+
+  if (!tenant) {
+    res.status(400).json({ error: "Tenant not found for user." });
     return;
+  }
+
+  let toPhone = contact.phone;
+  let fromPhone: string;
+  let sipAuthUsername: string | undefined;
+  let sipAuthPassword: string | undefined;
+
+  if (tenant.telephonyType === "SIP_TRUNK") {
+    const sipConfig = await db.query.sipTrunkConfigsTable.findFirst({
+      where: eq(sipTrunkConfigsTable.tenantId, tenant.id),
+    });
+
+    if (!sipConfig || !sipConfig.isEnabled) {
+      res.status(400).json({ error: "SIP Trunk configuration is disabled or not found." });
+      return;
+    }
+
+    toPhone = `sip:${contact.phone}@${sipConfig.sipDomain}`;
+    fromPhone = sipConfig.phoneNumber;
+    sipAuthUsername = sipConfig.sipUsername;
+    try {
+      sipAuthPassword = decrypt(sipConfig.sipPassword);
+    } catch (err) {
+      res.status(500).json({ error: "Failed to decrypt SIP password." });
+      return;
+    }
+  } else {
+    if (!agentConfig.phoneNumber) {
+      res.status(400).json({ error: "Twilio phone number not configured. Please set it in AI Agent settings." });
+      return;
+    }
+    fromPhone = agentConfig.phoneNumber;
   }
 
   const baseUrl = getBaseUrl(req);
@@ -63,14 +100,15 @@ router.post("/contacts/:id/dial", async (req, res) => {
     .where(eq(contactsTable.id, contact.id));
 
   const call = await client.calls.create({
-    to: contact.phone,
-    from: agentConfig.phoneNumber,
+    to: toPhone,
+    from: fromPhone,
     url: `${baseUrl}/api/twilio/outbound-voice?callLogId=${callLog.id}&userId=${userId}`,
     statusCallback: `${baseUrl}/api/twilio/status?callLogId=${callLog.id}`,
     statusCallbackMethod: "POST",
     statusCallbackEvent: ["completed", "no-answer", "busy", "failed"],
     machineDetection: "Enable",
     asyncAmd: "true",
+    ...(sipAuthUsername && sipAuthPassword ? { sipAuthUsername, sipAuthPassword } : {}),
   });
 
   // Store Twilio Call SID for CRM tracking/control
@@ -118,9 +156,45 @@ router.post("/dial/phone", async (req, res) => {
     return;
   }
 
-  if (!agentConfig.phoneNumber) {
-    res.status(400).json({ error: "Twilio phone number not configured. Go to AI Agent → Twilio Settings to add your phone number." });
+  const tenant = await db.query.tenantsTable.findFirst({
+    where: eq(tenantsTable.ownerId, userId),
+  });
+
+  if (!tenant) {
+    res.status(400).json({ error: "Tenant not found for user." });
     return;
+  }
+
+  let toPhone = phone;
+  let fromPhone: string;
+  let sipAuthUsername: string | undefined;
+  let sipAuthPassword: string | undefined;
+
+  if (tenant.telephonyType === "SIP_TRUNK") {
+    const sipConfig = await db.query.sipTrunkConfigsTable.findFirst({
+      where: eq(sipTrunkConfigsTable.tenantId, tenant.id),
+    });
+
+    if (!sipConfig || !sipConfig.isEnabled) {
+      res.status(400).json({ error: "SIP Trunk configuration is disabled or not found." });
+      return;
+    }
+
+    toPhone = `sip:${phone}@${sipConfig.sipDomain}`;
+    fromPhone = sipConfig.phoneNumber;
+    sipAuthUsername = sipConfig.sipUsername;
+    try {
+      sipAuthPassword = decrypt(sipConfig.sipPassword);
+    } catch (err) {
+      res.status(500).json({ error: "Failed to decrypt SIP password." });
+      return;
+    }
+  } else {
+    if (!agentConfig.phoneNumber) {
+      res.status(400).json({ error: "Twilio phone number not configured. Go to AI Agent → Twilio Settings to add your phone number." });
+      return;
+    }
+    fromPhone = agentConfig.phoneNumber;
   }
 
   const baseUrl = getBaseUrl(req);
@@ -137,14 +211,15 @@ router.post("/dial/phone", async (req, res) => {
 
   try {
     const call = await client.calls.create({
-      to: phone,
-      from: agentConfig.phoneNumber,
+      to: toPhone,
+      from: fromPhone,
       url: `${baseUrl}/api/twilio/outbound-voice?callLogId=${callLog.id}&userId=${userId}`,
       statusCallback: `${baseUrl}/api/twilio/status?callLogId=${callLog.id}`,
       statusCallbackMethod: "POST",
       statusCallbackEvent: ["completed", "no-answer", "busy", "failed"],
       machineDetection: "Enable",
       asyncAmd: "true",
+      ...(sipAuthUsername && sipAuthPassword ? { sipAuthUsername, sipAuthPassword } : {}),
     });
 
     // Store the Call SID

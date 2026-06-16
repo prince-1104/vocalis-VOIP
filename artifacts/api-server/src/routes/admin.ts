@@ -1,7 +1,8 @@
 import { Router, type IRouter } from "express";
-import { db, tenantsTable, tenantUsersTable, callLogsTable, agentConfigsTable, usersTable, platformSettingsTable, apiCostLogsTable } from "@workspace/db";
+import { db, tenantsTable, tenantUsersTable, callLogsTable, agentConfigsTable, usersTable, platformSettingsTable, apiCostLogsTable, sipTrunkConfigsTable } from "@workspace/db";
 import { eq, and, gte, sql } from "drizzle-orm";
 import bcrypt from "bcryptjs";
+import { encrypt } from "../lib/encryption";
 
 const router: IRouter = Router();
 
@@ -76,6 +77,7 @@ router.get("/superadmin/tenants", async (req, res) => {
       callsThisMonth: monthStats.callsThisMonth,
       costThisMonth: monthStats.costThisMonth,
       twilioConfigured: !!(agentConfig?.twilioAccountSid && agentConfig?.twilioAuthToken),
+      telephonyType: tenant.telephonyType,
     };
   }));
 
@@ -150,6 +152,10 @@ router.get("/superadmin/tenants/:id", async (req, res) => {
 
   const monthStats = tenant.ownerId ? await getTenantMonthStats(tenant.ownerId, tenantId) : { callsThisMonth: 0, costThisMonth: 0 };
 
+  const sipTrunkConfig = await db.query.sipTrunkConfigsTable.findFirst({
+    where: eq(sipTrunkConfigsTable.tenantId, tenantId),
+  });
+
   res.json({
     ...tenant,
     users,
@@ -159,6 +165,15 @@ router.get("/superadmin/tenants/:id", async (req, res) => {
       twilioAuthToken: agentConfig?.twilioAuthToken ? "***configured***" : null,
       twilioConfigured: !!(agentConfig?.twilioAccountSid && agentConfig?.twilioAuthToken),
     },
+    sipTrunkConfig: sipTrunkConfig ? {
+      sipDomain: sipTrunkConfig.sipDomain,
+      sipUsername: sipTrunkConfig.sipUsername,
+      phoneNumber: sipTrunkConfig.phoneNumber,
+      outboundProxy: sipTrunkConfig.outboundProxy,
+      transport: sipTrunkConfig.transport,
+      terminationUri: sipTrunkConfig.terminationUri,
+      isEnabled: sipTrunkConfig.isEnabled,
+    } : null,
     stats: {
       callsThisMonth: monthStats.callsThisMonth,
       costThisMonth: monthStats.costThisMonth,
@@ -321,6 +336,141 @@ router.put("/superadmin/tenants/:id/telephony", async (req, res) => {
   }
 
   await db.update(agentConfigsTable).set(updateData).where(eq(agentConfigsTable.userId, tenant.ownerId));
+  res.json({ success: true });
+});
+
+// ── SIP Trunk Configuration (Superadmin Only) ──
+router.post("/superadmin/tenants/:id/telephony/sip-trunk", async (req, res) => {
+  const tenantId = parseInt(req.params.id, 10);
+  const { sipDomain, sipUsername, sipPassword, phoneNumber, outboundProxy, transport } = req.body as {
+    sipDomain?: string; sipUsername?: string; sipPassword?: string; phoneNumber?: string; outboundProxy?: string; transport?: string;
+  };
+
+  if (!sipDomain || !sipUsername || !phoneNumber) {
+    res.status(400).json({ error: "sipDomain, sipUsername, and phoneNumber are required" });
+    return;
+  }
+
+  const tenant = await db.query.tenantsTable.findFirst({ where: eq(tenantsTable.id, tenantId) });
+  if (!tenant) {
+    res.status(404).json({ error: "Tenant not found" });
+    return;
+  }
+
+  const existingConfig = await db.query.sipTrunkConfigsTable.findFirst({
+    where: eq(sipTrunkConfigsTable.tenantId, tenantId),
+  });
+
+  let encryptedPassword = "";
+  if (sipPassword) {
+    encryptedPassword = encrypt(sipPassword);
+  } else if (existingConfig) {
+    encryptedPassword = existingConfig.sipPassword;
+  } else {
+    res.status(400).json({ error: "sipPassword is required for new configurations" });
+    return;
+  }
+
+  const terminationUri = `sip:${sipUsername}@${sipDomain}`;
+  const resolvedTransport = transport || "UDP";
+
+  if (existingConfig) {
+    await db.update(sipTrunkConfigsTable)
+      .set({
+        sipDomain,
+        sipUsername,
+        sipPassword: encryptedPassword,
+        phoneNumber,
+        outboundProxy: outboundProxy || null,
+        transport: resolvedTransport,
+        terminationUri,
+        updatedAt: new Date(),
+      })
+      .where(eq(sipTrunkConfigsTable.tenantId, tenantId));
+  } else {
+    await db.insert(sipTrunkConfigsTable).values({
+      tenantId,
+      sipDomain,
+      sipUsername,
+      sipPassword: encryptedPassword,
+      phoneNumber,
+      outboundProxy: outboundProxy || null,
+      transport: resolvedTransport,
+      terminationUri,
+      isEnabled: false,
+    });
+  }
+
+  res.json({ success: true });
+});
+
+router.get("/superadmin/tenants/:id/telephony/sip-trunk", async (req, res) => {
+  const tenantId = parseInt(req.params.id, 10);
+  const config = await db.query.sipTrunkConfigsTable.findFirst({
+    where: eq(sipTrunkConfigsTable.tenantId, tenantId),
+  });
+
+  if (!config) {
+    res.status(404).json({ error: "SIP Trunk configuration not found" });
+    return;
+  }
+
+  res.json({
+    id: config.id,
+    tenantId: config.tenantId,
+    sipDomain: config.sipDomain,
+    sipUsername: config.sipUsername,
+    sipPassword: config.sipPassword ? "***configured***" : null,
+    phoneNumber: config.phoneNumber,
+    outboundProxy: config.outboundProxy,
+    transport: config.transport,
+    terminationUri: config.terminationUri,
+    isEnabled: config.isEnabled,
+  });
+});
+
+router.patch("/superadmin/tenants/:id/telephony/sip-trunk/toggle", async (req, res) => {
+  const tenantId = parseInt(req.params.id, 10);
+  const { isEnabled } = req.body as { isEnabled: boolean };
+
+  if (isEnabled === undefined) {
+    res.status(400).json({ error: "isEnabled is required" });
+    return;
+  }
+
+  const config = await db.query.sipTrunkConfigsTable.findFirst({
+    where: eq(sipTrunkConfigsTable.tenantId, tenantId),
+  });
+
+  if (isEnabled && !config) {
+    res.status(400).json({ error: "Cannot enable SIP Trunk: configuration is missing" });
+    return;
+  }
+
+  await db.transaction(async (tx) => {
+    if (config) {
+      await tx.update(sipTrunkConfigsTable)
+        .set({ isEnabled, updatedAt: new Date() })
+        .where(eq(sipTrunkConfigsTable.tenantId, tenantId));
+    }
+    await tx.update(tenantsTable)
+      .set({ telephonyType: isEnabled ? "SIP_TRUNK" : "TWILIO", updatedAt: new Date() })
+      .where(eq(tenantsTable.id, tenantId));
+  });
+
+  res.json({ success: true, telephonyType: isEnabled ? "SIP_TRUNK" : "TWILIO" });
+});
+
+router.delete("/superadmin/tenants/:id/telephony/sip-trunk", async (req, res) => {
+  const tenantId = parseInt(req.params.id, 10);
+
+  await db.transaction(async (tx) => {
+    await tx.delete(sipTrunkConfigsTable).where(eq(sipTrunkConfigsTable.tenantId, tenantId));
+    await tx.update(tenantsTable)
+      .set({ telephonyType: "TWILIO", updatedAt: new Date() })
+      .where(eq(tenantsTable.id, tenantId));
+  });
+
   res.json({ success: true });
 });
 

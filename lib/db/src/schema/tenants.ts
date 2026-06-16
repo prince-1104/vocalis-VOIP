@@ -12,6 +12,7 @@ export const tenantsTable = pgTable("tenants", {
   paymentTermsDays: integer("payment_terms_days").notNull().default(30),
   suspendedAt: timestamp("suspended_at"),
   ownerId: integer("owner_id").references(() => usersTable.id),
+  telephonyType: text("telephony_type").notNull().default("TWILIO"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 });
@@ -53,3 +54,22 @@ export type TenantUser = typeof tenantUsersTable.$inferSelect;
 export const insertTenantSessionSchema = createInsertSchema(tenantSessionsTable).omit({ id: true, createdAt: true });
 export type InsertTenantSession = z.infer<typeof insertTenantSessionSchema>;
 export type TenantSession = typeof tenantSessionsTable.$inferSelect;
+
+export const sipTrunkConfigsTable = pgTable("sip_trunk_configs", {
+  id: serial("id").primaryKey(),
+  tenantId: integer("tenant_id").notNull().unique().references(() => tenantsTable.id, { onDelete: "cascade" }),
+  sipDomain: text("sip_domain").notNull(),
+  sipUsername: text("sip_username").notNull(),
+  sipPassword: text("sip_password").notNull(),
+  phoneNumber: text("phone_number").notNull(),
+  outboundProxy: text("outbound_proxy"),
+  transport: text("transport").notNull().default("UDP"),
+  terminationUri: text("termination_uri"),
+  isEnabled: boolean("is_enabled").notNull().default(false),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+});
+
+export const insertSipTrunkConfigSchema = createInsertSchema(sipTrunkConfigsTable).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertSipTrunkConfig = z.infer<typeof insertSipTrunkConfigSchema>;
+export type SipTrunkConfig = typeof sipTrunkConfigsTable.$inferSelect;

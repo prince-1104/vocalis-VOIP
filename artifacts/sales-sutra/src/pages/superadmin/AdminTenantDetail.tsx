@@ -47,12 +47,22 @@ interface TenantDetail {
   createdAt: string;
   ownerId: number;
   users: TenantUser[];
+  telephonyType: string;
   telephony: {
     phoneNumber: string | null;
     twilioAccountSid: string | null;
     twilioAuthToken: string | null;
     twilioConfigured: boolean;
   };
+  sipTrunkConfig: {
+    sipDomain: string;
+    sipUsername: string;
+    phoneNumber: string;
+    outboundProxy: string | null;
+    transport: string;
+    terminationUri: string | null;
+    isEnabled: boolean;
+  } | null;
   stats: {
     callsThisMonth: number;
     costThisMonth: number;
@@ -74,6 +84,19 @@ export default function AdminTenantDetail() {
   const [showTelephony, setShowTelephony] = useState(false);
   const [telephonyForm, setTelephonyForm] = useState({ phoneNumber: "", twilioAccountSid: "", twilioAuthToken: "" });
   const [savingTelephony, setSavingTelephony] = useState(false);
+  const [activeTab, setActiveTab] = useState<"TWILIO" | "SIP_TRUNK">("TWILIO");
+  const [showSipTrunk, setShowSipTrunk] = useState(false);
+  const [isEditingSip, setIsEditingSip] = useState(false);
+  const [savingSip, setSavingSip] = useState(false);
+  const [showSipPassword, setShowSipPassword] = useState(false);
+  const [sipForm, setSipForm] = useState({
+    sipDomain: "",
+    sipUsername: "",
+    sipPassword: "",
+    phoneNumber: "",
+    outboundProxy: "",
+    transport: "UDP",
+  });
 
   const fetchTenant = useCallback(async () => {
     try {
@@ -90,6 +113,7 @@ export default function AdminTenantDetail() {
         twilioAccountSid: data.telephony.twilioAccountSid || "",
         twilioAuthToken: "",
       });
+      setActiveTab(data.telephonyType === "SIP_TRUNK" ? "SIP_TRUNK" : "TWILIO");
     } catch (e: unknown) {
       toast({ title: "Error", description: e instanceof Error ? e.message : "Unknown error", variant: "destructive" });
     } finally {
@@ -182,6 +206,95 @@ export default function AdminTenantDetail() {
       toast({ title: "Error", description: e instanceof Error ? e.message : "Unknown error", variant: "destructive" });
     } finally {
       setSavingTelephony(false);
+    }
+  }
+
+  function handleConfigureSipTrunk(existingConfig?: any) {
+    if (existingConfig) {
+      setIsEditingSip(true);
+      setSipForm({
+        sipDomain: existingConfig.sipDomain || "",
+        sipUsername: existingConfig.sipUsername || "",
+        sipPassword: "",
+        phoneNumber: existingConfig.phoneNumber || "",
+        outboundProxy: existingConfig.outboundProxy || "",
+        transport: existingConfig.transport || "UDP",
+      });
+    } else {
+      setIsEditingSip(false);
+      setSipForm({
+        sipDomain: "",
+        sipUsername: "",
+        sipPassword: "",
+        phoneNumber: "",
+        outboundProxy: "",
+        transport: "UDP",
+      });
+    }
+    setShowSipPassword(false);
+    setShowSipTrunk(true);
+  }
+
+  async function handleSaveSipTrunk(e: React.FormEvent) {
+    e.preventDefault();
+    setSavingSip(true);
+    try {
+      await apiFetch(`/api/superadmin/tenants/${id}/telephony/sip-trunk`, {
+        method: "POST",
+        body: JSON.stringify({
+          sipDomain: sipForm.sipDomain,
+          sipUsername: sipForm.sipUsername,
+          sipPassword: sipForm.sipPassword || undefined,
+          phoneNumber: sipForm.phoneNumber,
+          outboundProxy: sipForm.outboundProxy || undefined,
+          transport: sipForm.transport,
+        }),
+      });
+      toast({ title: isEditingSip ? "SIP Trunk updated" : "SIP Trunk configured" });
+      setShowSipTrunk(false);
+      fetchTenant();
+    } catch (e: unknown) {
+      toast({ title: "Error", description: e instanceof Error ? e.message : "Unknown error", variant: "destructive" });
+    } finally {
+      setSavingSip(false);
+    }
+  }
+
+  async function handleToggleSipTrunk() {
+    if (!tenant || !tenant.sipTrunkConfig) return;
+    const nextState = !tenant.sipTrunkConfig.isEnabled;
+    const confirmMsg = nextState
+      ? "Are you sure you want to enable SIP Trunking? Outbound calls will be routed through the SIP trunk instead of Twilio."
+      : "Are you sure you want to disable SIP Trunking? Outbound calls will revert to using Twilio settings.";
+    
+    if (!window.confirm(confirmMsg)) return;
+
+    try {
+      await apiFetch(`/api/superadmin/tenants/${id}/telephony/sip-trunk/toggle`, {
+        method: "PATCH",
+        body: JSON.stringify({ isEnabled: nextState }),
+      });
+      toast({ title: nextState ? "SIP Trunk enabled" : "SIP Trunk disabled" });
+      fetchTenant();
+    } catch (e: unknown) {
+      toast({ title: "Failed to toggle SIP Trunk", description: e instanceof Error ? e.message : "Unknown error", variant: "destructive" });
+    }
+  }
+
+  async function handleRemoveSipTrunk() {
+    if (!window.confirm("Are you sure you want to completely remove the SIP Trunk configuration? This will delete all settings and reset active telephony to Twilio.")) {
+      return;
+    }
+
+    try {
+      await apiFetch(`/api/superadmin/tenants/${id}/telephony/sip-trunk`, {
+        method: "DELETE",
+      });
+      toast({ title: "SIP Trunk configuration removed" });
+      setActiveTab("TWILIO");
+      fetchTenant();
+    } catch (e: unknown) {
+      toast({ title: "Failed to remove SIP Trunk", description: e instanceof Error ? e.message : "Unknown error", variant: "destructive" });
     }
   }
 
@@ -287,24 +400,132 @@ export default function AdminTenantDetail() {
             <h2 className="font-semibold text-foreground flex items-center gap-2">
               <Key className="w-5 h-5 text-primary" /> Telephony
             </h2>
-            <Button variant="outline" size="sm" onClick={() => setShowTelephony(true)}>
-              <Edit2 className="w-4 h-4 mr-1.5" /> Configure
-            </Button>
+            <span className="text-xs font-semibold flex items-center gap-1.5 text-muted-foreground bg-white/5 px-2.5 py-1 rounded-full border border-white/5">
+              Active: {tenant.telephonyType === "SIP_TRUNK" ? "SIP Trunk" : "Twilio"} <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
+            </span>
           </div>
-          <dl className="space-y-3">
-            <Row label="Phone Number" value={tenant.telephony.phoneNumber || "—"} />
-            <Row label="Twilio Account SID" value={tenant.telephony.twilioAccountSid ? `${tenant.telephony.twilioAccountSid.slice(0, 10)}…` : "—"} />
-            <Row
-              label="Status"
-              value={
-                <span className={`flex items-center gap-1.5 ${tenant.telephony.twilioConfigured ? "text-green-400" : "text-muted-foreground"}`}>
-                  {tenant.telephony.twilioConfigured
-                    ? <><CheckCircle2 className="w-4 h-4" /> Configured</>
-                    : <><XCircle className="w-4 h-4" /> Not configured</>}
-                </span>
-              }
-            />
-          </dl>
+
+          <div className="flex bg-white/5 p-1 rounded-lg border border-white/5 w-full">
+            <button
+              type="button"
+              onClick={() => setActiveTab("TWILIO")}
+              className={`flex-1 py-1.5 text-xs font-medium rounded-md transition-all ${
+                activeTab === "TWILIO"
+                  ? "bg-primary text-primary-foreground shadow"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              Twilio
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab("SIP_TRUNK")}
+              className={`flex-1 py-1.5 text-xs font-medium rounded-md transition-all ${
+                activeTab === "SIP_TRUNK"
+                  ? "bg-primary text-primary-foreground shadow"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              SIP Trunk
+            </button>
+          </div>
+
+          {activeTab === "TWILIO" ? (
+            <div className="space-y-4">
+              <dl className="space-y-3">
+                <Row label="Phone Number" value={tenant.telephony.phoneNumber || "—"} />
+                <Row label="Twilio Account SID" value={tenant.telephony.twilioAccountSid ? `${tenant.telephony.twilioAccountSid.slice(0, 10)}…` : "—"} />
+                <Row
+                  label="Status"
+                  value={
+                    <span className={`flex items-center gap-1.5 ${tenant.telephony.twilioConfigured ? "text-green-400" : "text-muted-foreground"}`}>
+                      {tenant.telephony.twilioConfigured
+                        ? <><CheckCircle2 className="w-4 h-4" /> Configured</>
+                        : <><XCircle className="w-4 h-4" /> Not configured</>}
+                    </span>
+                  }
+                />
+              </dl>
+              <div className="flex justify-end pt-2">
+                <Button variant="outline" size="sm" onClick={() => setShowTelephony(true)}>
+                  <Edit2 className="w-4 h-4 mr-1.5" /> Configure Twilio
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {!tenant.sipTrunkConfig ? (
+                <div className="flex flex-col items-center justify-center py-6 text-center space-y-3">
+                  <Phone className="w-8 h-8 text-muted-foreground opacity-55" />
+                  <div className="space-y-1">
+                    <p className="text-sm font-medium text-foreground">SIP Trunk Not Configured</p>
+                    <p className="text-xs text-muted-foreground max-w-[280px]">
+                      Set up custom SIP Trunking to handle call routing for this tenant.
+                    </p>
+                  </div>
+                  <Button variant="outline" size="sm" onClick={() => handleConfigureSipTrunk()}>
+                    <Plus className="w-4 h-4 mr-1.5" /> Configure SIP Trunk
+                  </Button>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between p-3 rounded-lg bg-white/5 border border-white/5">
+                    <div className="flex items-center gap-2">
+                      <Badge
+                        variant={tenant.sipTrunkConfig.isEnabled ? "default" : "secondary"}
+                        className={tenant.sipTrunkConfig.isEnabled ? "bg-green-500/20 text-green-400 border-green-500/30 text-xs" : "bg-yellow-500/20 text-yellow-400 border-yellow-500/30 text-xs"}
+                      >
+                        {tenant.sipTrunkConfig.isEnabled ? "Active" : "Inactive"}
+                      </Badge>
+                      <span className="text-xs text-muted-foreground font-medium">SIP Trunking</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-muted-foreground font-medium">
+                        {tenant.sipTrunkConfig.isEnabled ? "Enabled" : "Disabled"}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={handleToggleSipTrunk}
+                        className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                          tenant.sipTrunkConfig.isEnabled ? "bg-primary" : "bg-white/10"
+                        }`}
+                      >
+                        <span
+                          className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
+                            tenant.sipTrunkConfig.isEnabled ? "translate-x-4" : "translate-x-0"
+                          }`}
+                        />
+                      </button>
+                    </div>
+                  </div>
+
+                  <dl className="space-y-2.5">
+                    <Row label="SIP Domain" value={tenant.sipTrunkConfig.sipDomain} />
+                    <Row label="Username" value={tenant.sipTrunkConfig.sipUsername} />
+                    <Row label="Password" value="••••••••" />
+                    <Row label="Phone Number" value={tenant.sipTrunkConfig.phoneNumber} />
+                    <Row label="Outbound Proxy" value={tenant.sipTrunkConfig.outboundProxy || "—"} />
+                    <Row label="Transport" value={tenant.sipTrunkConfig.transport} />
+                    <Row label="Termination URI" value={tenant.sipTrunkConfig.terminationUri || "—"} />
+                  </dl>
+
+                  <div className="flex justify-end gap-2 pt-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="border-red-500/30 text-red-400 hover:bg-red-500/10"
+                      onClick={handleRemoveSipTrunk}
+                    >
+                      Remove
+                    </Button>
+                    <Button variant="outline" size="sm" onClick={() => handleConfigureSipTrunk(tenant.sipTrunkConfig)}>
+                      <Edit2 className="w-4 h-4 mr-1.5" /> Edit
+                    </Button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
 
@@ -418,6 +639,96 @@ export default function AdminTenantDetail() {
               <Button type="button" variant="ghost" onClick={() => setShowTelephony(false)}>Cancel</Button>
               <Button type="submit" disabled={savingTelephony}>
                 {savingTelephony ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Saving…</> : "Save Telephony"}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={showSipTrunk} onOpenChange={setShowSipTrunk}>
+        <DialogContent className="bg-card border-white/10 max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>{isEditingSip ? "Edit SIP Trunk" : "Configure SIP Trunk"}</DialogTitle>
+          </DialogHeader>
+          <form onSubmit={handleSaveSipTrunk} className="space-y-4">
+            <div className="space-y-2">
+              <Label>SIP Domain *</Label>
+              <Input
+                value={sipForm.sipDomain}
+                onChange={(e) => setSipForm({ ...sipForm, sipDomain: e.target.value })}
+                placeholder="sip.example.com"
+                required
+                className="bg-white/5 border-white/10"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>SIP Username *</Label>
+              <Input
+                value={sipForm.sipUsername}
+                onChange={(e) => setSipForm({ ...sipForm, sipUsername: e.target.value })}
+                placeholder="username"
+                required
+                className="bg-white/5 border-white/10"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>
+                SIP Password *{" "}
+                {isEditingSip && <span className="text-muted-foreground text-xs">(leave blank to keep existing)</span>}
+              </Label>
+              <div className="relative">
+                <Input
+                  type={showSipPassword ? "text" : "password"}
+                  value={sipForm.sipPassword}
+                  onChange={(e) => setSipForm({ ...sipForm, sipPassword: e.target.value })}
+                  placeholder="••••••••"
+                  required={!isEditingSip}
+                  className="bg-white/5 border-white/10 pr-10"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowSipPassword(!showSipPassword)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-xs font-semibold text-muted-foreground hover:text-foreground focus:outline-none"
+                >
+                  {showSipPassword ? "Hide" : "Show"}
+                </button>
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Label>Phone Number * (E.164)</Label>
+              <Input
+                value={sipForm.phoneNumber}
+                onChange={(e) => setSipForm({ ...sipForm, phoneNumber: e.target.value })}
+                placeholder="+1234567890"
+                required
+                className="bg-white/5 border-white/10"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Outbound Proxy <span className="text-muted-foreground text-xs">(optional)</span></Label>
+              <Input
+                value={sipForm.outboundProxy}
+                onChange={(e) => setSipForm({ ...sipForm, outboundProxy: e.target.value })}
+                placeholder="proxy.example.com"
+                className="bg-white/5 border-white/10"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Transport</Label>
+              <select
+                value={sipForm.transport}
+                onChange={(e) => setSipForm({ ...sipForm, transport: e.target.value })}
+                className="w-full h-10 rounded-md border border-white/10 bg-white/5 px-3 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+              >
+                <option value="UDP" className="bg-card text-foreground">UDP</option>
+                <option value="TCP" className="bg-card text-foreground">TCP</option>
+                <option value="TLS" className="bg-card text-foreground">TLS</option>
+              </select>
+            </div>
+            <DialogFooter className="pt-2">
+              <Button type="button" variant="ghost" onClick={() => setShowSipTrunk(false)}>Cancel</Button>
+              <Button type="submit" disabled={savingSip}>
+                {savingSip ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Saving…</> : "Save SIP Trunk"}
               </Button>
             </DialogFooter>
           </form>
