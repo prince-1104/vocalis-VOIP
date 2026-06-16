@@ -7,7 +7,11 @@ import { invalidateSystemPromptCache, invalidateAgentConfigCache } from "./twili
 const router: IRouter = Router();
 
 const VALID_MODELS = [
+  "gpt-4o-mini",
+  "gpt-4o",
   "gemini-1.5-pro",
+  "deepseek-chat",
+  "sarvam-m",
   "llama-3.3-8b-private",
   "bharatgpt",
   "bolna-ai",

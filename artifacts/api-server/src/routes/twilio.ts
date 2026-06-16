@@ -249,6 +249,49 @@ async function generateAIResponse(systemPrompt: string, history: {role: string, 
   };
 }
 
+async function generateResponseForModel(
+  systemPrompt: string,
+  history: { role: string; content: string }[],
+  userMessage: string,
+  aiModel: string,
+  lang: string,
+): Promise<{ text: string; provider: string; inputTokens: number; outputTokens: number }> {
+  if (aiModel === "deepseek-chat" || aiModel === "deepseek-v3") {
+    const text = await callDeepSeekLLM(systemPrompt, history, userMessage);
+    const charsPerToken = 2.5;
+    const inputChars = userMessage.length + (systemPrompt?.length ?? 0);
+    const outputChars = text.length;
+    return {
+      text,
+      provider: "deepseek-chat",
+      inputTokens: Math.ceil(inputChars / charsPerToken),
+      outputTokens: Math.ceil(outputChars / charsPerToken),
+    };
+  }
+
+  if (aiModel === "sarvam-m" || aiModel === "sarvam-1-2b") {
+    const text = await callSarvamLLM(systemPrompt, history, userMessage);
+    const charsPerToken = 2.0;
+    const inputChars = userMessage.length + (systemPrompt?.length ?? 0);
+    const outputChars = text.length;
+    return {
+      text,
+      provider: "sarvam-m",
+      inputTokens: Math.ceil(inputChars / charsPerToken),
+      outputTokens: Math.ceil(outputChars / charsPerToken),
+    };
+  }
+
+  const resolved = resolveOpenAIModel(aiModel);
+  const aiResult = await generateAIResponse(systemPrompt, history, userMessage, resolved);
+  return {
+    text: aiResult.text,
+    provider: resolved,
+    inputTokens: aiResult.inputTokens,
+    outputTokens: aiResult.outputTokens,
+  };
+}
+
 async function generateOpenAITTS(text: string, voice: string = "nova"): Promise<string> {
   const mp3 = await openai.audio.speech.create({
     model: "tts-1",
@@ -767,8 +810,9 @@ router.post("/twilio/inbound", async (req, res) => {
     input: ["speech"],
     action: `${baseUrl}/api/twilio/voice?callLogId=${callLog.id}&history=`,
     method: "POST",
-    speechTimeout: "1.2",
+    speechTimeout: "2.0",
     speechModel: "phone_call",
+    enhanced: true,
     timeout: 10,
     language: getTwilioLang(agentConfig?.language) as any,
     actionOnEmptyResult: true,
@@ -1008,7 +1052,8 @@ router.post("/twilio/voice", async (req, res) => {
   }
 
   // 4. Branch to Indian languages if applicable (and no transfer was triggered)
-  if (!isSilent && speechResult.trim() && isIndianLanguage(lang)) {
+  // Only auto-switch AIs in auto mode. If a specific AI is chosen (configuredLang !== "auto"), stay in the standard pipeline.
+  if (!isSilent && speechResult.trim() && isIndianLanguage(lang) && configuredLang === "auto") {
     const encodedSpeech = encodeURIComponent(speechResult);
     const encodedHistory = encodeURIComponent(JSON.stringify(history.slice(-4)));
     const encodedLang = encodeURIComponent(lang);
@@ -1045,22 +1090,23 @@ router.post("/twilio/voice", async (req, res) => {
 
     try {
       // ── LLM call — TTS is started immediately after it resolves ─────
-      const aiResult = await generateAIResponse(systemPrompt, history, speechResult, resolveOpenAIModel(aiModel));
+      const aiResult = await generateResponseForModel(systemPrompt, history, speechResult, aiModel, lang);
       aiResponse = aiResult.text;
 
       // Start TTS generation immediately (fire-and-forget race with DB writes below)
-      const ttsPromise = generateOpenAITTS(aiResponse, agentConfig?.voice || "nova")
-        .then(b64 => storeTtsAudio(b64))
-        .catch(e => { console.error("OpenAI TTS err:", e); return null; });
+      const useSarvamTts = isIndianLanguage(lang);
+      const ttsPromise = (useSarvamTts
+        ? callSarvamTTS(aiResponse, lang)
+        : generateOpenAITTS(aiResponse, agentConfig?.voice || "nova").then(b64 => storeTtsAudio(b64))
+      ).catch(e => { console.error("TTS generation err:", e); return null; });
 
       // Fire-and-forget: log LLM cost
       resolveTenantIdForOwner(userId).then(tenantId => {
         if (!tenantId) return;
-        const model = resolveOpenAIModel(aiModel);
         return logLLMCost({
           tenantId,
           userId,
-          provider: model,
+          provider: aiResult.provider,
           inputTokens: aiResult.inputTokens,
           outputTokens: aiResult.outputTokens,
           context: "twilio-voice",
@@ -1074,8 +1120,12 @@ router.post("/twilio/voice", async (req, res) => {
         // Fire-and-forget: log TTS cost
         resolveTenantIdForOwner(userId).then(tenantId => {
           if (!tenantId) return;
-          return logTTSCost({ tenantId, userId, provider: "openai", characters: aiResponse.length, context: "twilio-tts-openai" });
-        }).catch(e => console.error("[twilio] OpenAI TTS cost logging error:", e));
+          if (useSarvamTts) {
+            return logTTSCost({ tenantId, userId, provider: "sarvam", characters: aiResponse.length, context: "twilio-tts-sarvam" });
+          } else {
+            return logTTSCost({ tenantId, userId, provider: "openai", characters: aiResponse.length, context: "twilio-tts-openai" });
+          }
+        }).catch(e => console.error("[twilio] TTS cost logging error:", e));
       }
     } catch (err) {
       console.error("AI response error:", err);
@@ -1134,16 +1184,18 @@ router.post("/twilio/voice", async (req, res) => {
     input: ["speech"],
     action: `${baseUrl}/api/twilio/voice?callLogId=${callLogId}&history=${encodedHistory}&intentCounts=${encodedIntentCounts}&humanReqCount=${humanReqCount}`,
     method: "POST",
-    speechTimeout: "1.2",
+    speechTimeout: "2.0",
     speechModel: "phone_call",
+    enhanced: true,
     timeout: 10,
     language: getTwilioLang(lang) as any,
     actionOnEmptyResult: true,
   });
 
   // TTS was already generated in parallel inside the AI response block above.
-  // ttsAudioId is set if OpenAI TTS succeeded.
-  const ttsUseMp3 = ttsAudioId !== null;
+  // ttsAudioId is set if OpenAI TTS or Sarvam TTS succeeded.
+  const useSarvamTts = isIndianLanguage(lang);
+  const ttsUseMp3 = ttsAudioId !== null && !useSarvamTts;
 
   if (ttsAudioId) {
     gather.play(`${baseUrl}/api/twilio/${ttsUseMp3 ? "tts-audio-mp3" : "tts-audio"}/${ttsAudioId}`);
@@ -1288,8 +1340,9 @@ router.post("/twilio/voice-indic", async (req, res) => {
     input: ["speech"],
     action: `${baseUrl}/api/twilio/voice?callLogId=${callLogId}&history=${encodedHistory}&intentCounts=${encodedIntentCounts}&humanReqCount=${humanReqCount}`,
     method: "POST",
-    speechTimeout: "1.2",
+    speechTimeout: "2.0",
     speechModel: "phone_call",
+    enhanced: true,
     timeout: 10,
     language: getTwilioLang(lang) as any,
     actionOnEmptyResult: true,
@@ -1340,8 +1393,9 @@ router.post("/twilio/outbound-voice", async (req, res) => {
     input: ["speech"],
     action: `${baseUrl}/api/twilio/voice?callLogId=${callLogId}&history=`,
     method: "POST",
-    speechTimeout: "1.2",
+    speechTimeout: "2.0",
     speechModel: "phone_call",
+    enhanced: true,
     timeout: 10,
     language: getTwilioLang(lang) as any,
     actionOnEmptyResult: true,
@@ -1575,8 +1629,9 @@ router.post("/twilio/widget-voice", async (req, res) => {
     input: ["speech"],
     action: `${baseUrl}/api/twilio/voice?callLogId=${callLog.id}&history=`,
     method: "POST",
-    speechTimeout: "1.2",
+    speechTimeout: "2.0",
     speechModel: "phone_call",
+    enhanced: true,
     timeout: 10,
     language: getTwilioLang(configuredLang) as any,
     actionOnEmptyResult: true,
