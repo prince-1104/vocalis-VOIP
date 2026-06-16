@@ -268,8 +268,18 @@ router.post("/dial/calls/:id/end", async (req, res) => {
       await client.calls(call.callSid).update({ status: "completed" });
     }
 
+    const formattedTranscript = (call?.liveTranscript && Array.isArray(call.liveTranscript))
+      ? call.liveTranscript
+          .map((turn: any) => `${turn.role === "user" ? "Caller" : "Agent"}: ${turn.content}`)
+          .join("\n\n")
+      : null;
+
     await db.update(callLogsTable)
-      .set({ endedAt: new Date(), outcome: "answered" })
+      .set({
+        endedAt: new Date(),
+        outcome: "answered",
+        ...(formattedTranscript ? { transcript: formattedTranscript } : {}),
+      })
       .where(eq(callLogsTable.id, callId));
 
     res.json({ success: true, message: `Call ${callId} ended` });

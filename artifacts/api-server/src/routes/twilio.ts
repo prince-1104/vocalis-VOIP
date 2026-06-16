@@ -11,6 +11,38 @@ import { logLLMCost, logTTSCost, resolveTenantIdForOwner } from "../lib/cost-log
 
 const router: IRouter = Router();
 
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, errorMessage = "Operation timed out"): Promise<T> {
+  let timeoutId: NodeJS.Timeout;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => {
+      reject(new Error(errorMessage));
+    }, timeoutMs);
+  });
+  return Promise.race([promise, timeoutPromise]).finally(() => {
+    clearTimeout(timeoutId);
+  });
+}
+
+async function fetchWithTimeout(url: string, options: RequestInit & { timeout?: number }): Promise<Response> {
+  const { timeout = 4000, ...fetchOptions } = options;
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeout);
+  try {
+    const response = await fetch(url, {
+      ...fetchOptions,
+      signal: controller.signal,
+    });
+    clearTimeout(id);
+    return response;
+  } catch (error: any) {
+    clearTimeout(id);
+    if (error.name === "AbortError") {
+      throw new Error(`Request to ${url} timed out after ${timeout}ms`);
+    }
+    throw error;
+  }
+}
+
 const SARVAM_API_KEY = process.env.SARVAM_API_KEY ?? "";
 const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY ?? "";
 
@@ -236,11 +268,13 @@ async function generateAIResponse(systemPrompt: string, history: {role: string, 
     { role: "user", content: userMessage },
   ];
 
-  const response = await openai.chat.completions.create({
+  const completionPromise = openai.chat.completions.create({
     model,
     max_completion_tokens: 150,
     messages,
   });
+
+  const response = await withTimeout(completionPromise, 4000, "OpenAI LLM timeout");
 
   return {
     text: response.choices[0]?.message?.content || "I'm sorry, I didn't catch that. Could you repeat that?",
@@ -293,11 +327,12 @@ async function generateResponseForModel(
 }
 
 async function generateOpenAITTS(text: string, voice: string = "nova"): Promise<string> {
-  const mp3 = await openai.audio.speech.create({
+  const mp3Promise = openai.audio.speech.create({
     model: "tts-1",
     voice: voice as any,
     input: text,
   });
+  const mp3 = await withTimeout(mp3Promise, 2500, "OpenAI TTS timeout");
   const arrayBuffer = await mp3.arrayBuffer();
   const buffer = Buffer.from(arrayBuffer);
   return buffer.toString("base64");
@@ -348,12 +383,13 @@ async function callSarvamSTT(audioBuffer: Buffer, mimeType: string, lang: string
   formData.append("language_code", lang);
   formData.append("mode", "transcribe");
 
-  const res = await fetch("https://api.sarvam.ai/speech-to-text", {
+  const res = await fetchWithTimeout("https://api.sarvam.ai/speech-to-text", {
     method: "POST",
     headers: {
       "api-subscription-key": SARVAM_API_KEY,
     },
     body: formData,
+    timeout: 3000,
   });
 
   if (!res.ok) {
@@ -378,7 +414,7 @@ async function callDeepSeekLLM(
     { role: "user", content: userMessage },
   ];
 
-  const res = await fetch("https://api.deepseek.com/chat/completions", {
+  const res = await fetchWithTimeout("https://api.deepseek.com/chat/completions", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -389,6 +425,7 @@ async function callDeepSeekLLM(
       messages,
       max_tokens: 150,
     }),
+    timeout: 4000,
   });
 
   if (!res.ok) {
@@ -413,7 +450,7 @@ async function callSarvamLLM(
     { role: "user", content: userMessage },
   ];
 
-  const res = await fetch("https://api.sarvam.ai/v1/chat/completions", {
+  const res = await fetchWithTimeout("https://api.sarvam.ai/v1/chat/completions", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -424,6 +461,7 @@ async function callSarvamLLM(
       messages,
       max_completion_tokens: 150,
     }),
+    timeout: 4000,
   });
 
   if (!res.ok) {
@@ -484,7 +522,7 @@ async function callSarvamTTS(text: string, lang: string): Promise<string | null>
   const ttsText = normalizeTTSPronunciation(text, lang);
   const speaker = BULBUL_VOICE_FOR_LANG[lang] ?? "manan";
 
-  const res = await fetch("https://api.sarvam.ai/text-to-speech", {
+  const res = await fetchWithTimeout("https://api.sarvam.ai/text-to-speech", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -502,6 +540,7 @@ async function callSarvamTTS(text: string, lang: string): Promise<string | null>
       enable_preprocessing: true,
       output_audio_codec: "wav",
     }),
+    timeout: 2500,
   });
 
   if (!res.ok) {
@@ -834,6 +873,11 @@ router.post("/twilio/inbound", async (req, res) => {
 });
 
 router.post("/twilio/voice", async (req, res) => {
+  const requestStart = Date.now();
+  let classifyDuration = 0;
+  let llmDuration = 0;
+  let ttsDuration = 0;
+
   const twiml = new twilio.twiml.VoiceResponse();
   const callLogId = req.query.callLogId as string;
 
@@ -899,6 +943,7 @@ router.post("/twilio/voice", async (req, res) => {
     // 2. Classify intent (fast regex, LLM fallback only if transfer rules exist)
     //    Run in parallel with intentTraining DB lookup
     try {
+      const classifyStart = Date.now();
       const [classifyResult, intentTrainingRow] = await Promise.all([
         classifyIntent(history, speechResult, hasTransferRules),
         db.query.intentTrainingTable.findFirst({
@@ -908,6 +953,7 @@ router.post("/twilio/voice", async (req, res) => {
           ),
         }).catch(() => null), // non-critical
       ]);
+      classifyDuration = Date.now() - classifyStart;
       intentResult = classifyResult;
       if (intentResult.confidence >= 0.6) {
         intentTurnCounts[intentResult.intent] = (intentTurnCounts[intentResult.intent] || 0) + 1;
@@ -1090,11 +1136,14 @@ router.post("/twilio/voice", async (req, res) => {
 
     try {
       // ── LLM call — TTS is started immediately after it resolves ─────
+      const llmStart = Date.now();
       const aiResult = await generateResponseForModel(systemPrompt, history, speechResult, aiModel, lang);
       aiResponse = aiResult.text;
+      llmDuration = Date.now() - llmStart;
 
       // Start TTS generation immediately (fire-and-forget race with DB writes below)
       const useSarvamTts = isIndianLanguage(lang);
+      const ttsStart = Date.now();
       const ttsPromise = (useSarvamTts
         ? callSarvamTTS(aiResponse, lang)
         : generateOpenAITTS(aiResponse, agentConfig?.voice || "nova").then(b64 => storeTtsAudio(b64))
@@ -1115,6 +1164,7 @@ router.post("/twilio/voice", async (req, res) => {
 
       // Await TTS (started in parallel with cost logging above)
       const ttsResult = await ttsPromise;
+      ttsDuration = Date.now() - ttsStart;
       if (ttsResult) {
         ttsAudioId = ttsResult;
         // Fire-and-forget: log TTS cost
@@ -1171,10 +1221,16 @@ router.post("/twilio/voice", async (req, res) => {
         { role: "assistant", content: aiResponse, timestamp: new Date().toISOString() },
       ];
       callMeta.liveTranscript = updatedTranscript; // keep cache in sync
+      const formattedTranscript = updatedTranscript
+        .map((turn: any) => `${turn.role === "user" ? "Caller" : "Agent"}: ${turn.content}`)
+        .join("\n\n");
       db.update(callLogsTable)
-        .set({ liveTranscript: updatedTranscript })
+        .set({
+          liveTranscript: updatedTranscript,
+          transcript: formattedTranscript,
+        })
         .where(eq(callLogsTable.id, numericCallLogId))
-        .catch(err => console.error("Failed to update live transcript:", err));
+        .catch(err => console.error("Failed to update live transcript/transcript:", err));
     }
   }
 
@@ -1206,10 +1262,13 @@ router.post("/twilio/voice", async (req, res) => {
   twiml.redirect({ method: "POST" }, `${baseUrl}/api/twilio/voice?callLogId=${callLogId}&history=${encodedHistory}&intentCounts=${encodedIntentCounts}&humanReqCount=${humanReqCount}&silent=1`);
 
   res.type("text/xml");
+  const totalDuration = Date.now() - requestStart;
+  console.log(`[twilio/voice] CallLogId=${callLogId} Turn latency: Classify=${classifyDuration}ms, LLM=${llmDuration}ms, TTS=${ttsDuration}ms, Total=${totalDuration}ms`);
   res.send(twiml.toString());
 });
 
 router.post("/twilio/voice-indic", async (req, res) => {
+  const requestStart = Date.now();
   const twiml = new twilio.twiml.VoiceResponse();
   const callLogId = req.query.callLogId as string;
 
@@ -1329,10 +1388,16 @@ router.post("/twilio/voice-indic", async (req, res) => {
         { role: "assistant", content: aiResponse, timestamp: new Date().toISOString() },
       ];
       callMeta.liveTranscript = updatedTranscript;
+      const formattedTranscript = updatedTranscript
+        .map((turn: any) => `${turn.role === "user" ? "Caller" : "Agent"}: ${turn.content}`)
+        .join("\n\n");
       db.update(callLogsTable)
-        .set({ liveTranscript: updatedTranscript })
+        .set({
+          liveTranscript: updatedTranscript,
+          transcript: formattedTranscript,
+        })
         .where(eq(callLogsTable.id, numericCallLogId))
-        .catch(err => console.error("Failed to update live transcript:", err));
+        .catch(err => console.error("Failed to update live transcript/transcript:", err));
     }
   }
 
@@ -1357,6 +1422,8 @@ router.post("/twilio/voice-indic", async (req, res) => {
   twiml.redirect({ method: "POST" }, `${baseUrl}/api/twilio/voice?callLogId=${callLogId}&history=${encodedHistory}&intentCounts=${encodedIntentCounts}&humanReqCount=${humanReqCount}&silent=1`);
 
   res.type("text/xml");
+  const totalDuration = Date.now() - requestStart;
+  console.log(`[twilio/voice-indic] CallLogId=${callLogId} Turn latency: Total=${totalDuration}ms`);
   res.send(twiml.toString());
 });
 
@@ -1454,11 +1521,18 @@ router.post("/twilio/status", async (req, res) => {
       ? parseFloat((costData.totalCost * (1 + commissionPct / 100)).toFixed(6))
       : null;
 
+      const formattedTranscript = (existingLog?.liveTranscript && Array.isArray(existingLog.liveTranscript))
+      ? existingLog.liveTranscript
+          .map((turn: any) => `${turn.role === "user" ? "Caller" : "Agent"}: ${turn.content}`)
+          .join("\n\n")
+      : null;
+
     await db.update(callLogsTable)
       .set({
         outcome: outcomeMap[callStatus] || "no_answer",
         duration: callDuration,
         endedAt: new Date(),
+        ...(formattedTranscript ? { transcript: formattedTranscript } : {}),
         ...(costData ? {
           estimatedCostUsd: costData.totalCost.toString(),
           billedCostUsd: billedCost !== null ? billedCost.toString() : undefined,

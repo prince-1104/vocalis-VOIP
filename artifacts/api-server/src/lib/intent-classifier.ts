@@ -193,12 +193,24 @@ function classifyByPatterns(message: string): IntentResult | null {
   };
 }
 
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, errorMessage = "Operation timed out"): Promise<T> {
+  let timeoutId: NodeJS.Timeout;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => {
+      reject(new Error(errorMessage));
+    }, timeoutMs);
+  });
+  return Promise.race([promise, timeoutPromise]).finally(() => {
+    clearTimeout(timeoutId);
+  });
+}
+
 // ── LLM-based fallback classifier ────────────────────────────────────
 async function classifyByLLM(
   history: { role: string; content: string }[],
   latestUserMessage: string,
 ): Promise<IntentResult> {
-  const response = await openai.chat.completions.create({
+  const completionPromise = openai.chat.completions.create({
     model: "gpt-4o-mini",
     max_completion_tokens: 60,
     temperature: 0,
@@ -219,6 +231,8 @@ needsHuman=false for: inquiry, greeting, pricing question, appointment, objectio
       { role: "user" as const, content: latestUserMessage },
     ],
   });
+
+  const response = await withTimeout(completionPromise, 1000, "LLM classification timeout");
 
   const raw = response.choices[0]?.message?.content || "{}";
   const parsed = JSON.parse(raw);
