@@ -8,6 +8,7 @@ import { crmEventBus } from "../lib/crm-event-bus";
 import { classifyIntent, shouldTransfer, detectHumanRequest, type TransferRules } from "../lib/intent-classifier";
 import { findBestAgent } from "../lib/transfer-manager";
 import { logLLMCost, logTTSCost, resolveTenantIdForOwner } from "../lib/cost-logger";
+import { dialNextForCampaign } from "../lib/campaign-dialer";
 
 const router: IRouter = Router();
 
@@ -1565,6 +1566,19 @@ router.post("/twilio/status", async (req, res) => {
         metadata: finalLog?.crmMetadata as Record<string, unknown> | undefined,
         timestamp: new Date().toISOString(),
       });
+
+      if (existingLog.campaignId) {
+        const campaign = await db.query.campaignsTable.findFirst({
+          where: eq(campaignsTable.id, existingLog.campaignId),
+        });
+
+        if (campaign && campaign.status === "active" && campaign.isAutomatic) {
+          const baseUrl = getBaseUrl(req);
+          dialNextForCampaign(campaign.id, existingLog.userId, baseUrl).catch((err) => {
+            console.error(`[twilio/status] Auto dialing next contact failed for campaign ${campaign.id}:`, err);
+          });
+        }
+      }
     }
   }
 

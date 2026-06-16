@@ -10,6 +10,8 @@ export interface UpdateCampaignRequest {
   name?: string;
   description?: string;
   scriptId?: number;
+  isAutomatic?: boolean;
+  contactIds?: number[];
   startTime?: string;
   endTime?: string;
   timezone?: string;

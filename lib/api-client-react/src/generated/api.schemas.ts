@@ -125,6 +125,8 @@ export interface Campaign {
   description?: string;
   status: CampaignStatus;
   scriptId?: number;
+  isAutomatic?: boolean;
+  contactIds?: number[];
   totalContacts?: number;
   calledCount?: number;
   answeredCount?: number;
@@ -142,6 +144,7 @@ export interface CreateCampaignRequest {
   name: string;
   description?: string;
   scriptId?: number;
+  isAutomatic?: boolean;
   contactIds?: number[];
   startTime?: string;
   endTime?: string;
@@ -153,6 +156,8 @@ export interface UpdateCampaignRequest {
   name?: string;
   description?: string;
   scriptId?: number;
+  isAutomatic?: boolean;
+  contactIds?: number[];
   startTime?: string;
   endTime?: string;
   timezone?: string;
@@ -287,8 +292,8 @@ export const TrainingDataType = {
   faq: "faq",
   objection_handling: "objection_handling",
   competitor_info: "competitor_info",
-  video_link: "video_link",
   custom: "custom",
+  video_link: "video_link",
 } as const;
 
 export interface TrainingData {
@@ -307,8 +312,8 @@ export const CreateTrainingDataRequestType = {
   faq: "faq",
   objection_handling: "objection_handling",
   competitor_info: "competitor_info",
-  video_link: "video_link",
   custom: "custom",
+  video_link: "video_link",
 } as const;
 
 export interface CreateTrainingDataRequest {

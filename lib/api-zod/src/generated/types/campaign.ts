@@ -13,6 +13,8 @@ export interface Campaign {
   description?: string;
   status: CampaignStatus;
   scriptId?: number;
+  isAutomatic?: boolean;
+  contactIds?: number[];
   totalContacts?: number;
   calledCount?: number;
   answeredCount?: number;

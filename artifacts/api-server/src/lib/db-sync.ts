@@ -40,7 +40,8 @@ export async function syncDatabase() {
       'ALTER TABLE "api_cost_logs" ADD COLUMN IF NOT EXISTS "context" text;',
       'ALTER TABLE "api_cost_logs" ADD COLUMN IF NOT EXISTS "characters" integer;',
       'ALTER TABLE "api_cost_logs" ADD COLUMN IF NOT EXISTS "minutes" real;',
-      'ALTER TABLE "api_cost_logs" ADD COLUMN IF NOT EXISTS "user_id" integer DEFAULT 0;'
+      'ALTER TABLE "api_cost_logs" ADD COLUMN IF NOT EXISTS "user_id" integer DEFAULT 0;',
+      'ALTER TABLE "campaigns" ADD COLUMN IF NOT EXISTS "is_automatic" boolean DEFAULT false NOT NULL;'
     ];
 
     for (const q of alterQueries) {

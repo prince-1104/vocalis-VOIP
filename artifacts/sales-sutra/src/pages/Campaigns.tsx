@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { useCampaignsList, useCreateCampaignMutation, useStartCampaignMutation, usePauseCampaignMutation, useUpdateCampaignMutation } from "@/hooks/use-campaigns";
 import { useScriptsList } from "@/hooks/use-scripts";
+import { useContactsList } from "@/hooks/use-contacts";
 import { Card, CardContent, CardHeader, CardTitle, CardFooter } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -13,6 +14,8 @@ import { useQueryClient } from "@tanstack/react-query";
 export default function Campaigns() {
   const { data: campaigns, isLoading } = useCampaignsList();
   const { data: scripts } = useScriptsList();
+  const { data: contactsData } = useContactsList({ limit: 100 });
+  const contacts = contactsData?.contacts || [];
   const createCampaign = useCreateCampaignMutation();
   const startCampaign = useStartCampaignMutation();
   const pauseCampaign = usePauseCampaignMutation();
@@ -27,14 +30,18 @@ export default function Campaigns() {
     name: "",
     description: "",
     scriptId: 0,
-    maxConcurrentCalls: 1
+    maxConcurrentCalls: 1,
+    isAutomatic: false,
+    contactIds: [] as number[]
   });
 
   const [formData, setFormData] = useState({
     name: "",
     description: "",
     scriptId: 0,
-    maxConcurrentCalls: 1
+    maxConcurrentCalls: 1,
+    isAutomatic: false,
+    contactIds: [] as number[]
   });
 
   const handleEditClick = (campaign: any) => {
@@ -43,7 +50,9 @@ export default function Campaigns() {
       name: campaign.name,
       description: campaign.description || "",
       scriptId: campaign.scriptId || 0,
-      maxConcurrentCalls: campaign.maxConcurrentCalls || 1
+      maxConcurrentCalls: campaign.maxConcurrentCalls || 1,
+      isAutomatic: campaign.isAutomatic || false,
+      contactIds: campaign.contactIds || []
     });
   };
 
@@ -70,7 +79,7 @@ export default function Campaigns() {
       await createCampaign.mutateAsync(formData);
       toast({ title: "Campaign created" });
       setIsDialogOpen(false);
-      setFormData({ name: "", description: "", scriptId: 0, maxConcurrentCalls: 1 });
+      setFormData({ name: "", description: "", scriptId: 0, maxConcurrentCalls: 1, isAutomatic: false, contactIds: [] });
     } catch (err: any) {
       toast({ title: "Error", description: err.message, variant: "destructive" });
     }
@@ -186,6 +195,48 @@ export default function Campaigns() {
                 />
                 <p className="text-xs text-muted-foreground">Determines how many calls the agent can handle simultaneously.</p>
               </div>
+              <div className="flex items-center justify-between p-3 border border-white/10 rounded-md bg-background/50">
+                <div className="space-y-0.5">
+                  <label className="text-sm font-medium">Automatic Dialing</label>
+                  <p className="text-xs text-muted-foreground">Automatically call the next contact sequentially.</p>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={formData.isAutomatic}
+                  onChange={e => setFormData({ ...formData, isAutomatic: e.target.checked })}
+                  className="h-5 w-9 rounded-full bg-white/10 border border-white/10 checked:bg-primary transition-colors cursor-pointer appearance-none relative before:content-[''] before:absolute before:top-0.5 before:left-0.5 before:h-3.5 before:w-3.5 before:rounded-full before:bg-white before:transition-transform checked:before:translate-x-4"
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Select Contacts</label>
+                <div className="border border-white/10 rounded-md p-3 max-h-40 overflow-y-auto space-y-2 bg-background/50">
+                  {contacts.length === 0 ? (
+                    <p className="text-xs text-muted-foreground">No contacts found. Please add contacts first.</p>
+                  ) : (
+                    contacts.map((contact) => {
+                      const isChecked = formData.contactIds.includes(contact.id);
+                      return (
+                        <label key={contact.id} className="flex items-center space-x-2 text-sm cursor-pointer select-none">
+                          <input
+                            type="checkbox"
+                            checked={isChecked}
+                            onChange={() => {
+                              const newIds = isChecked
+                                ? formData.contactIds.filter(id => id !== contact.id)
+                                : [...formData.contactIds, contact.id];
+                              setFormData({ ...formData, contactIds: newIds });
+                            }}
+                            className="rounded border-white/10 bg-background/50 text-primary focus:ring-primary focus:ring-offset-background"
+                          />
+                          <span>
+                            {`${contact.firstName || ""} ${contact.lastName || ""}`.trim() || contact.phone}
+                          </span>
+                        </label>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
               <Button type="submit" className="w-full mt-4" disabled={createCampaign.isPending}>
                 {createCampaign.isPending ? "Creating..." : "Create Campaign"}
               </Button>
@@ -240,14 +291,18 @@ export default function Campaigns() {
                     </div>
                   </div>
                   
-                  <div className="grid grid-cols-2 gap-4 pt-2">
-                    <div className="bg-white/5 rounded-lg p-3">
-                      <p className="text-xs text-muted-foreground mb-1">Contacts</p>
-                      <p className="text-lg font-semibold">{campaign.totalContacts || 0}</p>
+                  <div className="grid grid-cols-3 gap-2.5 pt-2">
+                    <div className="bg-white/5 rounded-lg p-2 text-center">
+                      <p className="text-[10px] text-muted-foreground mb-1">Contacts</p>
+                      <p className="text-base font-semibold">{campaign.totalContacts || 0}</p>
                     </div>
-                    <div className="bg-white/5 rounded-lg p-3">
-                      <p className="text-xs text-muted-foreground mb-1">Connected</p>
-                      <p className="text-lg font-semibold">{campaign.answeredCount || 0}</p>
+                    <div className="bg-white/5 rounded-lg p-2 text-center">
+                      <p className="text-[10px] text-muted-foreground mb-1">Connected</p>
+                      <p className="text-base font-semibold">{campaign.answeredCount || 0}</p>
+                    </div>
+                    <div className="bg-white/5 rounded-lg p-2 text-center">
+                      <p className="text-[10px] text-muted-foreground mb-1">Dial Mode</p>
+                      <p className="text-xs font-semibold text-primary mt-1">{campaign.isAutomatic ? "Auto" : "Manual"}</p>
                     </div>
                   </div>
                 </CardContent>
@@ -350,6 +405,48 @@ export default function Campaigns() {
                   className="bg-background/50 border-white/10" 
                 />
                 <p className="text-xs text-muted-foreground">Determines how many calls the agent can handle simultaneously.</p>
+              </div>
+              <div className="flex items-center justify-between p-3 border border-white/10 rounded-md bg-background/50">
+                <div className="space-y-0.5">
+                  <label className="text-sm font-medium">Automatic Dialing</label>
+                  <p className="text-xs text-muted-foreground">Automatically call the next contact sequentially.</p>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={editFormData.isAutomatic}
+                  onChange={e => setEditFormData({ ...editFormData, isAutomatic: e.target.checked })}
+                  className="h-5 w-9 rounded-full bg-white/10 border border-white/10 checked:bg-primary transition-colors cursor-pointer appearance-none relative before:content-[''] before:absolute before:top-0.5 before:left-0.5 before:h-3.5 before:w-3.5 before:rounded-full before:bg-white before:transition-transform checked:before:translate-x-4"
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Select Contacts</label>
+                <div className="border border-white/10 rounded-md p-3 max-h-40 overflow-y-auto space-y-2 bg-background/50">
+                  {contacts.length === 0 ? (
+                    <p className="text-xs text-muted-foreground">No contacts found. Please add contacts first.</p>
+                  ) : (
+                    contacts.map((contact) => {
+                      const isChecked = editFormData.contactIds.includes(contact.id);
+                      return (
+                        <label key={contact.id} className="flex items-center space-x-2 text-sm cursor-pointer select-none">
+                          <input
+                            type="checkbox"
+                            checked={isChecked}
+                            onChange={() => {
+                              const newIds = isChecked
+                                ? editFormData.contactIds.filter(id => id !== contact.id)
+                                : [...editFormData.contactIds, contact.id];
+                              setEditFormData({ ...editFormData, contactIds: newIds });
+                            }}
+                            className="rounded border-white/10 bg-background/50 text-primary focus:ring-primary focus:ring-offset-background"
+                          />
+                          <span>
+                            {`${contact.firstName || ""} ${contact.lastName || ""}`.trim() || contact.phone}
+                          </span>
+                        </label>
+                      );
+                    })
+                  )}
+                </div>
               </div>
               <Button type="submit" className="w-full mt-4" disabled={updateCampaign.isPending}>
                 {updateCampaign.isPending ? "Saving..." : "Save Changes"}
