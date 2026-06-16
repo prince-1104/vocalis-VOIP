@@ -1,8 +1,19 @@
 import { Router, type IRouter } from "express";
-import { db, campaignsTable, campaignContactsTable } from "@workspace/db";
-import { eq, and } from "drizzle-orm";
+import { db, campaignsTable, campaignContactsTable, callLogsTable } from "@workspace/db";
+import { eq, and, isNull } from "drizzle-orm";
+import { dialNextForCampaign } from "../lib/campaign-dialer";
 
 const router: IRouter = Router();
+
+function getBaseUrl(req: any): string {
+  const domains = process.env.REPLIT_DOMAINS;
+  if (domains) {
+    const first = domains.split(",")[0].trim();
+    return `https://${first}`;
+  }
+  const host = req.headers.host || "localhost";
+  return `https://${host}`;
+}
 
 router.get("/campaigns", async (req, res) => {
   const userId = req.userId!;
@@ -105,6 +116,21 @@ router.put("/campaigns/:id", async (req, res) => {
   const finalContactLinks = await db.select().from(campaignContactsTable).where(eq(campaignContactsTable.campaignId, campaignId));
   const finalContactIds = finalContactLinks.map(c => c.contactId);
 
+  if (campaign.status === "active" && campaign.isAutomatic) {
+    const activeCalls = await db.select().from(callLogsTable).where(
+      and(
+        eq(callLogsTable.campaignId, campaignId),
+        isNull(callLogsTable.endedAt)
+      )
+    );
+    if (activeCalls.length === 0) {
+      const baseUrl = getBaseUrl(req);
+      dialNextForCampaign(campaignId, userId, baseUrl).catch((err) => {
+        console.error(`[campaigns/update] Auto dialing failed:`, err);
+      });
+    }
+  }
+
   res.json({
     ...campaign,
     contactIds: finalContactIds,
@@ -122,6 +148,13 @@ router.post("/campaigns/:id/start", async (req, res) => {
 
   const contacts = await db.select().from(campaignContactsTable).where(eq(campaignContactsTable.campaignId, campaign.id));
   const contactIds = contacts.map(c => c.contactId);
+
+  if (campaign.isAutomatic) {
+    const baseUrl = getBaseUrl(req);
+    dialNextForCampaign(campaignId, userId, baseUrl).catch((err) => {
+      console.error(`[campaigns/start] Auto dialing failed:`, err);
+    });
+  }
 
   res.json({
     ...campaign,
