@@ -1,6 +1,6 @@
 import twilio from "twilio";
 import { db, agentConfigsTable, callLogsTable, contactsTable, campaignsTable, campaignContactsTable, tenantsTable, sipTrunkConfigsTable } from "@workspace/db";
-import { eq, and, ne, lt, or, lte, sql } from "drizzle-orm";
+import { eq, and, ne, lt, or, lte, sql, isNull } from "drizzle-orm";
 import { decrypt } from "./encryption";
 
 function getTwilioClient(accountSid: string, authToken: string) {
@@ -201,4 +201,44 @@ export async function dialNextForCampaign(
     },
     remaining: pendingLinks.length - 1,
   };
+}
+
+export async function triggerDialingForCampaign(
+  campaignId: number,
+  userId: number,
+  baseUrl: string
+): Promise<void> {
+  const campaign = await db.query.campaignsTable.findFirst({
+    where: and(eq(campaignsTable.id, campaignId), eq(campaignsTable.userId, userId)),
+  });
+
+  if (!campaign || campaign.status !== "active" || !campaign.isAutomatic) {
+    return;
+  }
+
+  const activeCalls = await db.select().from(callLogsTable).where(
+    and(
+      eq(callLogsTable.campaignId, campaignId),
+      isNull(callLogsTable.endedAt)
+    )
+  );
+
+  const maxAllowed = campaign.dialParallel ? campaign.maxConcurrentCalls : 1;
+  const callsNeeded = maxAllowed - activeCalls.length;
+
+  if (callsNeeded <= 0) {
+    return;
+  }
+
+  for (let i = 0; i < callsNeeded; i++) {
+    try {
+      const result = await dialNextForCampaign(campaignId, userId, baseUrl);
+      if (result.done) {
+        break;
+      }
+    } catch (err) {
+      console.error(`[triggerDialingForCampaign] Dial failed for campaign ${campaignId}:`, err);
+      break;
+    }
+  }
 }

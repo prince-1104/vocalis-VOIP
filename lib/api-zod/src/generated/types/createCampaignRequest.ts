@@ -18,4 +18,5 @@ export interface CreateCampaignRequest {
   endTime?: string;
   timezone?: string;
   maxConcurrentCalls?: number;
+  dialParallel?: boolean;
 }

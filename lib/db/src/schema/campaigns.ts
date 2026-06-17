@@ -18,6 +18,7 @@ export const campaignsTable = pgTable("campaigns", {
   endTime: text("end_time").default("17:00"),
   timezone: text("timezone").default("America/New_York"),
   maxConcurrentCalls: integer("max_concurrent_calls").notNull().default(1),
+  dialParallel: boolean("dial_parallel").notNull().default(false),
   isAutomatic: boolean("is_automatic").notNull().default(false),
   maxRetries: integer("max_retries").notNull().default(0),
   retryIntervalMinutes: integer("retry_interval_minutes").notNull().default(10),

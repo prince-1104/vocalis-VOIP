@@ -139,6 +139,7 @@ export interface Campaign {
   endTime?: string;
   timezone?: string;
   maxConcurrentCalls?: number;
+  dialParallel?: boolean;
   createdAt: string;
 }
 
@@ -154,6 +155,7 @@ export interface CreateCampaignRequest {
   endTime?: string;
   timezone?: string;
   maxConcurrentCalls?: number;
+  dialParallel?: boolean;
 }
 
 export interface UpdateCampaignRequest {
@@ -168,6 +170,7 @@ export interface UpdateCampaignRequest {
   endTime?: string;
   timezone?: string;
   maxConcurrentCalls?: number;
+  dialParallel?: boolean;
 }
 
 export type CallLogDirection =

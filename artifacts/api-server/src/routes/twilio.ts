@@ -8,7 +8,7 @@ import { crmEventBus } from "../lib/crm-event-bus";
 import { classifyIntent, shouldTransfer, detectHumanRequest, type TransferRules } from "../lib/intent-classifier";
 import { findBestAgent } from "../lib/transfer-manager";
 import { logLLMCost, logTTSCost, resolveTenantIdForOwner } from "../lib/cost-logger";
-import { dialNextForCampaign } from "../lib/campaign-dialer";
+import { dialNextForCampaign, triggerDialingForCampaign } from "../lib/campaign-dialer";
 
 const router: IRouter = Router();
 
@@ -1607,7 +1607,7 @@ router.post("/twilio/status", async (req, res) => {
 
           if (campaign.status === "active" && campaign.isAutomatic) {
             const baseUrl = getBaseUrl(req);
-            dialNextForCampaign(campaign.id, existingLog.userId, baseUrl).catch((err) => {
+            triggerDialingForCampaign(campaign.id, existingLog.userId, baseUrl).catch((err) => {
               console.error(`[twilio/status] Auto dialing next contact failed for campaign ${campaign.id}:`, err);
             });
           }

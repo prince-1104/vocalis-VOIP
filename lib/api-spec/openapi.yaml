@@ -709,6 +709,8 @@ components:
           type: string
         maxConcurrentCalls:
           type: integer
+        dialParallel:
+          type: boolean
         createdAt:
           type: string
           format: date-time
@@ -749,6 +751,9 @@ components:
         maxConcurrentCalls:
           type: integer
           default: 1
+        dialParallel:
+          type: boolean
+          default: false
       required:
         - name
 
@@ -779,6 +784,8 @@ components:
           type: string
         maxConcurrentCalls:
           type: integer
+        dialParallel:
+          type: boolean
 
     CallLog:
       type: object

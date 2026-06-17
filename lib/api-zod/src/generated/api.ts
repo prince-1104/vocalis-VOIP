@@ -209,6 +209,7 @@ export const ListCampaignsResponseItem = zod.object({
   endTime: zod.string().optional().describe("Daily end time (HH:MM)"),
   timezone: zod.string().optional(),
   maxConcurrentCalls: zod.number().optional(),
+  dialParallel: zod.boolean().optional(),
   createdAt: zod.date(),
 });
 export const ListCampaignsResponse = zod.array(ListCampaignsResponseItem);
@@ -220,6 +221,7 @@ export const createCampaignBodyIsAutomaticDefault = false;
 export const createCampaignBodyMaxRetriesDefault = 0;
 export const createCampaignBodyRetryIntervalMinutesDefault = 10;
 export const createCampaignBodyMaxConcurrentCallsDefault = 1;
+export const createCampaignBodyDialParallelDefault = false;
 
 export const CreateCampaignBody = zod.object({
   name: zod.string(),
@@ -237,6 +239,7 @@ export const CreateCampaignBody = zod.object({
   maxConcurrentCalls: zod
     .number()
     .default(createCampaignBodyMaxConcurrentCallsDefault),
+  dialParallel: zod.boolean().default(createCampaignBodyDialParallelDefault),
 });
 
 /**
@@ -264,6 +267,7 @@ export const GetCampaignResponse = zod.object({
   endTime: zod.string().optional().describe("Daily end time (HH:MM)"),
   timezone: zod.string().optional(),
   maxConcurrentCalls: zod.number().optional(),
+  dialParallel: zod.boolean().optional(),
   createdAt: zod.date(),
 });
 
@@ -286,6 +290,7 @@ export const UpdateCampaignBody = zod.object({
   endTime: zod.string().optional(),
   timezone: zod.string().optional(),
   maxConcurrentCalls: zod.number().optional(),
+  dialParallel: zod.boolean().optional(),
 });
 
 export const UpdateCampaignResponse = zod.object({
@@ -306,6 +311,7 @@ export const UpdateCampaignResponse = zod.object({
   endTime: zod.string().optional().describe("Daily end time (HH:MM)"),
   timezone: zod.string().optional(),
   maxConcurrentCalls: zod.number().optional(),
+  dialParallel: zod.boolean().optional(),
   createdAt: zod.date(),
 });
 
@@ -334,6 +340,7 @@ export const StartCampaignResponse = zod.object({
   endTime: zod.string().optional().describe("Daily end time (HH:MM)"),
   timezone: zod.string().optional(),
   maxConcurrentCalls: zod.number().optional(),
+  dialParallel: zod.boolean().optional(),
   createdAt: zod.date(),
 });
 
@@ -362,6 +369,7 @@ export const PauseCampaignResponse = zod.object({
   endTime: zod.string().optional().describe("Daily end time (HH:MM)"),
   timezone: zod.string().optional(),
   maxConcurrentCalls: zod.number().optional(),
+  dialParallel: zod.boolean().optional(),
   createdAt: zod.date(),
 });
 

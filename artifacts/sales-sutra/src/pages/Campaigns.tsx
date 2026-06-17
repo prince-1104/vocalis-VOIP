@@ -7,12 +7,23 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { StatusBadge } from "@/components/ui-custom/StatusBadge";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
-import { Megaphone, Play, Pause, PhoneCall, Loader2, Activity, Users, Edit, Clock, Mic, DollarSign, Bot, PhoneOutgoing, PhoneIncoming } from "lucide-react";
+import { Megaphone, Play, Pause, PhoneCall, Loader2, Activity, Users, Edit, Clock, Mic, DollarSign, Bot, PhoneOutgoing, PhoneIncoming, RefreshCw } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { useQueryClient } from "@tanstack/react-query";
 
 export default function Campaigns() {
-  const { data: campaigns, isLoading } = useCampaignsList();
+  const { data: campaigns, isLoading, refetch, isFetching } = useCampaignsList();
+
+  // Auto-refresh/poll the campaigns list every 5 seconds if any campaign is active
+  React.useEffect(() => {
+    const hasActiveCampaign = campaigns?.some(c => c.status === "active");
+    if (!hasActiveCampaign) return;
+
+    const interval = setInterval(() => {
+      refetch();
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [campaigns, refetch]);
   const { data: scripts } = useScriptsList();
   const { data: contactsData } = useContactsList({ limit: 100 });
   const contacts = contactsData?.contacts || [];
@@ -31,6 +42,7 @@ export default function Campaigns() {
     description: "",
     scriptId: 0,
     maxConcurrentCalls: 1,
+    dialParallel: false,
     isAutomatic: false,
     maxRetries: 0,
     retryIntervalMinutes: 10,
@@ -42,6 +54,7 @@ export default function Campaigns() {
     description: "",
     scriptId: 0,
     maxConcurrentCalls: 1,
+    dialParallel: false,
     isAutomatic: false,
     maxRetries: 0,
     retryIntervalMinutes: 10,
@@ -99,6 +112,7 @@ export default function Campaigns() {
       description: campaign.description || "",
       scriptId: campaign.scriptId || 0,
       maxConcurrentCalls: campaign.maxConcurrentCalls || 1,
+      dialParallel: campaign.dialParallel || false,
       isAutomatic: campaign.isAutomatic || false,
       maxRetries: campaign.maxRetries || 0,
       retryIntervalMinutes: campaign.retryIntervalMinutes || 10,
@@ -129,7 +143,7 @@ export default function Campaigns() {
       await createCampaign.mutateAsync(formData);
       toast({ title: "Campaign created" });
       setIsDialogOpen(false);
-      setFormData({ name: "", description: "", scriptId: 0, maxConcurrentCalls: 1, isAutomatic: false, maxRetries: 0, retryIntervalMinutes: 10, contactIds: [] });
+      setFormData({ name: "", description: "", scriptId: 0, maxConcurrentCalls: 1, dialParallel: false, isAutomatic: false, maxRetries: 0, retryIntervalMinutes: 10, contactIds: [] });
     } catch (err: any) {
       toast({ title: "Error", description: err.message, variant: "destructive" });
     }
@@ -253,7 +267,7 @@ export default function Campaigns() {
               <div className="flex items-center justify-between p-3 border border-white/10 rounded-md bg-background/50">
                 <div className="space-y-0.5">
                   <label className="text-sm font-medium">Automatic Dialing</label>
-                  <p className="text-xs text-muted-foreground">Automatically call the next contact sequentially.</p>
+                  <p className="text-xs text-muted-foreground">Automatically call contacts without manual interaction.</p>
                 </div>
                 <input
                   type="checkbox"
@@ -262,6 +276,20 @@ export default function Campaigns() {
                   className="h-5 w-9 rounded-full bg-white/10 border border-white/10 checked:bg-primary transition-colors cursor-pointer appearance-none relative before:content-[''] before:absolute before:top-0.5 before:left-0.5 before:h-3.5 before:w-3.5 before:rounded-full before:bg-white before:transition-transform checked:before:translate-x-4"
                 />
               </div>
+              {formData.isAutomatic && (
+                <div className="flex items-center justify-between p-3 border border-white/10 rounded-md bg-background/50">
+                  <div className="space-y-0.5">
+                    <label className="text-sm font-medium">Parallel Dialing</label>
+                    <p className="text-xs text-muted-foreground">Call multiple contacts simultaneously up to the maximum concurrent calls limit.</p>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={formData.dialParallel}
+                    onChange={e => setFormData({ ...formData, dialParallel: e.target.checked })}
+                    className="h-5 w-9 rounded-full bg-white/10 border border-white/10 checked:bg-primary transition-colors cursor-pointer appearance-none relative before:content-[''] before:absolute before:top-0.5 before:left-0.5 before:h-3.5 before:w-3.5 before:rounded-full before:bg-white before:transition-transform checked:before:translate-x-4"
+                  />
+                </div>
+              )}
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
                   <label className="text-sm font-medium">Max Retries</label>
@@ -344,6 +372,18 @@ export default function Campaigns() {
                     </div>
                     <div className="flex items-center gap-2">
                       <StatusBadge status={campaign.status} />
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="w-8 h-8 rounded-full border border-white/10 bg-white/5 hover:bg-white/10 text-muted-foreground hover:text-white transition-colors"
+                        onClick={async () => {
+                          await refetch();
+                          toast({ title: "Campaigns refreshed", description: "Fetched latest campaign metrics." });
+                        }}
+                        title="Refresh campaigns"
+                      >
+                        <RefreshCw className={`w-3.5 h-3.5 ${isFetching ? "animate-spin text-primary" : ""}`} />
+                      </Button>
                       <Button
                         variant="ghost"
                         size="icon"
@@ -499,7 +539,7 @@ export default function Campaigns() {
               <div className="flex items-center justify-between p-3 border border-white/10 rounded-md bg-background/50">
                 <div className="space-y-0.5">
                   <label className="text-sm font-medium">Automatic Dialing</label>
-                  <p className="text-xs text-muted-foreground">Automatically call the next contact sequentially.</p>
+                  <p className="text-xs text-muted-foreground">Automatically call contacts without manual interaction.</p>
                 </div>
                 <input
                   type="checkbox"
@@ -508,6 +548,20 @@ export default function Campaigns() {
                   className="h-5 w-9 rounded-full bg-white/10 border border-white/10 checked:bg-primary transition-colors cursor-pointer appearance-none relative before:content-[''] before:absolute before:top-0.5 before:left-0.5 before:h-3.5 before:w-3.5 before:rounded-full before:bg-white before:transition-transform checked:before:translate-x-4"
                 />
               </div>
+              {editFormData.isAutomatic && (
+                <div className="flex items-center justify-between p-3 border border-white/10 rounded-md bg-background/50">
+                  <div className="space-y-0.5">
+                    <label className="text-sm font-medium">Parallel Dialing</label>
+                    <p className="text-xs text-muted-foreground">Call multiple contacts simultaneously up to the maximum concurrent calls limit.</p>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={editFormData.dialParallel}
+                    onChange={e => setEditFormData({ ...editFormData, dialParallel: e.target.checked })}
+                    className="h-5 w-9 rounded-full bg-white/10 border border-white/10 checked:bg-primary transition-colors cursor-pointer appearance-none relative before:content-[''] before:absolute before:top-0.5 before:left-0.5 before:h-3.5 before:w-3.5 before:rounded-full before:bg-white before:transition-transform checked:before:translate-x-4"
+                  />
+                </div>
+              )}
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
                   <label className="text-sm font-medium">Max Retries</label>
