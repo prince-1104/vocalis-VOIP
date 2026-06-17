@@ -420,7 +420,11 @@ export default function Campaigns() {
                     </div>
                     <div className="bg-white/5 rounded-lg p-2 text-center">
                       <p className="text-[10px] text-muted-foreground mb-1">Dial Mode</p>
-                      <p className="text-xs font-semibold text-primary mt-1">{campaign.isAutomatic ? "Auto" : "Manual"}</p>
+                      <p className="text-xs font-semibold text-primary mt-1">
+                        {campaign.isAutomatic 
+                          ? (campaign.dialParallel ? "Auto (Parallel)" : "Auto (Seq)") 
+                          : "Manual"}
+                      </p>
                     </div>
                   </div>
                 </CardContent>
@@ -438,7 +442,7 @@ export default function Campaigns() {
                         <><Play className="w-4 h-4 mr-2" /> Activate</>
                       )}
                     </Button>
-                    {campaign.status === 'active' && (
+                    {campaign.status === 'active' && !campaign.isAutomatic && (
                       <Button
                         variant="default"
                         className="flex-1 bg-green-600 hover:bg-green-700 shadow-md"
