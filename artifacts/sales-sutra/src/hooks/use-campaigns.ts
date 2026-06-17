@@ -5,6 +5,7 @@ import {
   useUpdateCampaign,
   useStartCampaign,
   usePauseCampaign,
+  useDeleteCampaign,
   getListCampaignsQueryKey,
   type CreateCampaignRequest,
   type UpdateCampaignRequest
@@ -64,6 +65,20 @@ export function useUpdateCampaignMutation() {
     ...mutation,
     mutateAsync: async (params: { id: number; data: UpdateCampaignRequest }) => {
       const result = await mutation.mutateAsync(params);
+      queryClient.invalidateQueries({ queryKey: getListCampaignsQueryKey() });
+      return result;
+    }
+  };
+}
+
+export function useDeleteCampaignMutation() {
+  const queryClient = useQueryClient();
+  const mutation = useDeleteCampaign();
+  
+  return {
+    ...mutation,
+    mutateAsync: async (id: number) => {
+      const result = await mutation.mutateAsync({ id });
       queryClient.invalidateQueries({ queryKey: getListCampaignsQueryKey() });
       return result;
     }

@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { useCampaignsList, useCreateCampaignMutation, useStartCampaignMutation, usePauseCampaignMutation, useUpdateCampaignMutation } from "@/hooks/use-campaigns";
+import { useCampaignsList, useCreateCampaignMutation, useStartCampaignMutation, usePauseCampaignMutation, useUpdateCampaignMutation, useDeleteCampaignMutation } from "@/hooks/use-campaigns";
 import { useScriptsList } from "@/hooks/use-scripts";
 import { useContactsList } from "@/hooks/use-contacts";
 import { Card, CardContent, CardHeader, CardTitle, CardFooter } from "@/components/ui/card";
@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { StatusBadge } from "@/components/ui-custom/StatusBadge";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
-import { Megaphone, Play, Pause, PhoneCall, Loader2, Activity, Users, Edit, Clock, Mic, DollarSign, Bot, PhoneOutgoing, PhoneIncoming, RefreshCw } from "lucide-react";
+import { Megaphone, Play, Pause, PhoneCall, Loader2, Activity, Users, Edit, Clock, Mic, DollarSign, Bot, PhoneOutgoing, PhoneIncoming, RefreshCw, Trash2 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { useQueryClient } from "@tanstack/react-query";
 
@@ -36,6 +36,9 @@ export default function Campaigns() {
   const [dialingCampaignId, setDialingCampaignId] = useState<number | null>(null);
   
   const updateCampaign = useUpdateCampaignMutation();
+  const deleteCampaign = useDeleteCampaignMutation();
+  const [deletingCampaign, setDeletingCampaign] = useState<any | null>(null);
+  const [deleteConfirmText, setDeleteConfirmText] = useState("");
   const [editingCampaign, setEditingCampaign] = useState<any | null>(null);
   const [editFormData, setEditFormData] = useState({
     name: "",
@@ -391,6 +394,15 @@ export default function Campaigns() {
                         onClick={() => handleEditClick(campaign)}
                       >
                         <Edit className="w-3.5 h-3.5" />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="w-8 h-8 rounded-full border border-red-500/20 bg-red-500/5 hover:bg-red-500/20 text-red-400 hover:text-red-300 transition-colors"
+                        onClick={() => setDeletingCampaign(campaign)}
+                        title="Delete campaign"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
                       </Button>
                     </div>
                   </div>
@@ -839,6 +851,74 @@ export default function Campaigns() {
                   </div>
                 </div>
               )}
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete Confirmation Dialog */}
+      <Dialog 
+        open={deletingCampaign !== null} 
+        onOpenChange={(open) => {
+          if (!open) {
+            setDeletingCampaign(null);
+            setDeleteConfirmText("");
+          }
+        }}
+      >
+        <DialogContent className="glass-panel sm:max-w-[450px] border-red-500/20 max-h-[85vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="text-red-400 flex items-center gap-2">
+              <Trash2 className="w-5 h-5" /> Delete Campaign
+            </DialogTitle>
+          </DialogHeader>
+          
+          <div className="space-y-4 mt-2">
+            <p className="text-sm text-muted-foreground leading-relaxed">
+              This action <span className="font-semibold text-red-400">cannot be undone</span>. All associated contact mappings will be permanently removed.
+            </p>
+            <p className="text-sm">
+              Please type <span className="font-semibold text-foreground select-all bg-white/5 px-1.5 py-0.5 rounded border border-white/10">
+                {deletingCampaign?.name}
+              </span> to confirm deletion:
+            </p>
+            <Input
+              value={deleteConfirmText}
+              onChange={(e) => setDeleteConfirmText(e.target.value)}
+              placeholder="Type campaign name here..."
+              className="bg-background/50 border-white/10"
+              required
+            />
+            
+            <div className="flex gap-3 pt-2">
+              <Button
+                variant="outline"
+                className="flex-1 bg-white/5 border-white/10 hover:bg-white/10"
+                onClick={() => {
+                  setDeletingCampaign(null);
+                  setDeleteConfirmText("");
+                }}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="destructive"
+                className="flex-1 bg-red-600 hover:bg-red-700 disabled:opacity-50"
+                disabled={deleteConfirmText !== deletingCampaign?.name || deleteCampaign.isPending}
+                onClick={async () => {
+                  if (!deletingCampaign) return;
+                  try {
+                    await deleteCampaign.mutateAsync(deletingCampaign.id);
+                    toast({ title: "Campaign deleted" });
+                    setDeletingCampaign(null);
+                    setDeleteConfirmText("");
+                  } catch (err: any) {
+                    toast({ title: "Delete failed", description: err.message, variant: "destructive" });
+                  }
+                }}
+              >
+                {deleteCampaign.isPending ? "Deleting..." : "Delete Campaign"}
+              </Button>
             </div>
           </div>
         </DialogContent>

@@ -316,6 +316,13 @@ export const UpdateCampaignResponse = zod.object({
 });
 
 /**
+ * @summary Delete a campaign
+ */
+export const DeleteCampaignParams = zod.object({
+  id: zod.coerce.number(),
+});
+
+/**
  * @summary Start a campaign
  */
 export const StartCampaignParams = zod.object({

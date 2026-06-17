@@ -178,4 +178,25 @@ router.post("/campaigns/:id/pause", async (req, res) => {
   });
 });
 
+router.delete("/campaigns/:id", async (req, res) => {
+  const userId = req.userId!;
+  const campaignId = parseInt(req.params.id);
+
+  const existingCampaign = await db.query.campaignsTable.findFirst({
+    where: and(eq(campaignsTable.id, campaignId), eq(campaignsTable.userId, userId)),
+  });
+
+  if (!existingCampaign) {
+    res.status(404).json({ error: "Campaign not found" });
+    return;
+  }
+
+  // Delete from DB (related campaign_contacts will be deleted due to cascade)
+  await db.delete(campaignsTable).where(
+    and(eq(campaignsTable.id, campaignId), eq(campaignsTable.userId, userId))
+  );
+
+  res.status(204).end();
+});
+
 export default router;
