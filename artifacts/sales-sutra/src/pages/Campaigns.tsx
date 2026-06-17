@@ -215,7 +215,7 @@ export default function Campaigns() {
               <Megaphone className="w-4 h-4 mr-2" /> New Campaign
             </Button>
           </DialogTrigger>
-          <DialogContent className="glass-panel sm:max-w-[500px] border-white/10">
+          <DialogContent className="glass-panel sm:max-w-[500px] border-white/10 max-h-[85vh] overflow-y-auto">
             <DialogHeader>
               <DialogTitle>Create Campaign</DialogTitle>
             </DialogHeader>
@@ -490,7 +490,7 @@ export default function Campaigns() {
       )}
 
       <Dialog open={editingCampaign !== null} onOpenChange={(open) => !open && setEditingCampaign(null)}>
-        <DialogContent className="glass-panel sm:max-w-[500px] border-white/10">
+        <DialogContent className="glass-panel sm:max-w-[500px] border-white/10 max-h-[85vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>Edit Campaign</DialogTitle>
           </DialogHeader>
