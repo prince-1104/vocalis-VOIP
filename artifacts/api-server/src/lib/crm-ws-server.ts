@@ -78,7 +78,7 @@ export function initWebSocketServer(server: HTTPServer): void {
       const pathname = url.pathname;
 
       // Handle Twilio Media Stream upgrades
-      if (pathname.startsWith("/ws/twilio/media-stream")) {
+      if (pathname.startsWith("/ws/crm/calls/twilio-media-stream")) {
         await handleTwilioStreamUpgrade(request, socket, head);
         return;
       }

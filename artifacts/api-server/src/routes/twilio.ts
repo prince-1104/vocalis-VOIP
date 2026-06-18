@@ -847,7 +847,7 @@ router.post("/twilio/inbound", async (req, res) => {
   getCachedSystemPrompt(userId, { ...(agentConfig || {}), language: agentConfig?.language || "en-US" }, script?.id || null).catch(() => {});
 
   const connect = twiml.connect();
-  const streamUrl = `${baseUrl.replace(/^https/, "wss")}/ws/twilio/media-stream?callLogId=${callLog.id}`;
+  const streamUrl = `${baseUrl.replace(/^https/, "wss")}/ws/crm/calls/twilio-media-stream?callLogId=${callLog.id}`;
   connect.stream({ url: streamUrl });
 
   res.type("text/xml");
@@ -1442,7 +1442,7 @@ router.post("/twilio/outbound-voice", async (req, res) => {
   const voice = mapVoice(agentConfig?.voice);
 
   const connect = twiml.connect();
-  const streamUrl = `${baseUrl.replace(/^https/, "wss")}/ws/twilio/media-stream?callLogId=${callLogId}`;
+  const streamUrl = `${baseUrl.replace(/^https/, "wss")}/ws/crm/calls/twilio-media-stream?callLogId=${callLogId}`;
   connect.stream({ url: streamUrl });
 
   res.type("text/xml");
@@ -1715,7 +1715,7 @@ router.post("/twilio/widget-voice", async (req, res) => {
 
   // Set up <Gather> to collect the visitor's speech — identical to /twilio/inbound
   const connect = twiml.connect();
-  const streamUrl = `${baseUrl.replace(/^https/, "wss")}/ws/twilio/media-stream?callLogId=${callLog.id}`;
+  const streamUrl = `${baseUrl.replace(/^https/, "wss")}/ws/crm/calls/twilio-media-stream?callLogId=${callLog.id}`;
   connect.stream({ url: streamUrl });
 
   console.log(`[twilio/widget-voice] New widget call for user ${userId}, callLogId=${callLog.id}, caller=${callerIdentity}`);

@@ -172,17 +172,44 @@ export async function dialNextForCampaign(
     startedAt: new Date(),
   }).returning();
 
-  const call = await client.calls.create({
-    to: toPhone,
-    from: fromPhone,
-    url: `${baseUrl}/api/twilio/outbound-voice?callLogId=${callLog.id}&userId=${userId}`,
-    statusCallback: `${baseUrl}/api/twilio/status?callLogId=${callLog.id}`,
-    statusCallbackMethod: "POST",
-    statusCallbackEvent: ["completed", "no-answer", "busy", "failed"],
-    machineDetection: "Enable",
-    asyncAmd: "true",
-    ...(sipAuthUsername && sipAuthPassword ? { sipAuthUsername, sipAuthPassword } : {}),
-  });
+  let call;
+  try {
+    call = await client.calls.create({
+      to: toPhone,
+      from: fromPhone,
+      url: `${baseUrl}/api/twilio/outbound-voice?callLogId=${callLog.id}&userId=${userId}`,
+      statusCallback: `${baseUrl}/api/twilio/status?callLogId=${callLog.id}`,
+      statusCallbackMethod: "POST",
+      statusCallbackEvent: ["completed", "no-answer", "busy", "failed"],
+      machineDetection: "Enable",
+      asyncAmd: "true",
+      ...(sipAuthUsername && sipAuthPassword ? { sipAuthUsername, sipAuthPassword } : {}),
+    });
+  } catch (err: any) {
+    // Mark call log as ended and failed so it doesn't block parallel dialing
+    await db.update(callLogsTable)
+      .set({
+        outcome: "no_answer",
+        endedAt: new Date(),
+        transcript: `Failed to dial: ${err.message || err}`
+      })
+      .where(eq(callLogsTable.id, callLog.id));
+
+    // Resolve campaign contact retry status
+    if (nextLink) {
+      if (nextLink.attempts >= 1 + campaign.maxRetries) {
+        await db.update(campaignContactsTable)
+          .set({ status: "failed" })
+          .where(eq(campaignContactsTable.id, nextLink.linkId));
+      } else {
+        const nextTime = new Date(Date.now() + campaign.retryIntervalMinutes * 60 * 1000);
+        await db.update(campaignContactsTable)
+          .set({ status: "retrying", nextAttemptAt: nextTime })
+          .where(eq(campaignContactsTable.id, nextLink.linkId));
+      }
+    }
+    throw err;
+  }
 
   // Store the actual Call SID in the call logs
   await db.update(callLogsTable)
