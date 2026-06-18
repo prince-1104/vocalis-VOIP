@@ -369,6 +369,7 @@ export async function handleTwilioStreamUpgrade(request: any, socket: any, head:
 
 twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string) => {
   logger.info({ callLogId }, "Twilio Media Stream WebSocket client connected");
+  const connectionTime = Date.now();
 
   const config = await fetchConfig(callLogId);
   if (!config) {
@@ -388,8 +389,8 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
 
   // VAD state variables
   let vadState: "silent" | "speaking" = "silent";
-  const SPEECH_THRESHOLD = 800;
-  const SILENCE_THRESHOLD = 400;
+  const SPEECH_THRESHOLD = 1800;
+  const SILENCE_THRESHOLD = 900;
   const MIN_SPEECH_DURATION_CHUNKS = 8; // Ignore speech shorter than 160ms
   const SILENCE_DURATION_CHUNKS = 25; // 1.0 second silence (25 chunks * 40ms)
 
@@ -484,13 +485,14 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
         const rms = Math.sqrt(sum / pcmChunk.length);
 
         if (vadState === "silent") {
-          if (rms > SPEECH_THRESHOLD) {
+          const isGracePeriod = (Date.now() - connectionTime) < 2000;
+          if (rms > SPEECH_THRESHOLD && !isGracePeriod) {
             speechChunksCount++;
             if (speechChunksCount >= 2) {
               vadState = "speaking";
               logger.info({ rms, callLogId }, "VAD: Speech onset detected");
 
-              if (isSpeaking || isGenerating) {
+              if (isSpeaking) {
                 logger.info({ callLogId }, "VAD: Interruption detected! Clearing bot player.");
                 player.clear();
                 ws.send(JSON.stringify({
