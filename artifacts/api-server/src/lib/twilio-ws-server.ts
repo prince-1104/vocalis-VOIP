@@ -108,7 +108,11 @@ function createWavBuffer(pcmSamples: Int16Array, sampleRate: number): Buffer {
 function downsample24to8(pcm24: Int16Array): Int16Array {
   const pcm8 = new Int16Array(Math.floor(pcm24.length / 3));
   for (let i = 0; i < pcm8.length; i++) {
-    pcm8[i] = pcm24[i * 3];
+    const idx = i * 3;
+    const s1 = pcm24[idx] || 0;
+    const s2 = pcm24[idx + 1] || 0;
+    const s3 = pcm24[idx + 2] || 0;
+    pcm8[i] = Math.round((s1 + s2 + s3) / 3);
   }
   return pcm8;
 }
@@ -127,7 +131,7 @@ class AudioPlayer {
   }
 
   public enqueue(muLawAudio: Buffer) {
-    const chunkSize = 320; // 40ms of 8000Hz 8-bit mu-law (320 bytes)
+    const chunkSize = 160; // 20ms of 8000Hz 8-bit mu-law (160 bytes)
     for (let offset = 0; offset < muLawAudio.length; offset += chunkSize) {
       const chunk = muLawAudio.slice(offset, offset + chunkSize);
       this.queue.push(chunk);
@@ -149,7 +153,23 @@ class AudioPlayer {
 
   private start() {
     if (this.timer) return;
-    if (this.queue.length < 2) return; // Buffer at least 80ms to avoid jitter
+    if (this.queue.length < 4) return; // Buffer at least 80ms to avoid jitter
+
+    // Pre-buffer: send the first 8 chunks (160ms of audio) immediately to feed Twilio's audio queue
+    const preBufferCount = Math.min(8, this.queue.length);
+    for (let i = 0; i < preBufferCount; i++) {
+      const chunk = this.queue.shift();
+      if (!chunk) break;
+      if (this.ws.readyState === WebSocket.OPEN) {
+        this.ws.send(JSON.stringify({
+          event: "media",
+          streamSid: this.streamSid,
+          media: {
+            payload: chunk.toString("base64")
+          }
+        }));
+      }
+    }
 
     this.timer = setInterval(() => {
       const chunk = this.queue.shift();
@@ -169,7 +189,7 @@ class AudioPlayer {
           }
         }));
       }
-    }, 40);
+    }, 20);
   }
 }
 
@@ -265,11 +285,11 @@ async function generateSentenceTTS(text: string, lang: string, voice: string): P
     const wavBuffer = Buffer.from(audioBase64, "base64");
     
     // Skip 44-byte WAV header and convert to mu-law
-    const pcmSamples = new Int16Array(
-      wavBuffer.buffer, 
-      wavBuffer.byteOffset + 44, 
-      (wavBuffer.length - 44) / 2
-    );
+    const pcmBuffer = wavBuffer.subarray(44);
+    const pcmSamples = new Int16Array(Math.floor(pcmBuffer.length / 2));
+    for (let i = 0; i < pcmSamples.length; i++) {
+      pcmSamples[i] = pcmBuffer.readInt16LE(i * 2);
+    }
     return encodeMuLawBuffer(pcmSamples);
   } else {
     const mp3 = await openai.audio.speech.create({
