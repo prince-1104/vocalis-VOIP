@@ -351,7 +351,11 @@ export const twilioWss = new WebSocketServer({ noServer: true });
 
 export async function handleTwilioStreamUpgrade(request: any, socket: any, head: any) {
   const url = new URL(request.url || "", `http://${request.headers.host}`);
-  const callLogId = url.searchParams.get("callLogId");
+  let callLogId = url.searchParams.get("callLogId");
+  if (!callLogId) {
+    const pathParts = url.pathname.split("/").filter(Boolean);
+    callLogId = pathParts[4] || null;
+  }
   if (!callLogId) {
     socket.write("HTTP/1.1 400 Bad Request\r\n\r\n");
     socket.destroy();

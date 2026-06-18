@@ -850,7 +850,7 @@ router.post("/twilio/inbound", async (req, res) => {
   const connect = twiml.connect();
   const isLocal = baseUrl.includes("localhost") || baseUrl.includes("127.0.0.1");
   const wsProto = isLocal ? "ws" : "wss";
-  const streamUrl = `${baseUrl.replace(/^https?/, wsProto)}/ws/crm/calls/twilio-media-stream?callLogId=${callLog.id}`;
+  const streamUrl = `${baseUrl.replace(/^https?/, wsProto)}/ws/crm/calls/twilio-media-stream/${callLog.id}`;
   connect.stream({ url: streamUrl });
 
   res.type("text/xml");
@@ -1447,7 +1447,7 @@ router.post("/twilio/outbound-voice", async (req, res) => {
   const connect = twiml.connect();
   const isLocal = baseUrl.includes("localhost") || baseUrl.includes("127.0.0.1");
   const wsProto = isLocal ? "ws" : "wss";
-  const streamUrl = `${baseUrl.replace(/^https?/, wsProto)}/ws/crm/calls/twilio-media-stream?callLogId=${callLogId}`;
+  const streamUrl = `${baseUrl.replace(/^https?/, wsProto)}/ws/crm/calls/twilio-media-stream/${callLogId}`;
   connect.stream({ url: streamUrl });
 
   res.type("text/xml");
@@ -1722,7 +1722,7 @@ router.post("/twilio/widget-voice", async (req, res) => {
   const connect = twiml.connect();
   const isLocal = baseUrl.includes("localhost") || baseUrl.includes("127.0.0.1");
   const wsProto = isLocal ? "ws" : "wss";
-  const streamUrl = `${baseUrl.replace(/^https?/, wsProto)}/ws/crm/calls/twilio-media-stream?callLogId=${callLog.id}`;
+  const streamUrl = `${baseUrl.replace(/^https?/, wsProto)}/ws/crm/calls/twilio-media-stream/${callLog.id}`;
   connect.stream({ url: streamUrl });
 
   console.log(`[twilio/widget-voice] New widget call for user ${userId}, callLogId=${callLog.id}, caller=${callerIdentity}`);
