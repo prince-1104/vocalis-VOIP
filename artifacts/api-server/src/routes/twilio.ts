@@ -181,7 +181,8 @@ function getBaseUrl(req: any): string {
     return `https://${first}`;
   }
   const host = req.headers.host || "localhost";
-  return `https://${host}`;
+  const proto = req.headers["x-forwarded-proto"] || (req.secure ? "https" : "http");
+  return `${proto}://${host}`;
 }
 
 const KB_ENTRY_MAX_CHARS = 500;
@@ -847,7 +848,9 @@ router.post("/twilio/inbound", async (req, res) => {
   getCachedSystemPrompt(userId, { ...(agentConfig || {}), language: agentConfig?.language || "en-US" }, script?.id || null).catch(() => {});
 
   const connect = twiml.connect();
-  const streamUrl = `${baseUrl.replace(/^https/, "wss")}/ws/crm/calls/twilio-media-stream?callLogId=${callLog.id}`;
+  const isLocal = baseUrl.includes("localhost") || baseUrl.includes("127.0.0.1");
+  const wsProto = isLocal ? "ws" : "wss";
+  const streamUrl = `${baseUrl.replace(/^https?/, wsProto)}/ws/crm/calls/twilio-media-stream?callLogId=${callLog.id}`;
   connect.stream({ url: streamUrl });
 
   res.type("text/xml");
@@ -1442,7 +1445,9 @@ router.post("/twilio/outbound-voice", async (req, res) => {
   const voice = mapVoice(agentConfig?.voice);
 
   const connect = twiml.connect();
-  const streamUrl = `${baseUrl.replace(/^https/, "wss")}/ws/crm/calls/twilio-media-stream?callLogId=${callLogId}`;
+  const isLocal = baseUrl.includes("localhost") || baseUrl.includes("127.0.0.1");
+  const wsProto = isLocal ? "ws" : "wss";
+  const streamUrl = `${baseUrl.replace(/^https?/, wsProto)}/ws/crm/calls/twilio-media-stream?callLogId=${callLogId}`;
   connect.stream({ url: streamUrl });
 
   res.type("text/xml");
@@ -1715,7 +1720,9 @@ router.post("/twilio/widget-voice", async (req, res) => {
 
   // Set up <Gather> to collect the visitor's speech — identical to /twilio/inbound
   const connect = twiml.connect();
-  const streamUrl = `${baseUrl.replace(/^https/, "wss")}/ws/crm/calls/twilio-media-stream?callLogId=${callLog.id}`;
+  const isLocal = baseUrl.includes("localhost") || baseUrl.includes("127.0.0.1");
+  const wsProto = isLocal ? "ws" : "wss";
+  const streamUrl = `${baseUrl.replace(/^https?/, wsProto)}/ws/crm/calls/twilio-media-stream?callLogId=${callLog.id}`;
   connect.stream({ url: streamUrl });
 
   console.log(`[twilio/widget-voice] New widget call for user ${userId}, callLogId=${callLog.id}, caller=${callerIdentity}`);
