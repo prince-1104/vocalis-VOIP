@@ -846,28 +846,9 @@ router.post("/twilio/inbound", async (req, res) => {
   });
   getCachedSystemPrompt(userId, { ...(agentConfig || {}), language: agentConfig?.language || "en-US" }, script?.id || null).catch(() => {});
 
-  const gather = twiml.gather({
-    input: ["speech"],
-    action: `${baseUrl}/api/twilio/voice?callLogId=${callLog.id}&history=`,
-    method: "POST",
-    speechTimeout: "1.5",
-    speechModel: "phone_call",
-    enhanced: true,
-    timeout: 10,
-    language: getTwilioLang(agentConfig?.language) as any,
-    actionOnEmptyResult: true,
-  });
-
-  const initialLang = agentConfig?.language || "en-US";
-  const initialVoice = agentConfig?.voice || "nova";
-  const initialAudio = await renderPromptAudioForCall(greeting, initialLang, initialVoice);
-  if (initialAudio.ttsAudioId) {
-    gather.play(`${baseUrl}/api/twilio/${initialAudio.useMp3 ? "tts-audio-mp3" : "tts-audio"}/${initialAudio.ttsAudioId}`);
-  } else {
-    gather.say({ voice: mapVoice(initialVoice) as any, language: getTwilioLang(initialLang) as any }, greeting);
-  }
-
-  twiml.redirect({ method: "POST" }, `${baseUrl}/api/twilio/voice?callLogId=${callLog.id}&history=&silent=1`);
+  const connect = twiml.connect();
+  const streamUrl = `${baseUrl.replace(/^https/, "wss")}/ws/twilio/media-stream?callLogId=${callLog.id}`;
+  connect.stream({ url: streamUrl });
 
   res.type("text/xml");
   res.send(twiml.toString());
@@ -1460,26 +1441,9 @@ router.post("/twilio/outbound-voice", async (req, res) => {
   const baseUrl = getBaseUrl(req);
   const voice = mapVoice(agentConfig?.voice);
 
-  const gather = twiml.gather({
-    input: ["speech"],
-    action: `${baseUrl}/api/twilio/voice?callLogId=${callLogId}&history=`,
-    method: "POST",
-    speechTimeout: "1.5",
-    speechModel: "phone_call",
-    enhanced: true,
-    timeout: 10,
-    language: getTwilioLang(lang) as any,
-    actionOnEmptyResult: true,
-  });
-
-  const openingAudio = await renderPromptAudioForCall(openingLine, lang, agentConfig?.voice || "nova");
-  if (openingAudio.ttsAudioId) {
-    gather.play(`${baseUrl}/api/twilio/${openingAudio.useMp3 ? "tts-audio-mp3" : "tts-audio"}/${openingAudio.ttsAudioId}`);
-  } else {
-    gather.say({ voice: voice as any, language: getTwilioLang(lang) as any }, openingLine);
-  }
-
-  twiml.redirect({ method: "POST" }, `${baseUrl}/api/twilio/voice?callLogId=${callLogId}&history=&silent=1`);
+  const connect = twiml.connect();
+  const streamUrl = `${baseUrl.replace(/^https/, "wss")}/ws/twilio/media-stream?callLogId=${callLogId}`;
+  connect.stream({ url: streamUrl });
 
   res.type("text/xml");
   res.send(twiml.toString());
@@ -1750,33 +1714,27 @@ router.post("/twilio/widget-voice", async (req, res) => {
   getCachedSystemPrompt(userId, { ...(agentConfig || {}), language: configuredLang }, script?.id || null).catch(() => {});
 
   // Set up <Gather> to collect the visitor's speech — identical to /twilio/inbound
-  const gather = twiml.gather({
-    input: ["speech"],
-    action: `${baseUrl}/api/twilio/voice?callLogId=${callLog.id}&history=`,
-    method: "POST",
-    speechTimeout: "1.5",
-    speechModel: "phone_call",
-    enhanced: true,
-    timeout: 10,
-    language: getTwilioLang(configuredLang) as any,
-    actionOnEmptyResult: true,
-  });
-
-  // Play the greeting using the same TTS logic as inbound calls
-  const initialAudio = await renderPromptAudioForCall(greeting, configuredLang, agentConfig?.voice || "nova");
-  if (initialAudio.ttsAudioId) {
-    gather.play(`${baseUrl}/api/twilio/${initialAudio.useMp3 ? "tts-audio-mp3" : "tts-audio"}/${initialAudio.ttsAudioId}`);
-  } else {
-    gather.say({ voice: voice as any, language: getTwilioLang(configuredLang) as any }, greeting);
-  }
-
-  // Redirect if no speech detected
-  twiml.redirect({ method: "POST" }, `${baseUrl}/api/twilio/voice?callLogId=${callLog.id}&history=&silent=1`);
+  const connect = twiml.connect();
+  const streamUrl = `${baseUrl.replace(/^https/, "wss")}/ws/twilio/media-stream?callLogId=${callLog.id}`;
+  connect.stream({ url: streamUrl });
 
   console.log(`[twilio/widget-voice] New widget call for user ${userId}, callLogId=${callLog.id}, caller=${callerIdentity}`);
 
   res.type("text/xml");
   res.send(twiml.toString());
 });
+
+export {
+  callMetaCache,
+  getCachedAgentConfig,
+  getCachedSystemPrompt,
+  resolveActiveScript,
+  getCallMeta,
+  isIndianLanguage,
+  getTwilioLang,
+  detectCallLanguage,
+  callSarvamSTT,
+  BULBUL_VOICE_FOR_LANG
+};
 
 export default router;
