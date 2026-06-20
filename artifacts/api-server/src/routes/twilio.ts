@@ -185,6 +185,20 @@ function getBaseUrl(req: any): string {
   return `${proto}://${host}`;
 }
 
+function getDefaultBaseUrl(): string {
+  const domains = process.env.REPLIT_DOMAINS;
+  if (domains) {
+    return `https://${domains.split(",")[0].trim()}`;
+  }
+  return process.env.PUBLIC_BASE_URL || "https://dialog.noeticminds.com";
+}
+
+function attachCallStatusCallback(twiml: twilio.twiml.VoiceResponse, baseUrl: string, callLogId: number) {
+  twiml.response.att("statusCallback", `${baseUrl}/api/twilio/status?callLogId=${callLogId}`);
+  twiml.response.att("statusCallbackMethod", "POST");
+  twiml.response.att("statusCallbackEvent", "completed");
+}
+
 const KB_ENTRY_MAX_CHARS = 500;
 const KB_MAX_ENTRIES = 20;
 
@@ -715,6 +729,146 @@ function computeCallCost(durationSeconds: number, direction: string, model: stri
   };
 }
 
+const CALL_OUTCOME_MAP: Record<string, string> = {
+  completed: "answered",
+  "no-answer": "no_answer",
+  busy: "busy",
+  failed: "no_answer",
+  canceled: "no_answer",
+};
+
+async function completeCallLog(
+  callLogId: number,
+  callStatus: string,
+  callDuration: number,
+  baseUrl?: string,
+) {
+  const existingLog = await db.query.callLogsTable.findFirst({
+    where: eq(callLogsTable.id, callLogId),
+  });
+  if (!existingLog) return;
+
+  if (existingLog.duration && existingLog.duration > 0 && existingLog.estimatedCostUsd) {
+    return;
+  }
+
+  const direction = existingLog.direction || "outbound";
+  const model = existingLog.aiModel || "gpt-4o-mini";
+
+  let language: string | null = null;
+  let commissionPct = 0;
+  const [agentConf, tenant] = await Promise.all([
+    db.query.agentConfigsTable.findFirst({ where: eq(agentConfigsTable.userId, existingLog.userId) }),
+    db.query.tenantsTable.findFirst({ where: eq(tenantsTable.ownerId, existingLog.userId) }),
+  ]);
+  language = agentConf?.language ?? null;
+  if (tenant) {
+    commissionPct = parseFloat(tenant.commissionPct ?? "0");
+  }
+
+  const costData = callDuration > 0 ? computeCallCost(callDuration, direction, model, language) : null;
+  const billedCost = costData
+    ? parseFloat((costData.totalCost * (1 + commissionPct / 100)).toFixed(6))
+    : null;
+
+  const formattedTranscript = (existingLog.liveTranscript && Array.isArray(existingLog.liveTranscript))
+    ? existingLog.liveTranscript
+        .map((turn: any) => `${turn.role === "user" ? "Caller" : "Agent"}: ${turn.content}`)
+        .join("\n\n")
+    : null;
+
+  await db.update(callLogsTable)
+    .set({
+      outcome: CALL_OUTCOME_MAP[callStatus] || "no_answer",
+      duration: callDuration,
+      endedAt: new Date(),
+      ...(formattedTranscript ? { transcript: formattedTranscript } : {}),
+      ...(costData ? {
+        estimatedCostUsd: costData.totalCost.toString(),
+        billedCostUsd: billedCost !== null ? billedCost.toString() : undefined,
+        twilioCostUsd: costData.twilioCost.toString(),
+        openaiCostUsd: costData.llmCost.toString(),
+        twilioMinutes: costData.twilioMinutes,
+      } : {}),
+    })
+    .where(eq(callLogsTable.id, callLogId));
+
+  const finalLog = await db.query.callLogsTable.findFirst({ where: eq(callLogsTable.id, callLogId) });
+  crmEventBus.emitCallEvent({
+    type: "call.ended",
+    callId: callLogId,
+    callSid: finalLog?.callSid || undefined,
+    data: {
+      outcome: CALL_OUTCOME_MAP[callStatus] || "no_answer",
+      duration: callDuration,
+      transcript: finalLog?.transcript || null,
+      aiSummary: finalLog?.aiSummary || null,
+      estimatedCostUsd: costData?.totalCost?.toString() || null,
+      billedCostUsd: billedCost?.toString() || null,
+      liveTranscript: finalLog?.liveTranscript || [],
+    },
+    metadata: finalLog?.crmMetadata as Record<string, unknown> | undefined,
+    timestamp: new Date().toISOString(),
+  });
+
+  if (!baseUrl || !existingLog.campaignId || !existingLog.contactId) return;
+
+  const campaign = await db.query.campaignsTable.findFirst({
+    where: eq(campaignsTable.id, existingLog.campaignId),
+  });
+  if (!campaign) return;
+
+  const resolvedOutcome = CALL_OUTCOME_MAP[callStatus] || "no_answer";
+  const campaignContact = await db.query.campaignContactsTable.findFirst({
+    where: and(
+      eq(campaignContactsTable.campaignId, existingLog.campaignId),
+      eq(campaignContactsTable.contactId, existingLog.contactId)
+    )
+  });
+
+  if (campaignContact) {
+    if (resolvedOutcome === "answered") {
+      await db.update(campaignContactsTable)
+        .set({ status: "answered" })
+        .where(eq(campaignContactsTable.id, campaignContact.id));
+
+      await db.update(campaignsTable)
+        .set({ answeredCount: sql`${campaignsTable.answeredCount} + 1` })
+        .where(eq(campaignsTable.id, campaign.id));
+    } else if (campaignContact.attempts >= 1 + campaign.maxRetries) {
+      await db.update(campaignContactsTable)
+        .set({ status: "failed" })
+        .where(eq(campaignContactsTable.id, campaignContact.id));
+    } else {
+      const nextTime = new Date(Date.now() + campaign.retryIntervalMinutes * 60 * 1000);
+      await db.update(campaignContactsTable)
+        .set({ status: "retrying", nextAttemptAt: nextTime })
+        .where(eq(campaignContactsTable.id, campaignContact.id));
+    }
+  }
+
+  if (campaign.status === "active" && campaign.isAutomatic) {
+    triggerDialingForCampaign(campaign.id, existingLog.userId, baseUrl).catch((err) => {
+      console.error(`[twilio/status] Auto dialing next contact failed for campaign ${campaign.id}:`, err);
+    });
+  }
+}
+
+export async function finalizeCallLog(callLogId: number, startedAt?: Date | null) {
+  const existingLog = await db.query.callLogsTable.findFirst({
+    where: eq(callLogsTable.id, callLogId),
+  });
+  if (!existingLog || (existingLog.duration && existingLog.duration > 0)) return;
+
+  const start = startedAt ?? existingLog.startedAt;
+  const duration = start
+    ? Math.max(1, Math.round((Date.now() - new Date(start).getTime()) / 1000))
+    : 0;
+  if (duration <= 0) return;
+
+  await completeCallLog(callLogId, "completed", duration, getDefaultBaseUrl());
+}
+
 async function resolveUserByPhone(toPhone: string): Promise<number | null> {
   if (toPhone) {
     const config = await db.select().from(agentConfigsTable).where(eq(agentConfigsTable.phoneNumber, toPhone)).limit(1);
@@ -830,6 +984,7 @@ router.post("/twilio/inbound", async (req, res) => {
     userId,
     direction: "inbound",
     phone: req.body.From || "unknown",
+    callSid: req.body.CallSid ?? null,
     outcome: "answered",
     aiModel: agentConfig?.aiModel || "gpt-4o-mini",
     startedAt: new Date(),
@@ -846,6 +1001,8 @@ router.post("/twilio/inbound", async (req, res) => {
     scriptId: script?.id || null,
   });
   getCachedSystemPrompt(userId, { ...(agentConfig || {}), language: agentConfig?.language || "en-US" }, script?.id || null).catch(() => {});
+
+  attachCallStatusCallback(twiml, baseUrl, callLog.id);
 
   const connect = twiml.connect();
   const isLocal = baseUrl.includes("localhost") || baseUrl.includes("127.0.0.1");
@@ -1455,134 +1612,19 @@ router.post("/twilio/outbound-voice", async (req, res) => {
 });
 
 router.post("/twilio/status", async (req, res) => {
-  const callLogId = req.query.callLogId as string;
+  let callLogId = req.query.callLogId as string | undefined;
   const callStatus = req.body.CallStatus;
   const callDuration = parseInt(req.body.CallDuration || "0");
 
-  const outcomeMap: Record<string, string> = {
-    completed: "answered",
-    "no-answer": "no_answer",
-    busy: "busy",
-    failed: "no_answer",
-    canceled: "no_answer",
-  };
+  if (!callLogId && req.body.CallSid) {
+    const bySid = await db.query.callLogsTable.findFirst({
+      where: eq(callLogsTable.callSid, req.body.CallSid),
+    });
+    if (bySid) callLogId = String(bySid.id);
+  }
 
   if (callLogId) {
-    const existingLog = await db.query.callLogsTable.findFirst({
-      where: eq(callLogsTable.id, parseInt(callLogId)),
-    });
-
-    const direction = existingLog?.direction || "outbound";
-    const model = existingLog?.aiModel || "gpt-4o-mini";
-
-    let language: string | null = null;
-    let commissionPct = 0;
-    if (existingLog) {
-      const [agentConf, tenant] = await Promise.all([
-        db.query.agentConfigsTable.findFirst({ where: eq(agentConfigsTable.userId, existingLog.userId) }),
-        db.query.tenantsTable.findFirst({ where: eq(tenantsTable.ownerId, existingLog.userId) }),
-      ]);
-      language = agentConf?.language ?? null;
-      if (tenant) {
-        commissionPct = parseFloat(tenant.commissionPct ?? "0");
-      }
-    }
-
-    const costData = callDuration > 0 ? computeCallCost(callDuration, direction, model, language) : null;
-
-    const billedCost = costData
-      ? parseFloat((costData.totalCost * (1 + commissionPct / 100)).toFixed(6))
-      : null;
-
-      const formattedTranscript = (existingLog?.liveTranscript && Array.isArray(existingLog.liveTranscript))
-      ? existingLog.liveTranscript
-          .map((turn: any) => `${turn.role === "user" ? "Caller" : "Agent"}: ${turn.content}`)
-          .join("\n\n")
-      : null;
-
-    await db.update(callLogsTable)
-      .set({
-        outcome: outcomeMap[callStatus] || "no_answer",
-        duration: callDuration,
-        endedAt: new Date(),
-        ...(formattedTranscript ? { transcript: formattedTranscript } : {}),
-        ...(costData ? {
-          estimatedCostUsd: costData.totalCost.toString(),
-          billedCostUsd: billedCost !== null ? billedCost.toString() : undefined,
-          twilioCostUsd: costData.twilioCost.toString(),
-          openaiCostUsd: costData.llmCost.toString(),
-          twilioMinutes: costData.twilioMinutes,
-        } : {}),
-      })
-      .where(eq(callLogsTable.id, parseInt(callLogId)));
-
-    // ── CRM Event Bus: emit call ended ──
-    if (existingLog) {
-      const finalLog = await db.query.callLogsTable.findFirst({ where: eq(callLogsTable.id, parseInt(callLogId)) });
-      crmEventBus.emitCallEvent({
-        type: "call.ended",
-        callId: parseInt(callLogId),
-        callSid: finalLog?.callSid || undefined,
-        data: {
-          outcome: outcomeMap[callStatus] || "no_answer",
-          duration: callDuration,
-          transcript: finalLog?.transcript || null,
-          aiSummary: finalLog?.aiSummary || null,
-          estimatedCostUsd: costData?.totalCost?.toString() || null,
-          billedCostUsd: billedCost?.toString() || null,
-          liveTranscript: finalLog?.liveTranscript || [],
-        },
-        metadata: finalLog?.crmMetadata as Record<string, unknown> | undefined,
-        timestamp: new Date().toISOString(),
-      });
-
-      if (existingLog.campaignId && existingLog.contactId) {
-        const campaign = await db.query.campaignsTable.findFirst({
-          where: eq(campaignsTable.id, existingLog.campaignId),
-        });
-
-        if (campaign) {
-          const resolvedOutcome = outcomeMap[callStatus] || "no_answer";
-
-          const campaignContact = await db.query.campaignContactsTable.findFirst({
-            where: and(
-              eq(campaignContactsTable.campaignId, existingLog.campaignId),
-              eq(campaignContactsTable.contactId, existingLog.contactId)
-            )
-          });
-
-          if (campaignContact) {
-            if (resolvedOutcome === "answered") {
-              await db.update(campaignContactsTable)
-                .set({ status: "answered" })
-                .where(eq(campaignContactsTable.id, campaignContact.id));
-
-              await db.update(campaignsTable)
-                .set({ answeredCount: sql`${campaignsTable.answeredCount} + 1` })
-                .where(eq(campaignsTable.id, campaign.id));
-            } else {
-              if (campaignContact.attempts >= 1 + campaign.maxRetries) {
-                await db.update(campaignContactsTable)
-                  .set({ status: "failed" })
-                  .where(eq(campaignContactsTable.id, campaignContact.id));
-              } else {
-                const nextTime = new Date(Date.now() + campaign.retryIntervalMinutes * 60 * 1000);
-                await db.update(campaignContactsTable)
-                  .set({ status: "retrying", nextAttemptAt: nextTime })
-                  .where(eq(campaignContactsTable.id, campaignContact.id));
-              }
-            }
-          }
-
-          if (campaign.status === "active" && campaign.isAutomatic) {
-            const baseUrl = getBaseUrl(req);
-            triggerDialingForCampaign(campaign.id, existingLog.userId, baseUrl).catch((err) => {
-              console.error(`[twilio/status] Auto dialing next contact failed for campaign ${campaign.id}:`, err);
-            });
-          }
-        }
-      }
-    }
+    await completeCallLog(parseInt(callLogId, 10), callStatus, callDuration, getBaseUrl(req));
   }
 
   res.status(200).send("OK");
@@ -1703,6 +1745,7 @@ router.post("/twilio/widget-voice", async (req, res) => {
     userId,
     direction: "widget-voice" as any,
     phone: callerIdentity,
+    callSid: req.body.CallSid ?? null,
     outcome: "answered",
     aiModel: agentConfig?.aiModel || "gpt-4o-mini",
     startedAt: new Date(),
@@ -1718,7 +1761,8 @@ router.post("/twilio/widget-voice", async (req, res) => {
   });
   getCachedSystemPrompt(userId, { ...(agentConfig || {}), language: configuredLang }, script?.id || null).catch(() => {});
 
-  // Set up <Gather> to collect the visitor's speech — identical to /twilio/inbound
+  attachCallStatusCallback(twiml, baseUrl, callLog.id);
+
   const connect = twiml.connect();
   const isLocal = baseUrl.includes("localhost") || baseUrl.includes("127.0.0.1");
   const wsProto = isLocal ? "ws" : "wss";
@@ -1741,7 +1785,7 @@ export {
   getTwilioLang,
   detectCallLanguage,
   callSarvamSTT,
-  BULBUL_VOICE_FOR_LANG
+  BULBUL_VOICE_FOR_LANG,
 };
 
 export default router;

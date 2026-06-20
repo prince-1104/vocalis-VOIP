@@ -22,7 +22,8 @@ import {
   isIndianLanguage,
   detectCallLanguage,
   callSarvamSTT,
-  BULBUL_VOICE_FOR_LANG
+  BULBUL_VOICE_FOR_LANG,
+  finalizeCallLog,
 } from "../routes/twilio";
 
 // ── bitwise G.711 mu-law Codec ─────────────────────────────────────────
@@ -483,6 +484,7 @@ export async function handleTwilioStreamUpgrade(request: any, socket: any, head:
 twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string) => {
   logger.info({ callLogId }, "Twilio Media Stream WebSocket client connected");
   const connectionTime = Date.now();
+  const callStartedAt = new Date();
 
   const config = await fetchConfig(callLogId);
   if (!config) {
@@ -668,6 +670,9 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
       if (data.event === "stop") {
         logger.info({ callLogId }, "Twilio Media Stream stopped");
         player?.clear();
+        finalizeCallLog(parseInt(callLogId, 10), callStartedAt).catch(err =>
+          logger.error({ err, callLogId }, "Failed to finalize call log on stream stop")
+        );
       }
     } catch (err) {
       logger.error({ err }, "Error processing Twilio WS message");
@@ -677,6 +682,9 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
   ws.on("close", () => {
     logger.info({ callLogId }, "Twilio Media Stream WebSocket closed");
     player?.clear();
+    finalizeCallLog(parseInt(callLogId, 10), callStartedAt).catch(err =>
+      logger.error({ err, callLogId }, "Failed to finalize call log on websocket close")
+    );
   });
 
   ws.on("error", (err) => {
