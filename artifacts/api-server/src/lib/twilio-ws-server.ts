@@ -1,6 +1,7 @@
 import { WebSocketServer, WebSocket } from "ws";
 import { URL } from "url";
 import { randomUUID } from "crypto";
+import { spawn } from "child_process";
 import { db, callLogsTable, intentTrainingTable } from "@workspace/db";
 import { eq, and } from "drizzle-orm";
 import { openai } from "@workspace/integrations-openai-ai-server";
@@ -165,13 +166,62 @@ function resamplePcmTo8k(pcm: Int16Array, inputRate: number): Int16Array {
   return out;
 }
 
+/** Convert any audio blob to raw 8kHz mu-law using ffmpeg (required for clean Twilio playback). */
+async function convertAudioToMulaw8k(audioBuffer: Buffer): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const output: Buffer[] = [];
+    const stderr: Buffer[] = [];
+
+    const proc = spawn("ffmpeg", [
+      "-hide_banner",
+      "-loglevel", "error",
+      "-i", "pipe:0",
+      "-f", "mulaw",
+      "-acodec", "pcm_mulaw",
+      "-ar", "8000",
+      "-ac", "1",
+      "pipe:1",
+    ]);
+
+    proc.stdout.on("data", (chunk: Buffer) => output.push(chunk));
+    proc.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
+    proc.on("error", reject);
+    proc.on("close", (code) => {
+      if (code !== 0) {
+        reject(new Error(`ffmpeg mulaw conversion failed (${code}): ${Buffer.concat(stderr).toString()}`));
+        return;
+      }
+      const result = Buffer.concat(output);
+      if (result.length === 0) {
+        reject(new Error("ffmpeg mulaw conversion produced empty output"));
+        return;
+      }
+      resolve(result);
+    });
+
+    proc.stdin.end(audioBuffer);
+  });
+}
+
+async function convertToMulawWithFallback(audioBuffer: Buffer): Promise<Buffer> {
+  try {
+    return await convertAudioToMulaw8k(audioBuffer);
+  } catch (err) {
+    logger.warn({ err }, "ffmpeg mulaw conversion failed, using JS fallback");
+    const { pcm, sampleRate } = parseWavPcm(audioBuffer);
+    const pcm8 = resamplePcmTo8k(pcm, sampleRate);
+    return encodeMuLawBuffer(pcm8);
+  }
+}
+
 // ── Audio Player for Twilio WebSockets ──────────────────────────────────
 class AudioPlayer {
   private queue: Buffer[] = [];
   private ws: WebSocket;
   private streamSid: string;
-  private timer: NodeJS.Timeout | null = null;
+  private playbackTimer: NodeJS.Timeout | null = null;
   private onComplete: (() => void) | null = null;
+  private isDraining = false;
 
   constructor(ws: WebSocket, streamSid: string) {
     this.ws = ws;
@@ -194,17 +244,19 @@ class AudioPlayer {
 
   public clear() {
     this.queue = [];
-    this.stopTimer();
+    this.stopPlayback();
   }
 
   public setOnComplete(cb: () => void) {
     this.onComplete = cb;
   }
 
-  private stopTimer() {
-    if (!this.timer) return;
-    clearInterval(this.timer);
-    this.timer = null;
+  private stopPlayback() {
+    if (this.playbackTimer) {
+      clearTimeout(this.playbackTimer);
+      this.playbackTimer = null;
+    }
+    this.isDraining = false;
   }
 
   private sendChunk(chunk: Buffer) {
@@ -213,28 +265,28 @@ class AudioPlayer {
       event: "media",
       streamSid: this.streamSid,
       media: {
+        track: "outbound",
         payload: chunk.toString("base64"),
       },
     }));
   }
 
-  private ensurePlayback() {
-    if (this.queue.length === 0) return;
-
-    if (!this.timer) {
-      const firstChunk = this.queue.shift();
-      if (firstChunk) this.sendChunk(firstChunk);
-
-      this.timer = setInterval(() => {
-        const chunk = this.queue.shift();
-        if (!chunk) {
-          this.stopTimer();
-          this.onComplete?.();
-          return;
-        }
-        this.sendChunk(chunk);
-      }, TWILIO_CHUNK_MS);
+  private drainNext() {
+    const chunk = this.queue.shift();
+    if (!chunk) {
+      this.stopPlayback();
+      this.onComplete?.();
+      return;
     }
+
+    this.sendChunk(chunk);
+    this.playbackTimer = setTimeout(() => this.drainNext(), TWILIO_CHUNK_MS);
+  }
+
+  private ensurePlayback() {
+    if (this.isDraining || this.queue.length === 0) return;
+    this.isDraining = true;
+    this.drainNext();
   }
 }
 
@@ -328,21 +380,20 @@ async function generateSentenceTTS(text: string, lang: string, voice: string): P
     const audioBase64: string | undefined = data.audios?.[0];
     if (!audioBase64) throw new Error("No audio returned from Sarvam");
     const wavBuffer = Buffer.from(audioBase64, "base64");
-    const { pcm, sampleRate } = parseWavPcm(wavBuffer);
-    const pcm8 = resamplePcmTo8k(pcm, sampleRate);
-    return encodeMuLawBuffer(pcm8);
+    const mulaw = await convertToMulawWithFallback(wavBuffer);
+    logger.info({ bytes: mulaw.length, lang }, "Sarvam TTS mulaw audio ready");
+    return mulaw;
   } else {
-    const wavResponse = await openai.audio.speech.create({
+    const mp3Response = await openai.audio.speech.create({
       model: "tts-1",
       voice: (voice || "nova") as any,
       input: text,
-      response_format: "wav",
     });
 
-    const wavBuffer = Buffer.from(await wavResponse.arrayBuffer());
-    const { pcm, sampleRate } = parseWavPcm(wavBuffer);
-    const pcm8 = resamplePcmTo8k(pcm, sampleRate);
-    return encodeMuLawBuffer(pcm8);
+    const mp3Buffer = Buffer.from(await mp3Response.arrayBuffer());
+    const mulaw = await convertToMulawWithFallback(mp3Buffer);
+    logger.info({ bytes: mulaw.length, lang }, "OpenAI TTS mulaw audio ready");
+    return mulaw;
   }
 }
 
@@ -546,7 +597,8 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
 
         if (vadState === "silent") {
           const isGracePeriod = (Date.now() - connectionTime) < 2000;
-          if (rms > SPEECH_THRESHOLD && !isGracePeriod) {
+          const speechThreshold = isSpeaking ? 5000 : SPEECH_THRESHOLD;
+          if (rms > speechThreshold && !isGracePeriod) {
             speechChunksCount++;
             if (speechChunksCount >= 2) {
               vadState = "speaking";
