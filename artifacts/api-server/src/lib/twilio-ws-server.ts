@@ -226,7 +226,7 @@ class AudioPlayer {
   private prebufferTimer: NodeJS.Timeout | null = null;
   private onComplete: (() => void) | null = null;
   /** Partial frame carried across enqueue() calls to avoid silence gaps between TTS sentences */
-  private remainder = Buffer.alloc(0);
+  private remainder: Buffer = Buffer.alloc(0);
   private playbackStartMs: number | null = null;
   private chunksSent = 0;
 
@@ -247,7 +247,7 @@ class AudioPlayer {
       offset += TWILIO_CHUNK_BYTES;
     }
     if (offset < combined.length) {
-      this.remainder = combined.subarray(offset);
+      this.remainder = Buffer.from(combined.subarray(offset));
     }
 
     this.ensurePlayback();
