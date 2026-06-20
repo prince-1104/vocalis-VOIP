@@ -34,6 +34,7 @@ interface CallState {
   status: "idle" | "dialing" | "ringing" | "active" | "transferring" | "transferred" | "ended";
   startTime: number | null;
   connectedAt: number | null;
+  outcome: string | null;
   liveTranscript: TranscriptEntry[];
   intent: string | null;
   transferredTo: string | null;
@@ -108,10 +109,21 @@ function getDefaultCallState(): CallState {
     status: "idle",
     startTime: null,
     connectedAt: null,
+    outcome: null,
     liveTranscript: [],
     intent: null,
     transferredTo: null,
   };
+}
+
+function formatCallOutcome(outcome: string | null, wasConnected: boolean): string {
+  if (wasConnected) return "Call completed";
+  switch (outcome) {
+    case "busy": return "Call declined";
+    case "no_answer": return "No answer";
+    case "answered": return "Call ended";
+    default: return "Call ended";
+  }
 }
 
 function agentCanTransfer(agent: CrmAgent): boolean {
@@ -178,7 +190,20 @@ export default function Dialer() {
           }
 
           if (data.status === "ended" || data.endedAt) {
-            setCallState(prev => ({ ...prev, status: "ended" }));
+            setCallState(prev => {
+              const wasConnected = !!prev.connectedAt;
+              if (!wasConnected && (data.outcome === "busy" || data.outcome === "no_answer")) {
+                toast({
+                  title: data.outcome === "busy" ? "Call declined" : "No answer",
+                  description: "The call was not answered.",
+                });
+              }
+              return {
+                ...prev,
+                status: "ended",
+                outcome: data.outcome ?? prev.outcome,
+              };
+            });
             clearInterval(pollInterval);
             active = false;
             return;
@@ -214,7 +239,7 @@ export default function Dialer() {
           }
         }
       } catch { /* ignore */ }
-    }, 1500);
+    }, 1000);
 
     const cleanup = () => {
       active = false;
@@ -298,6 +323,7 @@ export default function Dialer() {
         status: "dialing",
         startTime: Date.now(),
         connectedAt: null,
+        outcome: null,
         liveTranscript: [],
         intent: null,
         transferredTo: null,
@@ -516,8 +542,15 @@ export default function Dialer() {
 
                   {callState.status === "ended" && (
                     <div className="text-center space-y-2 py-4">
-                      <CheckCircle2 className="w-10 h-10 text-emerald-400 mx-auto" />
-                      <p className="text-sm text-muted-foreground">Call completed • {elapsed}</p>
+                      {callState.outcome === "busy" || (callState.outcome === "no_answer" && !callState.connectedAt) ? (
+                        <XCircle className="w-10 h-10 text-amber-400 mx-auto" />
+                      ) : (
+                        <CheckCircle2 className="w-10 h-10 text-emerald-400 mx-auto" />
+                      )}
+                      <p className="text-sm text-muted-foreground">
+                        {formatCallOutcome(callState.outcome, !!callState.connectedAt)}
+                        {callState.connectedAt ? ` • ${elapsed}` : ""}
+                      </p>
                     </div>
                   )}
 

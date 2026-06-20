@@ -11,9 +11,29 @@ function getTwilioClient(accountSid: string, authToken: string) {
   return twilio(accountSid, authToken);
 }
 
+const TWILIO_TERMINAL_STATUSES = new Set([
+  "completed", "busy", "failed", "no-answer", "canceled",
+]);
+
+const TWILIO_OUTCOME_MAP: Record<string, string> = {
+  completed: "answered",
+  "no-answer": "no_answer",
+  busy: "busy",
+  failed: "no_answer",
+  canceled: "no_answer",
+};
+
 /** Map Twilio CallStatus to dialer UI states */
-function mapTwilioCallStatus(twilioStatus: string, endedAt: Date | null): string {
-  if (endedAt) return "ended";
+function mapTwilioCallStatus(
+  twilioStatus: string,
+  endedAt: Date | null,
+  endTime?: Date | null,
+  durationSecs?: number,
+): string {
+  if (endedAt || endTime) return "ended";
+  if (TWILIO_TERMINAL_STATUSES.has(twilioStatus)) return "ended";
+  // Completed with 0 duration = rejected / unanswered
+  if (twilioStatus === "completed" && durationSecs === 0) return "ended";
   switch (twilioStatus) {
     case "queued":
     case "initiated":
@@ -22,15 +42,27 @@ function mapTwilioCallStatus(twilioStatus: string, endedAt: Date | null): string
       return "ringing";
     case "in-progress":
       return "active";
-    case "completed":
-    case "busy":
-    case "failed":
-    case "no-answer":
-    case "canceled":
-      return "ended";
     default:
       return "dialing";
   }
+}
+
+async function syncCallEndFromTwilio(
+  callId: number,
+  twilioStatus: string,
+  endTime: Date | null | undefined,
+  durationSecs: number,
+) {
+  const outcome = TWILIO_OUTCOME_MAP[twilioStatus]
+    ?? (durationSecs > 0 ? "answered" : "no_answer");
+
+  await db.update(callLogsTable)
+    .set({
+      endedAt: endTime ?? new Date(),
+      outcome,
+      duration: durationSecs,
+    })
+    .where(eq(callLogsTable.id, callId));
 }
 
 function getBaseUrl(req: any): string {
@@ -127,7 +159,7 @@ router.post("/contacts/:id/dial", async (req, res) => {
     url: `${baseUrl}/api/twilio/outbound-voice?callLogId=${callLog.id}&userId=${userId}`,
     statusCallback: `${baseUrl}/api/twilio/status?callLogId=${callLog.id}`,
     statusCallbackMethod: "POST",
-    statusCallbackEvent: ["completed", "no-answer", "busy", "failed"],
+    statusCallbackEvent: ["completed", "no-answer", "busy", "failed", "canceled"],
     machineDetection: "Enable",
     asyncAmd: "true",
     ...(sipAuthUsername && sipAuthPassword ? { sipAuthUsername, sipAuthPassword } : {}),
@@ -238,7 +270,7 @@ router.post("/dial/phone", async (req, res) => {
       url: `${baseUrl}/api/twilio/outbound-voice?callLogId=${callLog.id}&userId=${userId}`,
       statusCallback: `${baseUrl}/api/twilio/status?callLogId=${callLog.id}`,
       statusCallbackMethod: "POST",
-      statusCallbackEvent: ["completed", "no-answer", "busy", "failed"],
+      statusCallbackEvent: ["completed", "no-answer", "busy", "failed", "canceled"],
       machineDetection: "Enable",
       asyncAmd: "true",
       ...(sipAuthUsername && sipAuthPassword ? { sipAuthUsername, sipAuthPassword } : {}),
@@ -338,6 +370,8 @@ router.get("/dial/calls/:id/live", async (req, res) => {
   }
 
   let status = call.endedAt ? "ended" : "dialing";
+  let outcome = call.outcome;
+  let endedAt = call.endedAt;
 
   if (!call.endedAt && call.callSid) {
     const agentConfig = await db.query.agentConfigsTable.findFirst({
@@ -348,9 +382,30 @@ router.get("/dial/calls/:id/live", async (req, res) => {
       try {
         const client = getTwilioClient(agentConfig.twilioAccountSid, agentConfig.twilioAuthToken);
         const twilioCall = await client.calls(call.callSid).fetch();
-        status = mapTwilioCallStatus(twilioCall.status, call.endedAt);
-      } catch {
-        // Keep last known status if Twilio fetch fails
+        const durationSecs = parseInt(String(twilioCall.duration ?? "0"), 10) || 0;
+        const endTime = twilioCall.endTime ?? null;
+        const isTerminal = !!endTime
+          || TWILIO_TERMINAL_STATUSES.has(twilioCall.status)
+          || (twilioCall.status === "completed" && durationSecs === 0);
+
+        status = mapTwilioCallStatus(twilioCall.status, call.endedAt, endTime, durationSecs);
+
+        if (isTerminal && !call.endedAt) {
+          await syncCallEndFromTwilio(call.id, twilioCall.status, endTime, durationSecs);
+          endedAt = endTime ?? new Date();
+          outcome = TWILIO_OUTCOME_MAP[twilioCall.status]
+            ?? (durationSecs > 0 ? "answered" : "no_answer");
+        }
+      } catch (err: any) {
+        // Call resource gone or unreachable — treat as ended if it was in progress
+        if (err?.status === 404 || err?.code === 20404) {
+          status = "ended";
+          if (!call.endedAt) {
+            await syncCallEndFromTwilio(call.id, "no-answer", new Date(), 0);
+            endedAt = new Date();
+            outcome = "no_answer";
+          }
+        }
       }
     }
   }
@@ -360,10 +415,11 @@ router.get("/dial/calls/:id/live", async (req, res) => {
     callSid: call.callSid,
     phone: call.phone,
     status,
+    outcome,
     liveTranscript: call.liveTranscript || [],
     transcript: call.transcript,
     transferredTo: call.transferredTo,
-    endedAt: call.endedAt,
+    endedAt,
     startedAt: call.startedAt,
     duration: call.duration,
   });
