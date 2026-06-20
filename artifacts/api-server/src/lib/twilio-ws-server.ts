@@ -265,7 +265,6 @@ class AudioPlayer {
       event: "media",
       streamSid: this.streamSid,
       media: {
-        track: "outbound",
         payload: chunk.toString("base64"),
       },
     }));
@@ -276,6 +275,9 @@ class AudioPlayer {
     if (!chunk) {
       this.stopPlayback();
       this.onComplete?.();
+      if (this.queue.length > 0) {
+        this.ensurePlayback();
+      }
       return;
     }
 
@@ -512,6 +514,8 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
   // State flags
   let isSpeaking = false;
   let isGenerating = false;
+  let isProcessingTurn = false;
+  let greetingCancelled = false;
   let activeGenerationId = "";
 
   // History and transfer rule state
@@ -528,19 +532,19 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
   const playGreeting = async () => {
     try {
       isGenerating = true;
-      const genId = randomUUID();
-      activeGenerationId = genId;
+      greetingCancelled = false;
 
       logger.info({ callLogId, greeting }, "Generating greeting TTS...");
       const audio = await generateSentenceTTS(greeting, configuredLang, voice);
 
-      if (activeGenerationId === genId) {
+      if (!greetingCancelled) {
         isGenerating = false;
         isSpeaking = true;
         player?.setOnComplete(() => {
           isSpeaking = false;
         });
         player?.enqueue(audio);
+        logger.info({ callLogId, bytes: audio.length }, "Greeting audio enqueued");
 
         const updatedTranscript = [
           ...callMeta.liveTranscript,
@@ -595,27 +599,37 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
         }
         const rms = Math.sqrt(sum / pcmChunk.length);
 
+        // While bot is speaking, ignore echo/noise unless caller speaks loudly to interrupt.
+        if (isSpeaking) {
+          const INTERRUPT_THRESHOLD = 6000;
+          if (rms > INTERRUPT_THRESHOLD) {
+            speechChunksCount++;
+            if (speechChunksCount >= 3) {
+              logger.info({ rms, callLogId }, "VAD: Interruption detected! Clearing bot player.");
+              greetingCancelled = true;
+              player.clear();
+              ws.send(JSON.stringify({ event: "clear", streamSid }));
+              isSpeaking = false;
+              isGenerating = false;
+              activeGenerationId = "";
+              vadState = "speaking";
+              accumulatedPcm = [];
+              silenceChunksCount = 0;
+              speechChunksCount = 0;
+            }
+          } else {
+            speechChunksCount = 0;
+          }
+          return;
+        }
+
         if (vadState === "silent") {
           const isGracePeriod = (Date.now() - connectionTime) < 2000;
-          const speechThreshold = isSpeaking ? 5000 : SPEECH_THRESHOLD;
-          if (rms > speechThreshold && !isGracePeriod) {
+          if (rms > SPEECH_THRESHOLD && !isGracePeriod) {
             speechChunksCount++;
             if (speechChunksCount >= 2) {
               vadState = "speaking";
               logger.info({ rms, callLogId }, "VAD: Speech onset detected");
-
-              if (isSpeaking) {
-                logger.info({ callLogId }, "VAD: Interruption detected! Clearing bot player.");
-                player.clear();
-                ws.send(JSON.stringify({
-                  event: "clear",
-                  streamSid
-                }));
-                isSpeaking = false;
-                isGenerating = false;
-                activeGenerationId = ""; // cancel ongoing generation
-              }
-
               accumulatedPcm = [];
               silenceChunksCount = 0;
             }
@@ -672,6 +686,12 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
 
   // Main turn pipeline
   const processUserUtterance = async (pcmSamples: Int16Array) => {
+    if (isProcessingTurn) {
+      logger.info({ callLogId }, "Skipping utterance, turn already in progress");
+      return;
+    }
+
+    isProcessingTurn = true;
     const genId = randomUUID();
     activeGenerationId = genId;
     isGenerating = true;
@@ -880,6 +900,7 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
           ttsBuffersMap.delete(nextWriteIndex);
           isSpeaking = true;
           player?.enqueue(buffer);
+          logger.info({ callLogId, bytes: buffer.length, index: nextWriteIndex }, "Response audio enqueued");
           nextWriteIndex++;
         }
       };
@@ -991,6 +1012,8 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
     } catch (err) {
       logger.error({ err }, "Error processing user utterance turn");
       isGenerating = false;
+    } finally {
+      isProcessingTurn = false;
     }
   };
 });
