@@ -177,6 +177,7 @@ async function convertAudioToMulaw8k(audioBuffer: Buffer): Promise<Buffer> {
       "-hide_banner",
       "-loglevel", "error",
       "-i", "pipe:0",
+      "-af", "aresample=8000:resampler=soxr:precision=28,highpass=f=80",
       "-f", "mulaw",
       "-acodec", "pcm_mulaw",
       "-ar", "8000",
@@ -215,14 +216,19 @@ async function convertToMulawWithFallback(audioBuffer: Buffer): Promise<Buffer> 
   }
 }
 
-// ── Audio Player for Twilio WebSockets ──────────────────────────────────
+const TWILIO_PREBUFFER_CHUNKS = 2; // 40ms jitter buffer before playback starts
+
 class AudioPlayer {
   private queue: Buffer[] = [];
   private ws: WebSocket;
   private streamSid: string;
   private playbackTimer: NodeJS.Timeout | null = null;
+  private prebufferTimer: NodeJS.Timeout | null = null;
   private onComplete: (() => void) | null = null;
-  private isDraining = false;
+  /** Partial frame carried across enqueue() calls to avoid silence gaps between TTS sentences */
+  private remainder = Buffer.alloc(0);
+  private playbackStartMs: number | null = null;
+  private chunksSent = 0;
 
   constructor(ws: WebSocket, streamSid: string) {
     this.ws = ws;
@@ -230,21 +236,26 @@ class AudioPlayer {
   }
 
   public enqueue(muLawAudio: Buffer) {
-    for (let offset = 0; offset < muLawAudio.length; offset += TWILIO_CHUNK_BYTES) {
-      const slice = muLawAudio.subarray(offset, offset + TWILIO_CHUNK_BYTES);
-      if (slice.length < TWILIO_CHUNK_BYTES) {
-        const padded = Buffer.alloc(TWILIO_CHUNK_BYTES, MULAW_SILENCE_BYTE);
-        slice.copy(padded);
-        this.queue.push(padded);
-      } else {
-        this.queue.push(Buffer.from(slice));
-      }
+    const combined = this.remainder.length > 0
+      ? Buffer.concat([this.remainder, muLawAudio])
+      : muLawAudio;
+    this.remainder = Buffer.alloc(0);
+
+    let offset = 0;
+    while (offset + TWILIO_CHUNK_BYTES <= combined.length) {
+      this.queue.push(combined.subarray(offset, offset + TWILIO_CHUNK_BYTES));
+      offset += TWILIO_CHUNK_BYTES;
     }
+    if (offset < combined.length) {
+      this.remainder = combined.subarray(offset);
+    }
+
     this.ensurePlayback();
   }
 
   public clear() {
     this.queue = [];
+    this.remainder = Buffer.alloc(0);
     this.stopPlayback();
   }
 
@@ -257,7 +268,12 @@ class AudioPlayer {
       clearTimeout(this.playbackTimer);
       this.playbackTimer = null;
     }
-    this.isDraining = false;
+    if (this.prebufferTimer) {
+      clearTimeout(this.prebufferTimer);
+      this.prebufferTimer = null;
+    }
+    this.playbackStartMs = null;
+    this.chunksSent = 0;
   }
 
   private sendChunk(chunk: Buffer) {
@@ -271,25 +287,75 @@ class AudioPlayer {
     }));
   }
 
-  private drainNext() {
-    const chunk = this.queue.shift();
-    if (!chunk) {
-      this.stopPlayback();
-      this.onComplete?.();
-      if (this.queue.length > 0) {
-        this.ensurePlayback();
+  /** Flush trailing partial frame once, then signal completion */
+  private finishPlayback() {
+    if (this.remainder.length > 0) {
+      const padded = Buffer.alloc(TWILIO_CHUNK_BYTES, MULAW_SILENCE_BYTE);
+      this.remainder.copy(padded);
+      this.remainder = Buffer.alloc(0);
+      this.queue.push(padded);
+      this.tick();
+      return;
+    }
+
+    this.stopPlayback();
+    const cb = this.onComplete;
+    this.onComplete = null;
+    cb?.();
+
+    if (this.queue.length > 0) {
+      this.ensurePlayback();
+    }
+  }
+
+  /**
+   * Send one 20ms frame, then schedule the next based on wall-clock elapsed time
+   * so timer drift doesn't cause underruns (audible breaks/gaps).
+   */
+  private tick() {
+    if (this.queue.length === 0) {
+      this.finishPlayback();
+      return;
+    }
+
+    if (this.playbackStartMs === null) {
+      this.playbackStartMs = Date.now();
+      this.chunksSent = 0;
+    }
+
+    const chunk = this.queue.shift()!;
+    this.sendChunk(chunk);
+    this.chunksSent++;
+
+    const expectedElapsed = this.chunksSent * TWILIO_CHUNK_MS;
+    const actualElapsed = Date.now() - this.playbackStartMs;
+    const delay = Math.max(1, expectedElapsed - actualElapsed);
+
+    this.playbackTimer = setTimeout(() => {
+      this.playbackTimer = null;
+      this.tick();
+    }, delay);
+  }
+
+  private ensurePlayback() {
+    if (this.playbackTimer) return;
+
+    if (this.queue.length === 0) return;
+
+    // Small prebuffer so Twilio's jitter buffer doesn't underrun on the first frames
+    if (this.playbackStartMs === null && this.queue.length < TWILIO_PREBUFFER_CHUNKS) {
+      if (!this.prebufferTimer) {
+        this.prebufferTimer = setTimeout(() => {
+          this.prebufferTimer = null;
+          if (this.queue.length > 0 && !this.playbackTimer) {
+            this.tick();
+          }
+        }, TWILIO_CHUNK_MS * TWILIO_PREBUFFER_CHUNKS);
       }
       return;
     }
 
-    this.sendChunk(chunk);
-    this.playbackTimer = setTimeout(() => this.drainNext(), TWILIO_CHUNK_MS);
-  }
-
-  private ensurePlayback() {
-    if (this.isDraining || this.queue.length === 0) return;
-    this.isDraining = true;
-    this.drainNext();
+    this.tick();
   }
 }
 
@@ -603,10 +669,10 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
 
         // While bot is speaking, ignore echo/noise unless caller speaks loudly to interrupt.
         if (isSpeaking) {
-          const INTERRUPT_THRESHOLD = 6000;
+          const INTERRUPT_THRESHOLD = 7500;
           if (rms > INTERRUPT_THRESHOLD) {
             speechChunksCount++;
-            if (speechChunksCount >= 3) {
+            if (speechChunksCount >= 4) {
               logger.info({ rms, callLogId }, "VAD: Interruption detected! Clearing bot player.");
               greetingCancelled = true;
               player.clear();
@@ -906,6 +972,11 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
         while (ttsBuffersMap.has(nextWriteIndex)) {
           const buffer = ttsBuffersMap.get(nextWriteIndex)!;
           ttsBuffersMap.delete(nextWriteIndex);
+
+          if (nextWriteIndex === 0) {
+            player?.setOnComplete(() => { isSpeaking = false; });
+          }
+
           isSpeaking = true;
           player?.enqueue(buffer);
           logger.info({ callLogId, bytes: buffer.length, index: nextWriteIndex }, "Response audio enqueued");

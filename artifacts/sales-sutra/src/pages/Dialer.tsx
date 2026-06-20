@@ -17,6 +17,7 @@ import {
   Loader2, Wifi, WifiOff, Bot, User, ArrowRight,
   Key, Copy, Eye, EyeOff, RefreshCw, Plus, Trash2,
   Volume2,
+  Pencil,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 
@@ -32,6 +33,7 @@ interface CallState {
   phone: string;
   status: "idle" | "dialing" | "ringing" | "active" | "transferring" | "transferred" | "ended";
   startTime: number | null;
+  connectedAt: number | null;
   liveTranscript: TranscriptEntry[];
   intent: string | null;
   transferredTo: string | null;
@@ -49,6 +51,7 @@ interface CrmAgent {
   name: string;
   specialization: string | null;
   phone: string | null;
+  sipUri: string | null;
   intents: string[];
   isAvailable: boolean;
   currentCalls: number;
@@ -104,10 +107,15 @@ function getDefaultCallState(): CallState {
     phone: "",
     status: "idle",
     startTime: null,
+    connectedAt: null,
     liveTranscript: [],
     intent: null,
     transferredTo: null,
   };
+}
+
+function agentCanTransfer(agent: CrmAgent): boolean {
+  return !!(agent.phone || agent.sipUri);
 }
 
 export default function Dialer() {
@@ -137,14 +145,14 @@ export default function Dialer() {
     } catch { /* ignore quota errors */ }
   }, [callState]);
 
-  // ── Timer for elapsed call duration ──
+  // ── Timer for elapsed call duration (starts when callee picks up) ──
   useEffect(() => {
-    if (callState.status === "active" && callState.startTime) {
-      const interval = setInterval(() => setElapsed(formatDuration(callState.startTime)), 1000);
+    if (callState.status === "active" && callState.connectedAt) {
+      const interval = setInterval(() => setElapsed(formatDuration(callState.connectedAt)), 1000);
       return () => clearInterval(interval);
     }
     return undefined;
-  }, [callState.status, callState.startTime]);
+  }, [callState.status, callState.connectedAt]);
 
   // ── Auto-scroll transcript ──
   useEffect(() => {
@@ -157,21 +165,46 @@ export default function Dialer() {
     const pollInterval = setInterval(async () => {
       if (!active) return;
       try {
-        const res = await fetch(`${BASE}/api/calls/${callId}`, { headers: adminAuthHeaders() });
-        if (!active) return; // component may have unmounted while awaiting
+        const res = await fetch(`${BASE}/api/dial/calls/${callId}/live`, { headers: adminAuthHeaders() });
+        if (!active) return;
         if (res.ok) {
           const data = await res.json();
+
           if (data.liveTranscript && Array.isArray(data.liveTranscript)) {
             setCallState(prev => ({
               ...prev,
               liveTranscript: data.liveTranscript,
             }));
           }
-          if (data.endedAt) {
+
+          if (data.status === "ended" || data.endedAt) {
             setCallState(prev => ({ ...prev, status: "ended" }));
             clearInterval(pollInterval);
             active = false;
+            return;
           }
+
+          if (data.status === "active") {
+            setCallState(prev => {
+              if (prev.status === "transferring" || prev.status === "transferred") return prev;
+              return {
+                ...prev,
+                status: "active",
+                connectedAt: prev.connectedAt ?? Date.now(),
+              };
+            });
+          } else if (data.status === "ringing") {
+            setCallState(prev => {
+              if (prev.status === "transferring" || prev.status === "transferred") return prev;
+              return { ...prev, status: "ringing" };
+            });
+          } else if (data.status === "dialing") {
+            setCallState(prev => {
+              if (prev.status === "transferring" || prev.status === "transferred") return prev;
+              return { ...prev, status: "dialing" };
+            });
+          }
+
           if (data.transferredTo) {
             setCallState(prev => ({
               ...prev,
@@ -181,7 +214,7 @@ export default function Dialer() {
           }
         }
       } catch { /* ignore */ }
-    }, 2000);
+    }, 1500);
 
     const cleanup = () => {
       active = false;
@@ -202,7 +235,7 @@ export default function Dialer() {
   // ── Re-attach polling if we remount with an active call ──
   useEffect(() => {
     const { callId, status } = callState;
-    if (callId && (status === "active" || status === "dialing" || status === "transferring")) {
+    if (callId && (status === "active" || status === "dialing" || status === "ringing" || status === "transferring")) {
       const cleanup = startPolling(callId);
       pollCleanupRef.current = cleanup;
       return cleanup;
@@ -258,27 +291,23 @@ export default function Dialer() {
       return res.json();
     },
     onSuccess: (data: any) => {
-      setCallState(prev => ({
-        ...prev,
+      setCallState({
         callId: data.callLogId,
         callSid: data.callSid,
         phone: dialInput,
         status: "dialing",
         startTime: Date.now(),
+        connectedAt: null,
         liveTranscript: [],
         intent: null,
         transferredTo: null,
-      }));
+      });
 
-      // Start polling for live transcript after a brief connect delay
-      setTimeout(() => {
-        if (data.callLogId) {
-          connectWebSocket(data.callLogId);
-          setCallState(prev => ({ ...prev, status: "active" }));
-        }
-      }, 3000);
+      if (data.callLogId) {
+        connectWebSocket(data.callLogId);
+      }
 
-      toast({ title: "📞 Calling...", description: `Dialing ${dialInput}` });
+      toast({ title: "Calling...", description: `Dialing ${dialInput}` });
     },
     onError: (err: Error) => {
       toast({ title: "Failed to dial", description: err.message, variant: "destructive" });
@@ -387,6 +416,8 @@ export default function Dialer() {
 
   const isCallActive = ["dialing", "ringing", "active", "transferring"].includes(callState.status);
   const agents = agentsData?.agents || [];
+  const availableAgents = agents.filter(a => a.isAvailable);
+  const transferableAgents = availableAgents.filter(agentCanTransfer);
   const apiKeys = apiKeysData?.apiKeys || [];
 
   // ═══════════════════════════════════════════════════════════════
@@ -451,6 +482,11 @@ export default function Dialer() {
                             <Loader2 className="w-3 h-3 mr-1 animate-spin" /> Dialing...
                           </Badge>
                         )}
+                        {callState.status === "ringing" && (
+                          <Badge className="bg-blue-500/20 text-blue-400 border-blue-500/30 animate-pulse">
+                            <Phone className="w-3 h-3 mr-1" /> Ringing...
+                          </Badge>
+                        )}
                         {callState.status === "active" && (
                           <Badge className="bg-emerald-500/20 text-emerald-400 border-emerald-500/30">
                             <Volume2 className="w-3 h-3 mr-1" /> Connected
@@ -467,7 +503,9 @@ export default function Dialer() {
                           </Badge>
                         )}
                       </div>
-                      <p className="text-3xl font-mono font-bold text-foreground tracking-wider">{elapsed}</p>
+                      <p className="text-3xl font-mono font-bold text-foreground tracking-wider">
+                        {callState.status === "active" ? elapsed : "—"}
+                      </p>
                       {callState.intent && (
                         <Badge variant="outline" className="text-xs border-primary/30 text-primary">
                           Intent: {callState.intent}
@@ -525,21 +563,33 @@ export default function Dialer() {
                     )}
                   </div>
 
-                  {/* Transfer Panel */}
-                  {callState.status === "active" && agents.length > 0 && (
+                  {/* Transfer Panel — show once call is connected */}
+                  {callState.status === "active" && availableAgents.length > 0 && (
                     <div className="pt-2 border-t border-white/5 space-y-3">
                       <p className="text-xs text-muted-foreground font-medium uppercase tracking-wider">Transfer to Agent</p>
+                      {transferableAgents.length === 0 && (
+                        <p className="text-xs text-amber-400">
+                          No agents have a phone number configured. Edit agents in the CRM Agents tab to add one.
+                        </p>
+                      )}
                       <Select value={selectedAgent} onValueChange={setSelectedAgent}>
                         <SelectTrigger className="bg-black/20 border-white/10">
                           <SelectValue placeholder="Select agent..." />
                         </SelectTrigger>
                         <SelectContent>
-                          {agents.filter(a => a.isAvailable && a.phone).map(a => (
-                            <SelectItem key={a.crmAgentId} value={a.crmAgentId}>
+                          {availableAgents.map(a => (
+                            <SelectItem
+                              key={a.crmAgentId}
+                              value={a.crmAgentId}
+                              disabled={!agentCanTransfer(a)}
+                            >
                               <div className="flex items-center gap-2">
                                 <span>{a.name}</span>
                                 {a.specialization && (
                                   <span className="text-xs text-muted-foreground">({a.specialization})</span>
+                                )}
+                                {!agentCanTransfer(a) && (
+                                  <span className="text-xs text-amber-400">— no phone</span>
                                 )}
                               </div>
                             </SelectItem>
@@ -721,15 +771,18 @@ export default function Dialer() {
                           <p className="text-xs text-muted-foreground font-mono">{agent.crmAgentId}</p>
                         </div>
                       </div>
-                      <Badge
-                        variant="outline"
-                        className={agent.isAvailable
-                          ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/30"
-                          : "bg-white/5 text-muted-foreground border-white/10"
-                        }
-                      >
-                        {agent.isAvailable ? "Available" : "Offline"}
-                      </Badge>
+                      <div className="flex items-center gap-2">
+                        <EditAgentDialog agent={agent} onSuccess={() => queryClient.invalidateQueries({ queryKey: ["crm-agents"] })} />
+                        <Badge
+                          variant="outline"
+                          className={agent.isAvailable
+                            ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/30"
+                            : "bg-white/5 text-muted-foreground border-white/10"
+                          }
+                        >
+                          {agent.isAvailable ? "Available" : "Offline"}
+                        </Badge>
+                      </div>
                     </div>
 
                     {agent.specialization && (
@@ -1007,6 +1060,89 @@ POST /api/crm/calls/{callId}/transfer
 }
 
 // ═══════════════════════════════════════════════════════════════════
+// EDIT AGENT DIALOG
+// ═══════════════════════════════════════════════════════════════════
+
+function EditAgentDialog({ agent, onSuccess }: { agent: CrmAgent; onSuccess: () => void }) {
+  const { toast } = useToast();
+  const [open, setOpen] = useState(false);
+  const [form, setForm] = useState({
+    crmAgentId: agent.crmAgentId,
+    name: agent.name,
+    phone: agent.phone || "",
+    specialization: agent.specialization || "",
+    intents: (agent.intents || []).join(", "),
+  });
+
+  useEffect(() => {
+    if (open) {
+      setForm({
+        crmAgentId: agent.crmAgentId,
+        name: agent.name,
+        phone: agent.phone || "",
+        specialization: agent.specialization || "",
+        intents: (agent.intents || []).join(", "),
+      });
+    }
+  }, [open, agent]);
+
+  const mutation = useMutation({
+    mutationFn: () => adminFetch(`${BASE}/api/crm-agents`, {
+      method: "POST",
+      body: JSON.stringify({
+        ...form,
+        intents: form.intents.split(",").map(s => s.trim()).filter(Boolean),
+      }),
+    }),
+    onSuccess: () => {
+      toast({ title: "Agent updated" });
+      onSuccess();
+      setOpen(false);
+    },
+    onError: (err: Error) => {
+      toast({ title: "Failed", description: err.message, variant: "destructive" });
+    },
+  });
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <Button variant="ghost" size="icon" className="h-8 w-8 hover:bg-white/10" title="Edit agent">
+          <Pencil className="w-3.5 h-3.5" />
+        </Button>
+      </DialogTrigger>
+      <DialogContent className="glass-panel border-white/10">
+        <DialogHeader>
+          <DialogTitle>Edit CRM Agent</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-4 mt-4">
+          <Input placeholder="Name" value={form.name}
+            onChange={(e) => setForm(f => ({ ...f, name: e.target.value }))}
+            className="bg-black/20 border-white/10" />
+          <Input placeholder="Phone (+91...) — required for transfers" value={form.phone}
+            onChange={(e) => setForm(f => ({ ...f, phone: e.target.value }))}
+            className="bg-black/20 border-white/10" />
+          <Input placeholder="Specialization (e.g. Sales Closer)" value={form.specialization}
+            onChange={(e) => setForm(f => ({ ...f, specialization: e.target.value }))}
+            className="bg-black/20 border-white/10" />
+          <Input placeholder="Intents (comma-separated)" value={form.intents}
+            onChange={(e) => setForm(f => ({ ...f, intents: e.target.value }))}
+            className="bg-black/20 border-white/10" />
+          <Button
+            className="w-full bg-primary"
+            onClick={() => mutation.mutate()}
+            disabled={!form.name || !form.phone.trim() || mutation.isPending}
+          >
+            {mutation.isPending ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : null}
+            Save Changes
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════
 // REGISTER AGENT DIALOG
 // ═══════════════════════════════════════════════════════════════════
 
@@ -1067,7 +1203,7 @@ function RegisterAgentDialog({ onSuccess }: { onSuccess: () => void }) {
           <Input placeholder="Intents (comma-separated: pricing_query, complaint)" value={form.intents}
             onChange={(e) => setForm(f => ({ ...f, intents: e.target.value }))}
             className="bg-black/20 border-white/10" />
-          <Button className="w-full bg-primary" onClick={() => mutation.mutate()} disabled={!form.crmAgentId || !form.name || mutation.isPending}>
+          <Button className="w-full bg-primary" onClick={() => mutation.mutate()} disabled={!form.crmAgentId || !form.name || !form.phone.trim() || mutation.isPending}>
             {mutation.isPending ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : null}
             Register Agent
           </Button>

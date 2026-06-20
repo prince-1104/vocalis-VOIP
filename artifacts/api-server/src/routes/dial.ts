@@ -11,6 +11,28 @@ function getTwilioClient(accountSid: string, authToken: string) {
   return twilio(accountSid, authToken);
 }
 
+/** Map Twilio CallStatus to dialer UI states */
+function mapTwilioCallStatus(twilioStatus: string, endedAt: Date | null): string {
+  if (endedAt) return "ended";
+  switch (twilioStatus) {
+    case "queued":
+    case "initiated":
+      return "dialing";
+    case "ringing":
+      return "ringing";
+    case "in-progress":
+      return "active";
+    case "completed":
+    case "busy":
+    case "failed":
+    case "no-answer":
+    case "canceled":
+      return "ended";
+    default:
+      return "dialing";
+  }
+}
+
 function getBaseUrl(req: any): string {
   const domains = process.env.REPLIT_DOMAINS;
   if (domains) {
@@ -297,7 +319,7 @@ router.post("/dial/calls/:id/end", async (req, res) => {
 });
 
 // ── Internal: Poll call status + live transcript (JWT auth — used by Dialer UI) ──
-router.get("/calls/:id", async (req, res) => {
+router.get("/dial/calls/:id/live", async (req, res) => {
   const userId = req.userId!;
   const callId = parseInt(req.params.id);
 
@@ -315,11 +337,29 @@ router.get("/calls/:id", async (req, res) => {
     return;
   }
 
+  let status = call.endedAt ? "ended" : "dialing";
+
+  if (!call.endedAt && call.callSid) {
+    const agentConfig = await db.query.agentConfigsTable.findFirst({
+      where: eq(agentConfigsTable.userId, userId),
+    });
+
+    if (agentConfig?.twilioAccountSid && agentConfig?.twilioAuthToken) {
+      try {
+        const client = getTwilioClient(agentConfig.twilioAccountSid, agentConfig.twilioAuthToken);
+        const twilioCall = await client.calls(call.callSid).fetch();
+        status = mapTwilioCallStatus(twilioCall.status, call.endedAt);
+      } catch {
+        // Keep last known status if Twilio fetch fails
+      }
+    }
+  }
+
   res.json({
     callId: call.id,
     callSid: call.callSid,
     phone: call.phone,
-    status: call.endedAt ? "completed" : "active",
+    status,
     liveTranscript: call.liveTranscript || [],
     transcript: call.transcript,
     transferredTo: call.transferredTo,
