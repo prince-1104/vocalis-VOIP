@@ -105,16 +105,64 @@ function createWavBuffer(pcmSamples: Int16Array, sampleRate: number): Buffer {
   return buffer;
 }
 
-function downsample24to8(pcm24: Int16Array): Int16Array {
-  const pcm8 = new Int16Array(Math.floor(pcm24.length / 3));
-  for (let i = 0; i < pcm8.length; i++) {
-    const idx = i * 3;
-    const s1 = pcm24[idx] || 0;
-    const s2 = pcm24[idx + 1] || 0;
-    const s3 = pcm24[idx + 2] || 0;
-    pcm8[i] = Math.round((s1 + s2 + s3) / 3);
+const MULAW_SILENCE_BYTE = 0xff;
+const TWILIO_CHUNK_BYTES = 160; // 20ms of 8kHz 8-bit mu-law
+const TWILIO_CHUNK_MS = 20;
+
+function parseWavPcm(wavBuffer: Buffer): { pcm: Int16Array; sampleRate: number } {
+  if (wavBuffer.length < 44) throw new Error("Invalid WAV buffer");
+
+  const sampleRate = wavBuffer.readUInt32LE(24);
+  const bitsPerSample = wavBuffer.readUInt16LE(34);
+  if (bitsPerSample !== 16) throw new Error(`Unsupported WAV bit depth: ${bitsPerSample}`);
+
+  let offset = 12;
+  while (offset + 8 <= wavBuffer.length) {
+    const chunkId = wavBuffer.toString("ascii", offset, offset + 4);
+    const chunkSize = wavBuffer.readUInt32LE(offset + 4);
+    if (chunkId === "data") {
+      const dataOffset = offset + 8;
+      const pcmBytes = wavBuffer.subarray(dataOffset, dataOffset + chunkSize);
+      const pcm = new Int16Array(Math.floor(pcmBytes.length / 2));
+      for (let i = 0; i < pcm.length; i++) {
+        pcm[i] = pcmBytes.readInt16LE(i * 2);
+      }
+      return { pcm, sampleRate };
+    }
+    offset += 8 + chunkSize;
   }
-  return pcm8;
+
+  throw new Error("WAV data chunk not found");
+}
+
+/** Low-pass filter + decimation for telephony-quality downsampling. */
+function resamplePcmTo8k(pcm: Int16Array, inputRate: number): Int16Array {
+  if (inputRate === 8000) return pcm;
+
+  const ratio = inputRate / 8000;
+  const outLen = Math.floor(pcm.length / ratio);
+  const out = new Int16Array(outLen);
+  const filterRadius = Math.max(2, Math.round(ratio));
+
+  for (let i = 0; i < outLen; i++) {
+    const center = i * ratio;
+    let sum = 0;
+    let weight = 0;
+
+    for (let j = -filterRadius; j <= filterRadius; j++) {
+      const idx = Math.round(center) + j;
+      if (idx < 0 || idx >= pcm.length) continue;
+      const w = 1 - Math.abs(j) / (filterRadius + 1);
+      sum += pcm[idx] * w;
+      weight += w;
+    }
+
+    out[i] = weight > 0
+      ? Math.max(-32768, Math.min(32767, Math.round(sum / weight)))
+      : 0;
+  }
+
+  return out;
 }
 
 // ── Audio Player for Twilio WebSockets ──────────────────────────────────
@@ -131,65 +179,62 @@ class AudioPlayer {
   }
 
   public enqueue(muLawAudio: Buffer) {
-    const chunkSize = 160; // 20ms of 8000Hz 8-bit mu-law (160 bytes)
-    for (let offset = 0; offset < muLawAudio.length; offset += chunkSize) {
-      const chunk = muLawAudio.slice(offset, offset + chunkSize);
-      this.queue.push(chunk);
+    for (let offset = 0; offset < muLawAudio.length; offset += TWILIO_CHUNK_BYTES) {
+      const slice = muLawAudio.subarray(offset, offset + TWILIO_CHUNK_BYTES);
+      if (slice.length < TWILIO_CHUNK_BYTES) {
+        const padded = Buffer.alloc(TWILIO_CHUNK_BYTES, MULAW_SILENCE_BYTE);
+        slice.copy(padded);
+        this.queue.push(padded);
+      } else {
+        this.queue.push(Buffer.from(slice));
+      }
     }
-    this.start();
+    this.ensurePlayback();
   }
 
   public clear() {
     this.queue = [];
-    if (this.timer) {
-      clearInterval(this.timer);
-      this.timer = null;
-    }
+    this.stopTimer();
   }
 
   public setOnComplete(cb: () => void) {
     this.onComplete = cb;
   }
 
-  private start() {
-    if (this.timer) return;
-    if (this.queue.length < 4) return; // Buffer at least 80ms to avoid jitter
+  private stopTimer() {
+    if (!this.timer) return;
+    clearInterval(this.timer);
+    this.timer = null;
+  }
 
-    // Pre-buffer: send the first 8 chunks (160ms of audio) immediately to feed Twilio's audio queue
-    const preBufferCount = Math.min(8, this.queue.length);
-    for (let i = 0; i < preBufferCount; i++) {
-      const chunk = this.queue.shift();
-      if (!chunk) break;
-      if (this.ws.readyState === WebSocket.OPEN) {
-        this.ws.send(JSON.stringify({
-          event: "media",
-          streamSid: this.streamSid,
-          media: {
-            payload: chunk.toString("base64")
-          }
-        }));
-      }
+  private sendChunk(chunk: Buffer) {
+    if (this.ws.readyState !== WebSocket.OPEN) return;
+    this.ws.send(JSON.stringify({
+      event: "media",
+      streamSid: this.streamSid,
+      media: {
+        payload: chunk.toString("base64"),
+      },
+    }));
+  }
+
+  private ensurePlayback() {
+    if (this.queue.length === 0) return;
+
+    if (!this.timer) {
+      const firstChunk = this.queue.shift();
+      if (firstChunk) this.sendChunk(firstChunk);
+
+      this.timer = setInterval(() => {
+        const chunk = this.queue.shift();
+        if (!chunk) {
+          this.stopTimer();
+          this.onComplete?.();
+          return;
+        }
+        this.sendChunk(chunk);
+      }, TWILIO_CHUNK_MS);
     }
-
-    this.timer = setInterval(() => {
-      const chunk = this.queue.shift();
-      if (!chunk) {
-        clearInterval(this.timer!);
-        this.timer = null;
-        if (this.onComplete) this.onComplete();
-        return;
-      }
-
-      if (this.ws.readyState === WebSocket.OPEN) {
-        this.ws.send(JSON.stringify({
-          event: "media",
-          streamSid: this.streamSid,
-          media: {
-            payload: chunk.toString("base64")
-          }
-        }));
-      }
-    }, 20);
   }
 }
 
@@ -283,25 +328,20 @@ async function generateSentenceTTS(text: string, lang: string, voice: string): P
     const audioBase64: string | undefined = data.audios?.[0];
     if (!audioBase64) throw new Error("No audio returned from Sarvam");
     const wavBuffer = Buffer.from(audioBase64, "base64");
-    
-    // Skip 44-byte WAV header and convert to mu-law
-    const pcmBuffer = wavBuffer.subarray(44);
-    const pcmSamples = new Int16Array(Math.floor(pcmBuffer.length / 2));
-    for (let i = 0; i < pcmSamples.length; i++) {
-      pcmSamples[i] = pcmBuffer.readInt16LE(i * 2);
-    }
-    return encodeMuLawBuffer(pcmSamples);
+    const { pcm, sampleRate } = parseWavPcm(wavBuffer);
+    const pcm8 = resamplePcmTo8k(pcm, sampleRate);
+    return encodeMuLawBuffer(pcm8);
   } else {
-    const mp3 = await openai.audio.speech.create({
+    const wavResponse = await openai.audio.speech.create({
       model: "tts-1",
       voice: (voice || "nova") as any,
       input: text,
-      response_format: "pcm", // raw 24kHz signed 16-bit PCM
+      response_format: "wav",
     });
 
-    const arrayBuffer = await mp3.arrayBuffer();
-    const pcm24 = new Int16Array(arrayBuffer);
-    const pcm8 = downsample24to8(pcm24);
+    const wavBuffer = Buffer.from(await wavResponse.arrayBuffer());
+    const { pcm, sampleRate } = parseWavPcm(wavBuffer);
+    const pcm8 = resamplePcmTo8k(pcm, sampleRate);
     return encodeMuLawBuffer(pcm8);
   }
 }
