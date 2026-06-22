@@ -304,6 +304,34 @@ paths:
               schema:
                 $ref: "#/components/schemas/Campaign"
 
+  /campaigns/{id}/rerun:
+    post:
+      operationId: rerunCampaign
+      tags: [campaigns]
+      summary: Reset and rerun a completed campaign
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                autoStart:
+                  type: boolean
+                  default: true
+      responses:
+        "200":
+          description: Campaign reset for rerun
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Campaign"
+
   /calls:
     get:
       operationId: listCalls

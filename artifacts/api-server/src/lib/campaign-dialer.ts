@@ -118,6 +118,61 @@ async function resolveFailedContactStatus(
     .where(eq(campaignContactsTable.id, linkId));
 }
 
+/** Mark campaign completed when every contact is done and no calls are in progress. */
+export async function tryMarkCampaignCompleted(campaignId: number): Promise<boolean> {
+  const campaign = await db.query.campaignsTable.findFirst({
+    where: eq(campaignsTable.id, campaignId),
+  });
+  if (!campaign || campaign.status !== "active") return false;
+
+  await releaseStaleCallingContacts(campaignId);
+
+  const activeCalls = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(callLogsTable)
+    .where(and(eq(callLogsTable.campaignId, campaignId), isNull(callLogsTable.endedAt)));
+  if (Number(activeCalls[0]?.count || 0) > 0) return false;
+
+  const links = await db
+    .select()
+    .from(campaignContactsTable)
+    .where(eq(campaignContactsTable.campaignId, campaignId));
+
+  if (links.length === 0) return false;
+
+  const now = new Date();
+  const allTerminal = links.every((link) => {
+    if (link.status === "answered" || link.status === "failed") return true;
+    if (link.attempts >= 1 + campaign.maxRetries) return true;
+    return false;
+  });
+
+  const allDialedOnce =
+    links.every((link) => link.attempts >= 1) &&
+    links.every((link) => link.status !== "pending" && link.status !== "calling") &&
+    (campaign.calledCount || 0) >= links.length;
+
+  const retryWaiting = links.some(
+    (link) =>
+      link.status === "retrying" &&
+      link.attempts < 1 + campaign.maxRetries &&
+      link.nextAttemptAt &&
+      link.nextAttemptAt > now,
+  );
+
+  const shouldComplete = allTerminal || (allDialedOnce && !retryWaiting);
+
+  if (!shouldComplete) return false;
+
+  await db
+    .update(campaignsTable)
+    .set({ status: "completed", updatedAt: new Date() })
+    .where(eq(campaignsTable.id, campaignId));
+
+  logger.info({ campaignId, allTerminal, allDialedOnce }, "Campaign marked as completed");
+  return true;
+}
+
 export async function dialNextForCampaign(
   campaignId: number,
   userId: number,
@@ -167,6 +222,11 @@ export async function dialNextForCampaign(
   const nextLink = pendingLinks[0];
 
   if (!nextLink) {
+    const completed = await tryMarkCampaignCompleted(campaign.id);
+    if (completed) {
+      return { done: true, message: "All contacts have been called. Campaign marked as completed." };
+    }
+
     const activeLinksCount = await db
       .select({ count: sql<number>`count(*)` })
       .from(campaignContactsTable)
@@ -185,9 +245,9 @@ export async function dialNextForCampaign(
         .set({ status: "completed", updatedAt: new Date() })
         .where(eq(campaignsTable.id, campaign.id));
       return { done: true, message: "All contacts have been called and retries exhausted. Campaign marked as completed." };
-    } else {
-      return { done: true, message: `No contacts available to dial right now. ${remainingCount} contacts scheduled for future retries.` };
     }
+
+    return { done: true, message: `No contacts available to dial right now. ${remainingCount} contacts scheduled for future retries.` };
   }
 
   const nextContact = {
@@ -384,6 +444,8 @@ export async function triggerDialingForCampaign(
       break;
     }
   }
+
+  await tryMarkCampaignCompleted(campaignId);
 }
 
 /** Periodically fill parallel slots and pick up retry-ready contacts for active campaigns. */

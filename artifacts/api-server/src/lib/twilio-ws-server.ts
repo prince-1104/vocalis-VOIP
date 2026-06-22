@@ -18,6 +18,7 @@ import {
 import { logger } from "./logger";
 import twilio from "twilio";
 import OpenAI from "openai";
+import { buildWhisperPrompt, normalizePhoneTranscript } from "./phone-stt-normalize";
 
 import {
   getCallMeta,
@@ -593,6 +594,8 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
   let isGenerating = false;
   let isProcessingTurn = false;
   let greetingCancelled = false;
+  let greetingPhase = true;
+  let deferredUtterance: Int16Array | null = null;
   let activeGenerationId = "";
 
   // History and transfer rule state
@@ -696,9 +699,17 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
         isSpeaking = true;
         player?.setOnComplete(() => {
           isSpeaking = false;
+          greetingPhase = false;
+          if (deferredUtterance) {
+            const pending = deferredUtterance;
+            deferredUtterance = null;
+            processUserUtterance(pending);
+          }
         });
         player?.enqueue(audio);
         logger.info({ callLogId, bytes: audio.length }, "Greeting audio enqueued");
+
+        history.push({ role: "assistant", content: greeting });
 
         const updatedTranscript = [
           ...callMeta.liveTranscript,
@@ -716,6 +727,14 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
             transcript: formattedTranscript
           })
           .where(eq(callLogsTable.id, parseInt(callLogId, 10)));
+      } else {
+        isGenerating = false;
+        greetingPhase = false;
+        if (deferredUtterance) {
+          const pending = deferredUtterance;
+          deferredUtterance = null;
+          processUserUtterance(pending);
+        }
       }
     } catch (err) {
       logger.error({ err }, "Error playing greeting");
@@ -764,14 +783,16 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
         }
         const rms = Math.sqrt(sum / pcmChunk.length);
 
-        // While bot is speaking, ignore echo/noise unless caller speaks loudly to interrupt.
+        // While bot is speaking, ignore echo unless caller barges in (lower threshold during greeting).
         if (isSpeaking) {
-          const INTERRUPT_THRESHOLD = 7500;
-          if (rms > INTERRUPT_THRESHOLD) {
+          const interruptThreshold = greetingPhase ? 2800 : 7500;
+          if (rms > interruptThreshold) {
             speechChunksCount++;
-            if (speechChunksCount >= 4) {
+            const chunksNeeded = greetingPhase ? 3 : 4;
+            if (speechChunksCount >= chunksNeeded) {
               logger.info({ rms, callLogId }, "VAD: Interruption detected! Clearing bot player.");
               greetingCancelled = true;
+              greetingPhase = false;
               player.clear();
               ws.send(JSON.stringify({ event: "clear", streamSid }));
               isSpeaking = false;
@@ -874,6 +895,14 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
     activeGenerationId = genId;
     isGenerating = true;
 
+    if (greetingPhase && !greetingCancelled) {
+      deferredUtterance = pcmSamples;
+      logger.info({ callLogId }, "Deferring utterance until greeting completes");
+      isProcessingTurn = false;
+      isGenerating = false;
+      return;
+    }
+
     try {
       const wavBuffer = createWavBuffer(pcmSamples, 8000);
       let lang = configuredLang;
@@ -888,9 +917,16 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
         const res = await openai.audio.transcriptions.create({
           file,
           model: "whisper-1",
-          language: lang === "auto" ? undefined : lang.split("-")[0]
+          language: lang === "auto" ? undefined : lang.split("-")[0],
+          prompt: buildWhisperPrompt(history, greeting),
         });
         transcript = res.text;
+      }
+
+      const rawTranscript = transcript;
+      transcript = normalizePhoneTranscript(transcript, history, greeting);
+      if (transcript !== rawTranscript) {
+        logger.info({ callLogId, rawTranscript, transcript }, "STT transcript corrected");
       }
 
       logger.info({ callLogId, transcript }, "Transcription complete");

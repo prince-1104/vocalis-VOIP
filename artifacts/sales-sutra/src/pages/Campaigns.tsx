@@ -22,8 +22,8 @@ const DEFAULT_HANDOFF_MESSAGE =
 
 interface CampaignTransferFormConfig {
   enabled: boolean;
-  maxAiTurns: number;
-  maxAiMinutes: number;
+  maxAiTurns: number | "";
+  maxAiMinutes: number | "";
   handoffMode: "end_call" | "crm_agent";
   crmAgentId: string;
   transferMessage: string;
@@ -66,8 +66,8 @@ function transferConfigFromCampaign(raw: unknown): CampaignTransferFormConfig {
 
 function serializeTransferConfig(cfg: CampaignTransferFormConfig) {
   if (!cfg.enabled) return null;
-  const maxAiTurns = cfg.maxAiTurns > 0 ? cfg.maxAiTurns : undefined;
-  const maxAiMinutes = cfg.maxAiMinutes > 0 ? cfg.maxAiMinutes : undefined;
+  const maxAiTurns = limitValue(cfg.maxAiTurns) > 0 ? limitValue(cfg.maxAiTurns) : undefined;
+  const maxAiMinutes = limitValue(cfg.maxAiMinutes) > 0 ? limitValue(cfg.maxAiMinutes) : undefined;
   if (!maxAiTurns && !maxAiMinutes) return null;
   return {
     enabled: true,
@@ -80,9 +80,19 @@ function serializeTransferConfig(cfg: CampaignTransferFormConfig) {
   };
 }
 
+function parseLimitInput(raw: string): number | "" {
+  if (raw === "") return "";
+  const n = parseInt(raw, 10);
+  return Number.isNaN(n) ? "" : n;
+}
+
+function limitValue(n: number | ""): number {
+  return n === "" ? 0 : n;
+}
+
 function validateTransferConfig(cfg: CampaignTransferFormConfig): string | null {
   if (!cfg.enabled) return null;
-  if (cfg.maxAiTurns <= 0 && cfg.maxAiMinutes <= 0) {
+  if (limitValue(cfg.maxAiTurns) <= 0 && limitValue(cfg.maxAiMinutes) <= 0) {
     return "Set at least one limit: max Q&A exchanges or max call duration (minutes).";
   }
   if (cfg.handoffMode === "crm_agent" && !cfg.crmAgentId) {
@@ -132,7 +142,7 @@ function CampaignTransferSettings({
                 min={0}
                 max={50}
                 value={value.maxAiTurns}
-                onChange={e => onChange({ ...value, maxAiTurns: parseInt(e.target.value, 10) || 0 })}
+                onChange={e => onChange({ ...value, maxAiTurns: parseLimitInput(e.target.value) })}
                 className="bg-background/50 border-white/10 h-9"
                 placeholder="e.g. 10"
               />
@@ -147,7 +157,7 @@ function CampaignTransferSettings({
                 min={0}
                 max={60}
                 value={value.maxAiMinutes}
-                onChange={e => onChange({ ...value, maxAiMinutes: parseInt(e.target.value, 10) || 0 })}
+                onChange={e => onChange({ ...value, maxAiMinutes: parseLimitInput(e.target.value) })}
                 className="bg-background/50 border-white/10 h-9"
                 placeholder="e.g. 2"
               />
@@ -269,6 +279,7 @@ export default function Campaigns() {
   const queryClient = useQueryClient();
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [dialingCampaignId, setDialingCampaignId] = useState<number | null>(null);
+  const [rerunningCampaignId, setRerunningCampaignId] = useState<number | null>(null);
   
   const updateCampaign = useUpdateCampaignMutation();
   const deleteCampaign = useDeleteCampaignMutation();
@@ -429,6 +440,29 @@ export default function Campaigns() {
       }
     } catch (err: any) {
       toast({ title: "Action failed", description: err.message, variant: "destructive" });
+    }
+  };
+
+  const handleRerun = async (campaignId: number) => {
+    setRerunningCampaignId(campaignId);
+    try {
+      const token = localStorage.getItem("ss_auth_token");
+      const response = await fetch(`/api/campaigns/${campaignId}/rerun`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ autoStart: true }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Failed to rerun campaign");
+      toast({ title: "Campaign rerun", description: result.message || "Contacts reset — dialing started." });
+      queryClient.invalidateQueries({ queryKey: ["campaigns"] });
+    } catch (err: any) {
+      toast({ title: "Rerun failed", description: err.message, variant: "destructive" });
+    } finally {
+      setRerunningCampaignId(null);
     }
   };
 
@@ -628,8 +662,14 @@ export default function Campaigns() {
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           {campaigns.map((campaign) => {
             const progress = campaign.totalContacts 
-              ? Math.round(((campaign.calledCount || 0) / campaign.totalContacts) * 100) 
+              ? Math.min(100, Math.round(((campaign.calledCount || 0) / campaign.totalContacts) * 100))
               : 0;
+            const isFullyDialed =
+              (campaign.totalContacts || 0) > 0 &&
+              (campaign.calledCount || 0) >= (campaign.totalContacts || 0);
+            const showRerun =
+              campaign.status === "completed" ||
+              (campaign.status === "paused" && isFullyDialed);
 
             return (
               <Card key={campaign.id} className="glass-panel border-white/5 hover:border-white/10 transition-all duration-300 group">
@@ -716,18 +756,33 @@ export default function Campaigns() {
                 </CardContent>
                 <CardFooter className="pt-2 border-t border-white/5 flex flex-col gap-2">
                   <div className="flex gap-2 w-full">
-                    <Button 
-                      variant={campaign.status === 'active' ? "outline" : "default"} 
-                      className="flex-1 shadow-md"
-                      onClick={() => handleAction(campaign.id, campaign.status)}
-                      disabled={startCampaign.isPending || pauseCampaign.isPending}
-                    >
-                      {campaign.status === 'active' ? (
-                        <><Pause className="w-4 h-4 mr-2" /> Pause</>
-                      ) : (
-                        <><Play className="w-4 h-4 mr-2" /> Activate</>
-                      )}
-                    </Button>
+                    {showRerun ? (
+                      <Button
+                        variant="default"
+                        className="flex-1 shadow-md bg-primary hover:bg-primary/90"
+                        onClick={() => handleRerun(campaign.id)}
+                        disabled={rerunningCampaignId === campaign.id}
+                      >
+                        {rerunningCampaignId === campaign.id ? (
+                          <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Resetting...</>
+                        ) : (
+                          <><RefreshCw className="w-4 h-4 mr-2" /> Rerun Campaign</>
+                        )}
+                      </Button>
+                    ) : (
+                      <Button 
+                        variant={campaign.status === 'active' ? "outline" : "default"} 
+                        className="flex-1 shadow-md"
+                        onClick={() => handleAction(campaign.id, campaign.status)}
+                        disabled={startCampaign.isPending || pauseCampaign.isPending}
+                      >
+                        {campaign.status === 'active' ? (
+                          <><Pause className="w-4 h-4 mr-2" /> Pause</>
+                        ) : (
+                          <><Play className="w-4 h-4 mr-2" /> Activate</>
+                        )}
+                      </Button>
+                    )}
                     {campaign.status === 'active' && !campaign.isAutomatic && (
                       <Button
                         variant="default"

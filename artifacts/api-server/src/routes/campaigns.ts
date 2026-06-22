@@ -1,7 +1,7 @@
 import { Router, type IRouter } from "express";
 import { db, campaignsTable, campaignContactsTable, callLogsTable } from "@workspace/db";
 import { eq, and, isNull } from "drizzle-orm";
-import { dialNextForCampaign, triggerDialingForCampaign } from "../lib/campaign-dialer";
+import { dialNextForCampaign, triggerDialingForCampaign, tryMarkCampaignCompleted } from "../lib/campaign-dialer";
 import { normalizeCampaignTransferConfig, type CampaignTransferConfig } from "../lib/campaign-transfer";
 
 const router: IRouter = Router();
@@ -176,11 +176,23 @@ router.put("/campaigns/:id", async (req, res) => {
 router.post("/campaigns/:id/start", async (req, res) => {
   const userId = req.userId!;
   const campaignId = parseInt(req.params.id);
+
+  const existing = await db.query.campaignsTable.findFirst({
+    where: and(eq(campaignsTable.id, campaignId), eq(campaignsTable.userId, userId)),
+  });
+  if (!existing) { res.status(404).json({ error: "Campaign not found" }); return; }
+
+  if (existing.status === "completed") {
+    res.status(400).json({
+      error: "Campaign is completed. Use Rerun to reset contacts and dial again.",
+    });
+    return;
+  }
+
   const [campaign] = await db.update(campaignsTable)
     .set({ status: "active", updatedAt: new Date() })
     .where(and(eq(campaignsTable.id, campaignId), eq(campaignsTable.userId, userId)))
     .returning();
-  if (!campaign) { res.status(404).json({ error: "Campaign not found" }); return; }
 
   const contacts = await db.select().from(campaignContactsTable).where(eq(campaignContactsTable.campaignId, campaign.id));
   const contactIds = contacts.map(c => c.contactId);
@@ -213,6 +225,69 @@ router.post("/campaigns/:id/pause", async (req, res) => {
   res.json({
     ...campaign,
     contactIds,
+  });
+});
+
+// Reset all contacts and metrics so the campaign can be dialed again.
+router.post("/campaigns/:id/rerun", async (req, res) => {
+  const userId = req.userId!;
+  const campaignId = parseInt(req.params.id);
+  const autoStart = req.body?.autoStart === true;
+
+  const existing = await db.query.campaignsTable.findFirst({
+    where: and(eq(campaignsTable.id, campaignId), eq(campaignsTable.userId, userId)),
+  });
+  if (!existing) {
+    res.status(404).json({ error: "Campaign not found" });
+    return;
+  }
+
+  if (existing.status === "active") {
+    res.status(400).json({ error: "Pause the campaign before rerunning." });
+    return;
+  }
+
+  await db
+    .update(campaignContactsTable)
+    .set({
+      status: "pending",
+      attempts: 0,
+      nextAttemptAt: null,
+      lastAttemptAt: null,
+    })
+    .where(eq(campaignContactsTable.campaignId, campaignId));
+
+  const [campaign] = await db
+    .update(campaignsTable)
+    .set({
+      status: autoStart ? "active" : "draft",
+      calledCount: 0,
+      answeredCount: 0,
+      interestedCount: 0,
+      updatedAt: new Date(),
+    })
+    .where(and(eq(campaignsTable.id, campaignId), eq(campaignsTable.userId, userId)))
+    .returning();
+
+  const contacts = await db
+    .select()
+    .from(campaignContactsTable)
+    .where(eq(campaignContactsTable.campaignId, campaignId));
+  const contactIds = contacts.map((c) => c.contactId);
+
+  if (autoStart && campaign.isAutomatic) {
+    const baseUrl = getBaseUrl(req);
+    triggerDialingForCampaign(campaignId, userId, baseUrl).catch((err) => {
+      console.error(`[campaigns/rerun] Auto dialing failed:`, err);
+    });
+  }
+
+  res.json({
+    ...campaign,
+    contactIds,
+    message: autoStart
+      ? "Campaign reset and dialing started."
+      : "Campaign reset. Activate to start dialing again.",
   });
 });
 

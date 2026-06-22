@@ -80,6 +80,7 @@ const INTENT_PATTERNS: PatternRule[] = [
     confidence: 0.85,
     patterns: [
       /\b(interested|tell me more|sounds good|yes please|i want|i'd like|i would like|sign me up|how (do|can) i (get|buy|order|purchase|apply))\b/i,
+      /^\s*(yes|yeah|yep|yup|sure|ok|okay|correct|right|absolutely|of course|go ahead)\.?\s*$/i,
       /\b(haan|ha |chahiye|mujhe chahiye|batao|bataiye)\b/i,
     ],
   },

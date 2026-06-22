@@ -8,7 +8,7 @@ import { crmEventBus } from "../lib/crm-event-bus";
 import { classifyIntent, shouldTransfer, detectHumanRequest, type TransferRules } from "../lib/intent-classifier";
 import { findBestAgent, buildTransferEventData } from "../lib/transfer-manager";
 import { logLLMCost, logTTSCost, resolveTenantIdForOwner } from "../lib/cost-logger";
-import { dialNextForCampaign, triggerDialingForCampaign } from "../lib/campaign-dialer";
+import { dialNextForCampaign, triggerDialingForCampaign, tryMarkCampaignCompleted } from "../lib/campaign-dialer";
 import { loadCampaignTransferRulesForCall } from "../lib/campaign-transfer";
 
 const router: IRouter = Router();
@@ -863,6 +863,10 @@ async function completeCallLog(
   if (campaign.status === "active" && campaign.isAutomatic) {
     triggerDialingForCampaign(campaign.id, existingLog.userId, baseUrl).catch((err) => {
       console.error(`[twilio/status] Auto dialing next contact failed for campaign ${campaign.id}:`, err);
+    });
+  } else if (campaign.status === "active") {
+    tryMarkCampaignCompleted(campaign.id).catch((err) => {
+      console.error(`[twilio/status] Campaign completion check failed for ${campaign.id}:`, err);
     });
   }
 }
