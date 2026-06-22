@@ -67,6 +67,7 @@ export async function syncDatabase() {
       'ALTER TABLE "campaign_contacts" ADD COLUMN IF NOT EXISTS "last_attempt_at" timestamp;',
       'ALTER TABLE "campaign_contacts" ADD COLUMN IF NOT EXISTS "next_attempt_at" timestamp;',
       'ALTER TABLE "campaigns" ADD COLUMN IF NOT EXISTS "dial_parallel" boolean DEFAULT false NOT NULL;',
+      'ALTER TABLE "campaigns" ADD COLUMN IF NOT EXISTS "transfer_config" jsonb;',
       'ALTER TABLE "tenants" ADD COLUMN IF NOT EXISTS "telephony_type" text DEFAULT \'TWILIO\' NOT NULL;'
     ];
 

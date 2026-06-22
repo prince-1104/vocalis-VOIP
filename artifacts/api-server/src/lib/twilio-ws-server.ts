@@ -9,7 +9,12 @@ import { toFile } from "openai";
 import { crmEventBus } from "./crm-event-bus";
 import { logLLMCost, logTTSCost, resolveTenantIdForOwner } from "./cost-logger";
 import { classifyIntent, shouldTransfer, detectHumanRequest, type TransferRules } from "./intent-classifier";
-import { findBestAgent } from "./transfer-manager";
+import { findBestAgent, buildTransferEventData, executeTransfer } from "./transfer-manager";
+import {
+  countUserTurns,
+  resolveAgentPhone,
+  DEFAULT_CAMPAIGN_CLOSING_MESSAGE,
+} from "./campaign-transfer";
 import { logger } from "./logger";
 import twilio from "twilio";
 import OpenAI from "openai";
@@ -550,7 +555,6 @@ export async function handleTwilioStreamUpgrade(request: any, socket: any, head:
 twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string) => {
   logger.info({ callLogId }, "Twilio Media Stream WebSocket client connected");
   const connectionTime = Date.now();
-  const callStartedAt = new Date();
 
   const config = await fetchConfig(callLogId);
   if (!config) {
@@ -558,6 +562,11 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
     ws.close();
     return;
   }
+
+  const callLogRow = await db.query.callLogsTable.findFirst({
+    where: eq(callLogsTable.id, parseInt(callLogId, 10)),
+  });
+  const callStartedAt = callLogRow?.startedAt ? new Date(callLogRow.startedAt) : new Date();
 
   const { userId, agentConfig, script, callMeta } = config;
   const configuredLang = agentConfig?.language || "en-US";
@@ -593,6 +602,83 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
 
   const transferRules = callMeta.crmMetadata?.__transferRules as TransferRules | undefined;
   const hasTransferRules = !!transferRules;
+
+  let limitTriggered = false;
+  let limitTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Play closing message and hang up — no further LLM billing */
+  const endCampaignCallWithMessage = async (reason: string) => {
+    if (limitTriggered) return;
+    limitTriggered = true;
+    if (limitTimer) {
+      clearTimeout(limitTimer);
+      limitTimer = null;
+    }
+
+    const closingMessage = transferRules?.transferMessage || DEFAULT_CAMPAIGN_CLOSING_MESSAGE;
+    const callLogIdNum = parseInt(callLogId, 10);
+    const lang = configuredLang;
+
+    logger.info({ callLogId, reason }, "Campaign call limit reached — ending with closing message");
+    player?.clear();
+    if (streamSid) {
+      ws.send(JSON.stringify({ event: "clear", streamSid }));
+    }
+
+    try {
+      const closingAudio = await generateSentenceTTS(closingMessage, lang, voice);
+      isSpeaking = true;
+      await new Promise<void>((resolve) => {
+        player?.setOnComplete(() => {
+          isSpeaking = false;
+          resolve();
+        });
+        player?.enqueue(closingAudio);
+      });
+
+      const closingTurn = { role: "assistant", content: closingMessage, timestamp: new Date().toISOString() };
+      const updatedTranscript = [...callMeta.liveTranscript, closingTurn];
+      callMeta.liveTranscript = updatedTranscript;
+
+      await db.update(callLogsTable)
+        .set({
+          liveTranscript: updatedTranscript,
+          transcript: updatedTranscript.map(t => `${t.role === "user" ? "Caller" : "Agent"}: ${t.content}`).join("\n\n"),
+          transferReason: reason,
+          transferredAt: new Date(),
+          endedAt: new Date(),
+          outcome: "answered",
+        })
+        .where(eq(callLogsTable.id, callLogIdNum));
+    } catch (ttsErr) {
+      logger.error({ ttsErr, callLogId }, "Closing message TTS failed");
+    }
+
+    crmEventBus.emitCallEvent({
+      type: "call.ended",
+      callId: callLogIdNum,
+      callSid: callSid || undefined,
+      userId,
+      data: {
+        outcome: "answered",
+        reason,
+        limitType: "campaign",
+        liveTranscript: callMeta.liveTranscript,
+      },
+      metadata: callMeta.crmMetadata as Record<string, unknown> | undefined,
+      timestamp: new Date().toISOString(),
+    });
+
+    if (agentConfig?.twilioAccountSid && agentConfig?.twilioAuthToken && callSid) {
+      const client = twilio(agentConfig.twilioAccountSid, agentConfig.twilioAuthToken);
+      await client.calls(callSid).update({ status: "completed" }).catch(err =>
+        logger.error({ err, callLogId }, "Failed to hang up after campaign limit")
+      );
+    }
+
+    isGenerating = false;
+    ws.close();
+  };
 
   // Initial greeting
   const greeting = script?.openingLine || agentConfig?.greeting || "Hi, thank you for calling. How can I help you today?";
@@ -649,6 +735,17 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
         if (!callMeta.callSid) {
           callMeta.callSid = callSid;
           await db.update(callLogsTable).set({ callSid }).where(eq(callLogsTable.id, parseInt(callLogId, 10)));
+        }
+
+        if (transferRules?.campaignHandoff && transferRules.maxAiMinutes && transferRules.maxAiMinutes > 0) {
+          const elapsed = Date.now() - callStartedAt.getTime();
+          const remainingMs = Math.max(0, transferRules.maxAiMinutes * 60_000 - elapsed);
+          limitTimer = setTimeout(() => {
+            endCampaignCallWithMessage(
+              `Campaign call duration limit reached (${transferRules.maxAiMinutes} min)`,
+            ).catch(err => logger.error({ err, callLogId }, "Duration limit hangup failed"));
+          }, remainingMs);
+          logger.info({ callLogId, remainingMs }, "Campaign duration limit timer started");
         }
 
         playGreeting();
@@ -735,6 +832,7 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
 
       if (data.event === "stop") {
         logger.info({ callLogId }, "Twilio Media Stream stopped");
+        if (limitTimer) clearTimeout(limitTimer);
         player?.clear();
         finalizeCallLog(parseInt(callLogId, 10), callStartedAt).catch(err =>
           logger.error({ err, callLogId }, "Failed to finalize call log on stream stop")
@@ -747,6 +845,7 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
 
   ws.on("close", () => {
     logger.info({ callLogId }, "Twilio Media Stream WebSocket closed");
+    if (limitTimer) clearTimeout(limitTimer);
     player?.clear();
     finalizeCallLog(parseInt(callLogId, 10), callStartedAt).catch(err =>
       logger.error({ err, callLogId }, "Failed to finalize call log on websocket close")
@@ -762,6 +861,11 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
   const processUserUtterance = async (pcmSamples: Int16Array) => {
     if (isProcessingTurn) {
       logger.info({ callLogId }, "Skipping utterance, turn already in progress");
+      return;
+    }
+
+    if (limitTriggered) {
+      isProcessingTurn = false;
       return;
     }
 
@@ -833,103 +937,205 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
 
       history.push({ role: "user", content: transcript });
 
-      // Check auto transfer rules
+      // Check auto transfer rules (campaign CRM handoff or CRM API rules)
       if (transferRules) {
-        const intentTraining = intentResult.intent !== "general_question"
-          ? await db.query.intentTrainingTable.findFirst({
-              where: and(
-                eq(intentTrainingTable.userId, userId),
-                eq(intentTrainingTable.intent, intentResult.intent)
-              )
-            }).catch(() => null)
-          : null;
+        const isCampaignHandoff = !!transferRules.campaignHandoff;
+        const qaTurnCount = countUserTurns(history);
 
-        const mergedRules: TransferRules = {
-          ...transferRules,
-          perIntentMaxTurns: {
-            ...(transferRules.perIntentMaxTurns || {}),
-            ...(intentTraining ? { [intentResult.intent]: intentTraining.maxTurns } : {})
-          }
-        };
+        let mergedRules: TransferRules = transferRules;
+        if (!isCampaignHandoff) {
+          const intentTraining = intentResult.intent !== "general_question"
+            ? await db.query.intentTrainingTable.findFirst({
+                where: and(
+                  eq(intentTrainingTable.userId, userId),
+                  eq(intentTrainingTable.intent, intentResult.intent)
+                )
+              }).catch(() => null)
+            : null;
+
+          mergedRules = {
+            ...transferRules,
+            perIntentMaxTurns: {
+              ...(transferRules.perIntentMaxTurns || {}),
+              ...(intentTraining ? { [intentResult.intent]: intentTraining.maxTurns } : {})
+            }
+          };
+        }
 
         const decision = shouldTransfer(
           intentResult,
           mergedRules,
-          Math.floor((history.length + 1) / 2),
+          isCampaignHandoff ? qaTurnCount : Math.floor((history.length + 1) / 2),
           intentTurnCounts,
-          humanReqCount
+          humanReqCount,
+          callStartedAt,
         );
 
         if (decision.transfer) {
-          let targetPhone = intentTraining?.transferTo || transferRules.transferTo;
-          let agentId = intentTraining?.crmAgentId || transferRules.crmAgentId;
-
-          if (!targetPhone) {
-            const bestAgent = await findBestAgent(userId, intentResult.intent);
-            if (bestAgent) {
-              targetPhone = bestAgent.phone;
-              agentId = bestAgent.agentId;
-            }
+          // End call with closing message (default campaign mode — saves AI billing)
+          if (isCampaignHandoff && transferRules.endCallOnly) {
+            await endCampaignCallWithMessage(decision.reason);
+            isProcessingTurn = false;
+            isGenerating = false;
+            return;
           }
 
-          if (targetPhone) {
-            logger.info({ callLogId, targetPhone }, "Executing transfer programmatically...");
+          let agentId = transferRules.crmAgentId;
+          let targetPhone = transferRules.transferTo;
+
+          if (!isCampaignHandoff) {
+            const intentTraining = intentResult.intent !== "general_question"
+              ? await db.query.intentTrainingTable.findFirst({
+                  where: and(
+                    eq(intentTrainingTable.userId, userId),
+                    eq(intentTrainingTable.intent, intentResult.intent)
+                  )
+                }).catch(() => null)
+              : null;
+            targetPhone = intentTraining?.transferTo || transferRules.transferTo;
+            agentId = intentTraining?.crmAgentId || transferRules.crmAgentId;
+
+            if (!targetPhone) {
+              const bestAgent = await findBestAgent(userId, intentResult.intent);
+              if (bestAgent) {
+                targetPhone = bestAgent.phone;
+                agentId = bestAgent.agentId;
+              }
+            }
+          } else if (agentId) {
+            const resolved = await resolveAgentPhone(userId, agentId);
+            targetPhone = resolved.phone || targetPhone;
+          }
+
+          const transferMessage = transferRules.transferMessage || DEFAULT_CAMPAIGN_CLOSING_MESSAGE;
+          const callLogIdNum = parseInt(callLogId, 10);
+          const latestCallLog = callLogRow ?? await db.query.callLogsTable.findFirst({
+            where: eq(callLogsTable.id, callLogIdNum),
+          });
+
+          const buildHandoffData = async (extra: Record<string, unknown>) =>
+            latestCallLog
+              ? buildTransferEventData(latestCallLog, userId, { ...extra, crmAgentId: agentId })
+              : { ...extra, crmAgentId: agentId };
+
+          // CRM dashboard handoff (no agent phone) — play message, webhook, end call (no LLM cost)
+          if (isCampaignHandoff && agentId && !targetPhone) {
+            logger.info({ callLogId, agentId }, "Campaign CRM dashboard handoff (no phone bridge)");
             player?.clear();
             ws.send(JSON.stringify({ event: "clear", streamSid }));
 
-            const conferenceName = `auto-transfer-${callLogId}-${Date.now()}`;
-            const host = request.headers.host || "localhost";
-            const baseUrl = `https://${host}`;
+            crmEventBus.emitCallEvent({
+              type: "call.transferring",
+              callId: callLogIdNum,
+              callSid,
+              userId,
+              data: await buildHandoffData({
+                transferTo: `crm:${agentId}`,
+                reason: decision.reason,
+                handoffMode: "crm_dashboard",
+              }),
+              metadata: callMeta.crmMetadata as Record<string, unknown> | undefined,
+              timestamp: new Date().toISOString(),
+            });
 
-            const transferTwiml = `
-<Response>
-  <Say>Please wait, your call is being transferred to our specialist. Please stay on the line.</Say>
-  <Dial>
-    <Conference
-      statusCallback="${baseUrl}/api/crm/conference-status?callId=${callLogId}"
-      statusCallbackEvent="join leave end"
-      startConferenceOnEnter="false"
-      endConferenceOnExit="true"
-      beep="false"
-      waitUrl="${baseUrl}/api/twilio/hold-music?lang=${encodeURIComponent(lang)}"
-      waitMethod="POST"
-    >${conferenceName}</Conference>
-  </Dial>
-</Response>
-`;
-
-            if (agentConfig?.twilioAccountSid && agentConfig?.twilioAuthToken && agentConfig?.phoneNumber) {
-              const client = twilio(agentConfig.twilioAccountSid, agentConfig.twilioAuthToken);
-              
-              await client.calls(callSid).update({ twiml: transferTwiml });
-
-              client.calls.create({
-                to: targetPhone,
-                from: agentConfig.phoneNumber,
-                twiml: `<Response><Dial><Conference startConferenceOnEnter="true" endConferenceOnExit="false" beep="false">${conferenceName}</Conference></Dial></Response>`,
-                statusCallback: `${baseUrl}/api/crm/agent-call-status?callId=${callLogId}`,
-                statusCallbackMethod: "POST",
-                statusCallbackEvent: ["completed", "no-answer", "busy", "failed"],
-              }).then(agentCall => {
-                crmEventBus.emitCallEvent({
-                  type: "call.transferred",
-                  callId: parseInt(callLogId, 10),
-                  callSid,
-                  userId,
-                  data: { conferenceSid: conferenceName, agentCallSid: agentCall.sid, transferTo: targetPhone },
-                  metadata: callMeta.crmMetadata,
-                  timestamp: new Date().toISOString()
+            try {
+              const handoffAudio = await generateSentenceTTS(transferMessage, lang, voice);
+              isSpeaking = true;
+              await new Promise<void>((resolve) => {
+                player?.setOnComplete(() => {
+                  isSpeaking = false;
+                  resolve();
                 });
-              }).catch(err => logger.error({ err }, "Transfer agent dial failed"));
+                player?.enqueue(handoffAudio);
+              });
 
+              const handoffTurn = { role: "assistant", content: transferMessage, timestamp: new Date().toISOString() };
+              const updatedTranscript = [...callMeta.liveTranscript, handoffTurn];
+              callMeta.liveTranscript = updatedTranscript;
               await db.update(callLogsTable)
                 .set({
-                  conferenceSid: conferenceName,
-                  transferredTo: targetPhone,
+                  liveTranscript: updatedTranscript,
+                  transcript: updatedTranscript.map(t => `${t.role === "user" ? "Caller" : "Agent"}: ${t.content}`).join("\n\n"),
+                  transferredTo: `crm:${agentId}`,
                   transferReason: decision.reason,
-                  transferredAt: new Date()
+                  transferredAt: new Date(),
                 })
-                .where(eq(callLogsTable.id, parseInt(callLogId, 10)));
+                .where(eq(callLogsTable.id, callLogIdNum));
+            } catch (ttsErr) {
+              logger.error({ ttsErr, callLogId }, "Handoff TTS failed");
+            }
+
+            crmEventBus.emitCallEvent({
+              type: "call.transferred",
+              callId: callLogIdNum,
+              callSid,
+              userId,
+              data: await buildHandoffData({
+                transferTo: `crm:${agentId}`,
+                reason: decision.reason,
+                handoffMode: "crm_dashboard",
+              }),
+              metadata: callMeta.crmMetadata as Record<string, unknown> | undefined,
+              timestamp: new Date().toISOString(),
+            });
+
+            if (agentConfig?.twilioAccountSid && agentConfig?.twilioAuthToken && callSid) {
+              const client = twilio(agentConfig.twilioAccountSid, agentConfig.twilioAuthToken);
+              await client.calls(callSid).update({ status: "completed" }).catch(err =>
+                logger.error({ err, callLogId }, "Failed to end call after CRM handoff")
+              );
+            }
+
+            isGenerating = false;
+            ws.close();
+            return;
+          }
+
+          // Phone bridge transfer (campaign or intent-based)
+          if (targetPhone && callSid) {
+            logger.info({ callLogId, targetPhone, agentId }, "Executing call transfer...");
+            player?.clear();
+            ws.send(JSON.stringify({ event: "clear", streamSid }));
+
+            crmEventBus.emitCallEvent({
+              type: "call.transferring",
+              callId: callLogIdNum,
+              callSid,
+              userId,
+              data: await buildHandoffData({
+                transferTo: targetPhone,
+                reason: decision.reason,
+                intent: isCampaignHandoff ? undefined : intentResult.intent,
+              }),
+              metadata: callMeta.crmMetadata as Record<string, unknown> | undefined,
+              timestamp: new Date().toISOString(),
+            });
+
+            const result = await executeTransfer(userId, {
+              callId: callLogIdNum,
+              callSid,
+              transferTo: targetPhone,
+              reason: decision.reason,
+              transferType: "cold",
+              callerMessage: transferMessage,
+              crmAgentId: agentId,
+            });
+
+            if (result.success) {
+              crmEventBus.emitCallEvent({
+                type: "call.transferred",
+                callId: callLogIdNum,
+                callSid,
+                userId,
+                data: await buildHandoffData({
+                  conferenceSid: result.conferenceSid,
+                  transferTo: targetPhone,
+                  reason: decision.reason,
+                  crmAgentId: agentId,
+                }),
+                metadata: callMeta.crmMetadata as Record<string, unknown> | undefined,
+                timestamp: new Date().toISOString(),
+              });
             }
 
             isGenerating = false;

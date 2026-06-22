@@ -21,6 +21,7 @@ import invoicesRouter, { checkAndMarkOverdueInvoices } from "./routes/invoices";
 import widgetRouter from "./routes/widget";
 import crmRouter, { crmAdminRouter } from "./routes/crm";
 import { startWebhookDispatcher } from "./lib/webhook-dispatcher";
+import { startCampaignDialScheduler } from "./lib/campaign-dialer";
 
 const app: Express = express();
 
@@ -106,5 +107,8 @@ setInterval(runOverdueCheck, OVERDUE_CHECK_INTERVAL_MS);
 
 // Start CRM webhook event dispatcher
 startWebhookDispatcher();
+
+// Keep parallel/auto campaigns dialing without requiring pause/resume
+startCampaignDialScheduler();
 
 export default app;

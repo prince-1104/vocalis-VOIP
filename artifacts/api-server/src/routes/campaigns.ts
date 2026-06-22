@@ -2,6 +2,7 @@ import { Router, type IRouter } from "express";
 import { db, campaignsTable, campaignContactsTable, callLogsTable } from "@workspace/db";
 import { eq, and, isNull } from "drizzle-orm";
 import { dialNextForCampaign, triggerDialingForCampaign } from "../lib/campaign-dialer";
+import { normalizeCampaignTransferConfig, type CampaignTransferConfig } from "../lib/campaign-transfer";
 
 const router: IRouter = Router();
 
@@ -13,6 +14,20 @@ function getBaseUrl(req: any): string {
   }
   const host = req.headers.host || "localhost";
   return `https://${host}`;
+}
+
+function parseTransferConfig(raw: unknown): CampaignTransferConfig | null {
+  const normalized = normalizeCampaignTransferConfig(raw);
+  if (!normalized) {
+    if (raw && typeof raw === "object" && (raw as CampaignTransferConfig).enabled) {
+      throw new Error("Set at least one limit: max Q&A exchanges or max call duration (minutes)");
+    }
+    return null;
+  }
+  if (normalized.handoffMode === "crm_agent" && !normalized.crmAgentId) {
+    throw new Error("Select a CRM agent when using transfer-to-agent mode");
+  }
+  return normalized;
 }
 
 router.get("/campaigns", async (req, res) => {
@@ -38,7 +53,18 @@ router.get("/campaigns", async (req, res) => {
 
 router.post("/campaigns", async (req, res) => {
   const userId = req.userId!;
-  const { name, description, scriptId, contactIds, startTime, endTime, timezone, maxConcurrentCalls, dialParallel, isAutomatic, maxRetries, retryIntervalMinutes } = req.body;
+  const { name, description, scriptId, contactIds, startTime, endTime, timezone, maxConcurrentCalls, dialParallel, isAutomatic, maxRetries, retryIntervalMinutes, transferConfig } = req.body;
+
+  let parsedTransferConfig: CampaignTransferConfig | null = null;
+  try {
+    if (transferConfig) {
+      parsedTransferConfig = parseTransferConfig(transferConfig);
+    }
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+    return;
+  }
+
   const [campaign] = await db.insert(campaignsTable).values({
     userId, name, description, scriptId,
     totalContacts: contactIds?.length || 0,
@@ -48,6 +74,7 @@ router.post("/campaigns", async (req, res) => {
     isAutomatic: isAutomatic || false,
     maxRetries: maxRetries !== undefined ? parseInt(maxRetries, 10) : 0,
     retryIntervalMinutes: retryIntervalMinutes !== undefined ? parseInt(retryIntervalMinutes, 10) : 10,
+    transferConfig: parsedTransferConfig,
     status: "draft",
   }).returning();
 
@@ -82,7 +109,7 @@ router.get("/campaigns/:id", async (req, res) => {
 router.put("/campaigns/:id", async (req, res) => {
   const userId = req.userId!;
   const campaignId = parseInt(req.params.id);
-  const { name, description, scriptId, startTime, endTime, timezone, maxConcurrentCalls, dialParallel, isAutomatic, maxRetries, retryIntervalMinutes, contactIds } = req.body;
+  const { name, description, scriptId, startTime, endTime, timezone, maxConcurrentCalls, dialParallel, isAutomatic, maxRetries, retryIntervalMinutes, contactIds, transferConfig } = req.body;
   
   const existingCampaign = await db.query.campaignsTable.findFirst({
     where: and(eq(campaignsTable.id, campaignId), eq(campaignsTable.userId, userId)),
@@ -100,6 +127,16 @@ router.put("/campaigns/:id", async (req, res) => {
     }
   }
 
+  let parsedTransferConfig = existingCampaign.transferConfig;
+  if (transferConfig !== undefined) {
+    try {
+      parsedTransferConfig = transferConfig ? parseTransferConfig(transferConfig) : null;
+    } catch (err: any) {
+      res.status(400).json({ error: err.message });
+      return;
+    }
+  }
+
   const [campaign] = await db.update(campaignsTable)
     .set({
       name,
@@ -113,6 +150,7 @@ router.put("/campaigns/:id", async (req, res) => {
       isAutomatic: isAutomatic !== undefined ? isAutomatic : existingCampaign.isAutomatic,
       maxRetries: maxRetries !== undefined ? parseInt(maxRetries, 10) : existingCampaign.maxRetries,
       retryIntervalMinutes: retryIntervalMinutes !== undefined ? parseInt(retryIntervalMinutes, 10) : existingCampaign.retryIntervalMinutes,
+      transferConfig: parsedTransferConfig,
       totalContacts,
       updatedAt: new Date()
     })

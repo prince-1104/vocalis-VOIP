@@ -1,6 +1,7 @@
 import twilio from "twilio";
-import { db, callLogsTable, crmAgentsTable, agentConfigsTable } from "@workspace/db";
+import { db, callLogsTable, crmAgentsTable, agentConfigsTable, contactsTable, crmApiKeysTable } from "@workspace/db";
 import { eq, and } from "drizzle-orm";
+import type { CallLog } from "@workspace/db";
 import { crmEventBus } from "./crm-event-bus";
 import { logger } from "./logger";
 
@@ -18,7 +19,76 @@ export interface TransferRequest {
   reason: string;
   transferType: "cold" | "warm";
   briefingMessage?: string;     // AI message to play to the agent (warm transfer)
+  callerMessage?: string;         // message played to caller before conference
   crmAgentId?: string;
+}
+
+/** True when the tenant has at least one active CRM API key (external CRM connected). */
+export async function hasCrmIntegration(userId: number): Promise<boolean> {
+  const keys = await db.select({ id: crmApiKeysTable.id })
+    .from(crmApiKeysTable)
+    .where(and(eq(crmApiKeysTable.userId, userId), eq(crmApiKeysTable.isActive, true)))
+    .limit(1);
+  return keys.length > 0;
+}
+
+/** Build webhook payload fields sent to the CRM on transfer (transcript + contact). */
+export async function buildTransferEventData(
+  call: CallLog,
+  userId: number,
+  extra: Record<string, unknown> = {},
+): Promise<Record<string, unknown>> {
+  let contactDetails: Record<string, unknown> = { phone: call.phone };
+
+  if (call.contactId) {
+    const contact = await db.query.contactsTable.findFirst({
+      where: eq(contactsTable.id, call.contactId),
+    });
+    if (contact) {
+      contactDetails = {
+        id: contact.id,
+        phone: contact.phone,
+        firstName: contact.firstName,
+        lastName: contact.lastName,
+        email: contact.email,
+        company: contact.company,
+        status: contact.status,
+        notes: contact.notes,
+      };
+    }
+  }
+
+  let agent: { crmAgentId: string; name: string; specialization: string | null } | null = null;
+  const crmAgentId = (extra.crmAgentId as string | undefined) || undefined;
+  if (crmAgentId) {
+    const row = await db.query.crmAgentsTable.findFirst({
+      where: and(eq(crmAgentsTable.userId, userId), eq(crmAgentsTable.crmAgentId, crmAgentId)),
+    });
+    if (row) {
+      agent = { crmAgentId: row.crmAgentId, name: row.name, specialization: row.specialization };
+    }
+  }
+
+  return {
+    ...extra,
+    crmContactId: call.crmContactId,
+    contact: contactDetails,
+    liveTranscript: call.liveTranscript || [],
+    transcript: call.transcript,
+    aiSummary: call.aiSummary,
+    phone: call.phone,
+    direction: call.direction,
+    agent,
+  };
+}
+
+function escapeXml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
 }
 
 function getBaseUrl(req?: any): string {
@@ -65,23 +135,24 @@ export async function executeTransfer(
       callId: request.callId,
       callSid: request.callSid,
       userId,
-      data: {
+      data: await buildTransferEventData(callLog!, userId, {
         transferTo: request.transferTo,
         reason: request.reason,
         transferType: request.transferType,
         crmAgentId: request.crmAgentId,
-      },
+      }),
       metadata: callLog?.crmMetadata as Record<string, unknown> | undefined,
       timestamp: new Date().toISOString(),
     });
 
     const lang = agentConfig?.language || "en-US";
+    const callerMessage = request.callerMessage
+      || "Please wait, your call is being transferred to our specialist. Please stay on the line.";
 
     // Update the active call to join a conference (caller side)
-    // This modifies the in-progress call to put the caller into a conference room
     await client.calls(request.callSid).update({
       twiml: `<Response>
-        <Say>Please wait, your call is being transferred to our specialist. Please stay on the line.</Say>
+        <Say>${escapeXml(callerMessage)}</Say>
         <Dial>
           <Conference statusCallback="${baseUrl}/api/crm/conference-status?callId=${request.callId}"
                       statusCallbackEvent="join leave end"
@@ -142,19 +213,19 @@ export async function executeTransfer(
       }
     }
 
-    // Emit transferred event
+    // Emit transferred event — CRM uses crmAgentId to show on the agent's dashboard
     crmEventBus.emitCallEvent({
       type: "call.transferred",
       callId: request.callId,
       callSid: request.callSid,
       userId,
-      data: {
+      data: await buildTransferEventData(callLog!, userId, {
         conferenceSid: conferenceName,
         agentCallSid: agentCall.sid,
         transferTo: request.transferTo,
         reason: request.reason,
         crmAgentId: request.crmAgentId,
-      },
+      }),
       metadata: callLog?.crmMetadata as Record<string, unknown> | undefined,
       timestamp: new Date().toISOString(),
     });

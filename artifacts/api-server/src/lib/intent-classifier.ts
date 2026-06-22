@@ -18,11 +18,15 @@ export interface IntentResult {
 
 export interface TransferRules {
   intents: string[];              // intents that CAN eventually transfer (AI tries first)
-  maxAiTurns?: number;            // global fallback: transfer after N turns if unresolved
+  maxAiTurns?: number;            // global fallback: transfer after N Q&A exchanges
+  maxAiMinutes?: number;          // transfer after N minutes on call (campaign handoff)
   perIntentMaxTurns?: Record<string, number>;  // per-intent: { "pricing_query": 8, "complaint": 5 }
   humanRequestThreshold?: number; // transfer after caller asks for human N times (default: 2)
   transferTo?: string;            // specific phone/SIP to transfer to
   crmAgentId?: string;            // specific CRM agent ID
+  transferMessage?: string;       // spoken before handoff (campaign CRM transfer)
+  campaignHandoff?: boolean;      // true = only turn/time/human limits (skip intent routing)
+  endCallOnly?: boolean;          // true = play closing message and hang up (no CRM bridge)
 }
 
 const KNOWN_INTENTS = [
@@ -323,12 +327,42 @@ export function shouldTransfer(
   turnCount: number,
   intentTurnCounts: Record<string, number>,
   humanRequestCount: number,
+  callStartedAt?: Date | null,
 ): { transfer: boolean; reason: string } {
   if (!transferRules) {
     return { transfer: false, reason: "no transfer rules configured" };
   }
 
   const humanThreshold = transferRules.humanRequestThreshold ?? 2;
+
+  // Campaign CRM handoff: limit AI cost — transfer on turn/time/human request only
+  if (transferRules.campaignHandoff) {
+    if (humanRequestCount >= humanThreshold) {
+      return {
+        transfer: true,
+        reason: `Caller requested a specialist (${humanRequestCount} time(s))`,
+      };
+    }
+
+    if (transferRules.maxAiTurns && transferRules.maxAiTurns > 0 && turnCount >= transferRules.maxAiTurns) {
+      return {
+        transfer: true,
+        reason: `Campaign AI Q&A limit reached (${transferRules.maxAiTurns} exchanges)`,
+      };
+    }
+
+    if (transferRules.maxAiMinutes && callStartedAt) {
+      const elapsedMin = (Date.now() - callStartedAt.getTime()) / 60_000;
+      if (elapsedMin >= transferRules.maxAiMinutes) {
+        return {
+          transfer: true,
+          reason: `Campaign AI time limit reached (${transferRules.maxAiMinutes} min)`,
+        };
+      }
+    }
+
+    return { transfer: false, reason: "campaign handoff thresholds not met" };
+  }
 
   // 1. Caller explicitly asked for human enough times → transfer immediately
   if (humanRequestCount >= humanThreshold) {
@@ -370,6 +404,17 @@ export function shouldTransfer(
       transfer: true,
       reason: `Max AI turns (${transferRules.maxAiTurns}) reached without resolution`,
     };
+  }
+
+  // 5. Time-based limit (CRM API transfer rules)
+  if (transferRules.maxAiMinutes && callStartedAt) {
+    const elapsedMin = (Date.now() - callStartedAt.getTime()) / 60_000;
+    if (elapsedMin >= transferRules.maxAiMinutes) {
+      return {
+        transfer: true,
+        reason: `Max AI time (${transferRules.maxAiMinutes} min) reached`,
+      };
+    }
   }
 
   return { transfer: false, reason: "no transfer condition met" };

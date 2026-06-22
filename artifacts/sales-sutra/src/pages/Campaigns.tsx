@@ -1,15 +1,244 @@
 import React, { useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCampaignsList, useCreateCampaignMutation, useStartCampaignMutation, usePauseCampaignMutation, useUpdateCampaignMutation, useDeleteCampaignMutation } from "@/hooks/use-campaigns";
 import { useScriptsList } from "@/hooks/use-scripts";
 import { useContactsList } from "@/hooks/use-contacts";
 import { Card, CardContent, CardHeader, CardTitle, CardFooter } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { Badge } from "@/components/ui/badge";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { StatusBadge } from "@/components/ui-custom/StatusBadge";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
-import { Megaphone, Play, Pause, PhoneCall, Loader2, Activity, Users, Edit, Clock, Mic, DollarSign, Bot, PhoneOutgoing, PhoneIncoming, RefreshCw, Trash2 } from "lucide-react";
+import { Megaphone, Play, Pause, PhoneCall, Loader2, Activity, Users, Edit, Clock, Mic, DollarSign, Bot, PhoneOutgoing, PhoneIncoming, RefreshCw, Trash2, PhoneForwarded, Timer, MessageSquare } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
-import { useQueryClient } from "@tanstack/react-query";
+import { adminFetch } from "@/lib/admin-fetch";
+
+const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
+
+const DEFAULT_HANDOFF_MESSAGE =
+  "Thank you for being with us. Our specialists will get in touch with you as soon as possible. Goodbye.";
+
+interface CampaignTransferFormConfig {
+  enabled: boolean;
+  maxAiTurns: number;
+  maxAiMinutes: number;
+  handoffMode: "end_call" | "crm_agent";
+  crmAgentId: string;
+  transferMessage: string;
+  transferOnHumanRequest: boolean;
+}
+
+interface CrmAgentOption {
+  id: number;
+  crmAgentId: string;
+  name: string;
+  phone: string | null;
+}
+
+function defaultTransferConfig(): CampaignTransferFormConfig {
+  return {
+    enabled: false,
+    maxAiTurns: 10,
+    maxAiMinutes: 0,
+    handoffMode: "end_call",
+    crmAgentId: "",
+    transferMessage: DEFAULT_HANDOFF_MESSAGE,
+    transferOnHumanRequest: true,
+  };
+}
+
+function transferConfigFromCampaign(raw: unknown): CampaignTransferFormConfig {
+  const base = defaultTransferConfig();
+  if (!raw || typeof raw !== "object") return base;
+  const c = raw as CampaignTransferFormConfig & { enabled?: boolean; handoffMode?: string };
+  return {
+    enabled: !!c.enabled,
+    maxAiTurns: c.maxAiTurns ?? 10,
+    maxAiMinutes: c.maxAiMinutes ?? 0,
+    handoffMode: c.handoffMode === "crm_agent" ? "crm_agent" : "end_call",
+    crmAgentId: c.crmAgentId || "",
+    transferMessage: c.transferMessage || DEFAULT_HANDOFF_MESSAGE,
+    transferOnHumanRequest: c.transferOnHumanRequest !== false,
+  };
+}
+
+function serializeTransferConfig(cfg: CampaignTransferFormConfig) {
+  if (!cfg.enabled) return null;
+  const maxAiTurns = cfg.maxAiTurns > 0 ? cfg.maxAiTurns : undefined;
+  const maxAiMinutes = cfg.maxAiMinutes > 0 ? cfg.maxAiMinutes : undefined;
+  if (!maxAiTurns && !maxAiMinutes) return null;
+  return {
+    enabled: true,
+    maxAiTurns,
+    maxAiMinutes,
+    handoffMode: cfg.handoffMode,
+    crmAgentId: cfg.handoffMode === "crm_agent" ? cfg.crmAgentId : undefined,
+    transferMessage: cfg.transferMessage.trim() || DEFAULT_HANDOFF_MESSAGE,
+    transferOnHumanRequest: cfg.transferOnHumanRequest,
+  };
+}
+
+function validateTransferConfig(cfg: CampaignTransferFormConfig): string | null {
+  if (!cfg.enabled) return null;
+  if (cfg.maxAiTurns <= 0 && cfg.maxAiMinutes <= 0) {
+    return "Set at least one limit: max Q&A exchanges or max call duration (minutes).";
+  }
+  if (cfg.handoffMode === "crm_agent" && !cfg.crmAgentId) {
+    return "Select a CRM agent when using transfer-to-agent mode.";
+  }
+  return null;
+}
+
+function CampaignTransferSettings({
+  value,
+  onChange,
+  agents,
+}: {
+  value: CampaignTransferFormConfig;
+  onChange: (v: CampaignTransferFormConfig) => void;
+  agents: CrmAgentOption[];
+}) {
+  return (
+    <div className="space-y-3 p-4 border border-amber-500/25 rounded-lg bg-amber-500/5">
+      <div className="flex items-center justify-between gap-3">
+        <div className="space-y-0.5">
+          <label className="text-sm font-medium flex items-center gap-2">
+            <Timer className="w-4 h-4 text-amber-400" />
+            AI Call Limits
+          </label>
+          <p className="text-xs text-muted-foreground">
+            Cap Q&amp;A or call duration to reduce AI billing. The closing message plays, then the call ends.
+          </p>
+        </div>
+        <input
+          type="checkbox"
+          checked={value.enabled}
+          onChange={e => onChange({ ...value, enabled: e.target.checked })}
+          className="h-5 w-9 rounded-full bg-white/10 border border-white/10 checked:bg-amber-500 transition-colors cursor-pointer appearance-none relative before:content-[''] before:absolute before:top-0.5 before:left-0.5 before:h-3.5 before:w-3.5 before:rounded-full before:bg-white before:transition-transform checked:before:translate-x-4 shrink-0"
+        />
+      </div>
+
+      {value.enabled && (
+        <div className="space-y-3 pt-1">
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium text-muted-foreground flex items-center gap-1">
+                <MessageSquare className="w-3 h-3" /> Max Q&amp;A replies
+              </label>
+              <Input
+                type="number"
+                min={0}
+                max={50}
+                value={value.maxAiTurns}
+                onChange={e => onChange({ ...value, maxAiTurns: parseInt(e.target.value, 10) || 0 })}
+                className="bg-background/50 border-white/10 h-9"
+                placeholder="e.g. 10"
+              />
+              <p className="text-[10px] text-muted-foreground">0 = no limit on exchanges</p>
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium text-muted-foreground flex items-center gap-1">
+                <Clock className="w-3 h-3" /> Max call duration (min)
+              </label>
+              <Input
+                type="number"
+                min={0}
+                max={60}
+                value={value.maxAiMinutes}
+                onChange={e => onChange({ ...value, maxAiMinutes: parseInt(e.target.value, 10) || 0 })}
+                className="bg-background/50 border-white/10 h-9"
+                placeholder="e.g. 2"
+              />
+              <p className="text-[10px] text-muted-foreground">0 = no time limit</p>
+            </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium text-muted-foreground">Closing message (spoken before hangup)</label>
+            <Textarea
+              value={value.transferMessage}
+              onChange={e => onChange({ ...value, transferMessage: e.target.value })}
+              rows={3}
+              className="bg-background/50 border-white/10 text-sm resize-none"
+              placeholder={DEFAULT_HANDOFF_MESSAGE}
+            />
+          </div>
+
+          <div className="space-y-2">
+            <label className="text-xs font-medium text-muted-foreground">After limit is reached</label>
+            <div className="grid grid-cols-1 gap-2">
+              <label className={`flex items-start gap-2 p-2.5 rounded-md border cursor-pointer text-xs ${value.handoffMode === "end_call" ? "border-amber-500/40 bg-amber-500/10" : "border-white/10 bg-background/30"}`}>
+                <input
+                  type="radio"
+                  name="handoffMode"
+                  checked={value.handoffMode === "end_call"}
+                  onChange={() => onChange({ ...value, handoffMode: "end_call" })}
+                  className="mt-0.5"
+                />
+                <span>
+                  <span className="font-medium text-foreground">End call</span>
+                  <span className="block text-muted-foreground">Play closing message and hang up (lowest cost)</span>
+                </span>
+              </label>
+              <label className={`flex items-start gap-2 p-2.5 rounded-md border cursor-pointer text-xs ${value.handoffMode === "crm_agent" ? "border-primary/40 bg-primary/10" : "border-white/10 bg-background/30"}`}>
+                <input
+                  type="radio"
+                  name="handoffMode"
+                  checked={value.handoffMode === "crm_agent"}
+                  onChange={() => onChange({ ...value, handoffMode: "crm_agent" })}
+                  className="mt-0.5"
+                />
+                <span>
+                  <span className="font-medium text-foreground flex items-center gap-1">
+                    <PhoneForwarded className="w-3 h-3" /> Transfer to CRM agent
+                  </span>
+                  <span className="block text-muted-foreground">Send transcript + contact to agent dashboard</span>
+                </span>
+              </label>
+            </div>
+          </div>
+
+          {value.handoffMode === "crm_agent" && (
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium text-muted-foreground">CRM agent</label>
+              <Select
+                value={value.crmAgentId || undefined}
+                onValueChange={id => onChange({ ...value, crmAgentId: id })}
+              >
+                <SelectTrigger className="bg-background/50 border-white/10 h-9">
+                  <SelectValue placeholder="Select agent..." />
+                </SelectTrigger>
+                <SelectContent>
+                  {agents.length === 0 ? (
+                    <SelectItem value="__none__" disabled>Register agents in Dialer → CRM Agents</SelectItem>
+                  ) : (
+                    agents.map(a => (
+                      <SelectItem key={a.crmAgentId} value={a.crmAgentId}>
+                        {a.name} ({a.crmAgentId})
+                      </SelectItem>
+                    ))
+                  )}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
+
+          <label className="flex items-center gap-2 text-xs text-muted-foreground cursor-pointer">
+            <input
+              type="checkbox"
+              checked={value.transferOnHumanRequest}
+              onChange={e => onChange({ ...value, transferOnHumanRequest: e.target.checked })}
+              className="rounded border-white/10"
+            />
+            End early if caller asks for a human
+          </label>
+        </div>
+      )}
+    </div>
+  );
+}
 
 export default function Campaigns() {
   const { data: campaigns, isLoading, refetch, isFetching } = useCampaignsList();
@@ -27,6 +256,12 @@ export default function Campaigns() {
   const { data: scripts } = useScriptsList();
   const { data: contactsData } = useContactsList({ limit: 100 });
   const contacts = contactsData?.contacts || [];
+  const { data: agentsData } = useQuery<{ agents: CrmAgentOption[] }>({
+    queryKey: ["crm-agents"],
+    queryFn: () => adminFetch(`${BASE}/api/crm-agents`),
+    retry: false,
+  });
+  const crmAgents = agentsData?.agents || [];
   const createCampaign = useCreateCampaignMutation();
   const startCampaign = useStartCampaignMutation();
   const pauseCampaign = usePauseCampaignMutation();
@@ -49,7 +284,8 @@ export default function Campaigns() {
     isAutomatic: false,
     maxRetries: 0,
     retryIntervalMinutes: 10,
-    contactIds: [] as number[]
+    contactIds: [] as number[],
+    transferConfig: defaultTransferConfig(),
   });
 
   const [formData, setFormData] = useState({
@@ -61,7 +297,8 @@ export default function Campaigns() {
     isAutomatic: false,
     maxRetries: 0,
     retryIntervalMinutes: 10,
-    contactIds: [] as number[]
+    contactIds: [] as number[],
+    transferConfig: defaultTransferConfig(),
   });
 
   // State variables for campaign performance call log viewer
@@ -119,7 +356,8 @@ export default function Campaigns() {
       isAutomatic: campaign.isAutomatic || false,
       maxRetries: campaign.maxRetries || 0,
       retryIntervalMinutes: campaign.retryIntervalMinutes || 10,
-      contactIds: campaign.contactIds || []
+      contactIds: campaign.contactIds || [],
+      transferConfig: transferConfigFromCampaign(campaign.transferConfig),
     });
   };
 
@@ -128,8 +366,19 @@ export default function Campaigns() {
     if (!editFormData.scriptId && scripts && scripts.length > 0) {
       editFormData.scriptId = scripts[0].id;
     }
+    const limitErr = validateTransferConfig(editFormData.transferConfig);
+    if (limitErr) {
+      toast({ title: "Invalid call limits", description: limitErr, variant: "destructive" });
+      return;
+    }
     try {
-      await updateCampaign.mutateAsync({ id: editingCampaign.id, data: editFormData });
+      await updateCampaign.mutateAsync({
+        id: editingCampaign.id,
+        data: {
+          ...editFormData,
+          transferConfig: serializeTransferConfig(editFormData.transferConfig),
+        } as any,
+      });
       toast({ title: "Campaign updated" });
       setEditingCampaign(null);
     } catch (err: any) {
@@ -142,11 +391,23 @@ export default function Campaigns() {
     if (!formData.scriptId && scripts && scripts.length > 0) {
        formData.scriptId = scripts[0].id;
     }
+    const limitErr = validateTransferConfig(formData.transferConfig);
+    if (limitErr) {
+      toast({ title: "Invalid call limits", description: limitErr, variant: "destructive" });
+      return;
+    }
     try {
-      await createCampaign.mutateAsync(formData);
+      await createCampaign.mutateAsync({
+        ...formData,
+        transferConfig: serializeTransferConfig(formData.transferConfig),
+      } as any);
       toast({ title: "Campaign created" });
       setIsDialogOpen(false);
-      setFormData({ name: "", description: "", scriptId: 0, maxConcurrentCalls: 1, dialParallel: false, isAutomatic: false, maxRetries: 0, retryIntervalMinutes: 10, contactIds: [] });
+      setFormData({
+        name: "", description: "", scriptId: 0, maxConcurrentCalls: 1, dialParallel: false,
+        isAutomatic: false, maxRetries: 0, retryIntervalMinutes: 10, contactIds: [],
+        transferConfig: defaultTransferConfig(),
+      });
     } catch (err: any) {
       toast({ title: "Error", description: err.message, variant: "destructive" });
     }
@@ -316,6 +577,11 @@ export default function Campaigns() {
                   />
                 </div>
               </div>
+              <CampaignTransferSettings
+                value={formData.transferConfig}
+                onChange={tc => setFormData({ ...formData, transferConfig: tc })}
+                agents={crmAgents}
+              />
               <div className="space-y-2">
                 <label className="text-sm font-medium">Select Contacts</label>
                 <div className="border border-white/10 rounded-md p-3 max-h-40 overflow-y-auto space-y-2 bg-background/50">
@@ -372,6 +638,14 @@ export default function Campaigns() {
                     <div>
                       <CardTitle className="text-lg font-display">{campaign.name}</CardTitle>
                       <p className="text-sm text-muted-foreground mt-1 line-clamp-1">{campaign.description || 'No description'}</p>
+                      {(campaign as any).transferConfig?.enabled && (
+                        <Badge variant="outline" className="mt-2 text-[10px] border-amber-500/30 text-amber-300">
+                          <Timer className="w-3 h-3 mr-1" />
+                          {(campaign as any).transferConfig.maxAiTurns > 0 && `${(campaign as any).transferConfig.maxAiTurns} Q&A`}
+                          {(campaign as any).transferConfig.maxAiTurns > 0 && (campaign as any).transferConfig.maxAiMinutes > 0 && " · "}
+                          {(campaign as any).transferConfig.maxAiMinutes > 0 && `${(campaign as any).transferConfig.maxAiMinutes} min`}
+                        </Badge>
+                      )}
                     </div>
                     <div className="flex items-center gap-2">
                       <StatusBadge status={campaign.status} />
@@ -601,6 +875,11 @@ export default function Campaigns() {
                   />
                 </div>
               </div>
+              <CampaignTransferSettings
+                value={editFormData.transferConfig}
+                onChange={tc => setEditFormData({ ...editFormData, transferConfig: tc })}
+                agents={crmAgents}
+              />
               <div className="space-y-2">
                 <label className="text-sm font-medium">Select Contacts</label>
                 <div className="border border-white/10 rounded-md p-3 max-h-40 overflow-y-auto space-y-2 bg-background/50">

@@ -1,7 +1,18 @@
-import { pgTable, text, serial, timestamp, integer, boolean } from "drizzle-orm/pg-core";
+import { pgTable, text, serial, timestamp, integer, boolean, jsonb } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 import { usersTable } from "./users";
+
+/** Campaign-level CRM handoff / AI call limits (see campaign-transfer.ts) */
+export type CampaignTransferConfig = {
+  enabled: boolean;
+  maxAiTurns?: number;
+  maxAiMinutes?: number;
+  handoffMode?: "end_call" | "crm_agent";
+  crmAgentId?: string;
+  transferMessage?: string;
+  transferOnHumanRequest?: boolean;
+};
 
 export const campaignsTable = pgTable("campaigns", {
   id: serial("id").primaryKey(),
@@ -22,6 +33,7 @@ export const campaignsTable = pgTable("campaigns", {
   isAutomatic: boolean("is_automatic").notNull().default(false),
   maxRetries: integer("max_retries").notNull().default(0),
   retryIntervalMinutes: integer("retry_interval_minutes").notNull().default(10),
+  transferConfig: jsonb("transfer_config").$type<CampaignTransferConfig | null>(),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 });

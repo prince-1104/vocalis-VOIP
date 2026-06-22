@@ -365,7 +365,7 @@ export default function Dialer() {
   const transferMutation = useMutation({
     mutationFn: async ({ agentId, reason }: { agentId: string; reason: string }) => {
       if (!callState.callId) throw new Error("No active call");
-      return adminFetch(`${BASE}/api/crm/calls/${callState.callId}/transfer`, {
+      return adminFetch(`${BASE}/api/dial/calls/${callState.callId}/transfer`, {
         method: "POST",
         body: JSON.stringify({
           crmAgentId: agentId,
@@ -374,9 +374,16 @@ export default function Dialer() {
         }),
       });
     },
-    onSuccess: () => {
-      setCallState(prev => ({ ...prev, status: "transferring" }));
-      toast({ title: "🔄 Transferring...", description: "Connecting to agent" });
+    onSuccess: (_data, variables) => {
+      const agent = agents.find(a => a.crmAgentId === variables.agentId);
+      setCallState(prev => ({ ...prev, status: "transferring", transferredTo: agent?.name || variables.agentId }));
+      toast({
+        title: "Transferring to CRM agent",
+        description: `${agent?.name || variables.agentId} will see this call on their CRM dashboard with transcript and contact details.`,
+      });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Transfer failed", description: err.message, variant: "destructive" });
     },
   });
 
@@ -445,6 +452,7 @@ export default function Dialer() {
   const availableAgents = agents.filter(a => a.isAvailable);
   const transferableAgents = availableAgents.filter(agentCanTransfer);
   const apiKeys = apiKeysData?.apiKeys || [];
+  const crmConnected = apiKeys.some(k => k.isActive);
 
   // ═══════════════════════════════════════════════════════════════
   // RENDER
@@ -596,10 +604,13 @@ export default function Dialer() {
                     )}
                   </div>
 
-                  {/* Transfer Panel — show once call is connected */}
-                  {callState.status === "active" && availableAgents.length > 0 && (
+                  {/* Transfer Panel — requires CRM API connection + registered agents */}
+                  {callState.status === "active" && crmConnected && availableAgents.length > 0 && (
                     <div className="pt-2 border-t border-white/5 space-y-3">
-                      <p className="text-xs text-muted-foreground font-medium uppercase tracking-wider">Transfer to Agent</p>
+                      <p className="text-xs text-muted-foreground font-medium uppercase tracking-wider">Transfer to CRM Agent</p>
+                      <p className="text-xs text-muted-foreground">
+                        Transfers send live transcript and customer contact details to the agent&apos;s CRM dashboard via webhook.
+                      </p>
                       {transferableAgents.length === 0 && (
                         <p className="text-xs text-amber-400">
                           No agents have a phone number configured. Edit agents in the CRM Agents tab to add one.
@@ -640,11 +651,19 @@ export default function Dialer() {
                         variant="outline"
                         className="w-full border-blue-500/30 text-blue-400 hover:bg-blue-500/10"
                         onClick={handleTransfer}
-                        disabled={!selectedAgent || transferMutation.isPending}
+                        disabled={!selectedAgent || !transferableAgents.some(a => a.crmAgentId === selectedAgent) || transferMutation.isPending}
                       >
                         <PhoneForwarded className="w-4 h-4 mr-2" />
                         {transferMutation.isPending ? "Transferring..." : "Transfer"}
                       </Button>
+                    </div>
+                  )}
+
+                  {callState.status === "active" && !crmConnected && (
+                    <div className="pt-2 border-t border-white/5">
+                      <p className="text-xs text-amber-400">
+                        Connect a CRM via API Integration to enable call transfers to agent dashboards.
+                      </p>
                     </div>
                   )}
                 </CardContent>
@@ -1042,21 +1061,26 @@ Authorization: Bearer dk_live_your_key_here
                   Transfer Calls to CRM Agents
                 </h4>
                 <pre className="p-4 bg-black/40 border border-white/10 rounded-xl text-xs font-mono text-purple-300 overflow-x-auto whitespace-pre">
-{`// Register an agent:
+{`// Register an agent (maps to your CRM user, e.g. agent-1):
 POST /api/crm/agents
 {
-  "crmAgentId": "agent-sales-1",
-  "name": "Raj (Sales Closer)",
+  "crmAgentId": "agent-1",
+  "name": "Agent One",
   "phone": "+919999888877",
   "intents": ["pricing_query", "interested"]
 }
 
-// Trigger a transfer mid-call:
+// Trigger a transfer mid-call (Dialer UI or API):
 POST /api/crm/calls/{callId}/transfer
 {
-  "crmAgentId": "agent-sales-1",
+  "crmAgentId": "agent-1",
   "reason": "pricing negotiation"
-}`}
+}
+
+// Your CRM webhook receives call.transferred with:
+// data.crmAgentId → route to agent-1 dashboard
+// data.contact    → customer name, phone, email
+// data.liveTranscript → full conversation so far`}
                 </pre>
               </div>
 
@@ -1191,7 +1215,7 @@ function RegisterAgentDialog({ onSuccess }: { onSuccess: () => void }) {
   });
 
   const mutation = useMutation({
-    mutationFn: () => adminFetch(`${BASE}/api/crm/agents`, {
+    mutationFn: () => adminFetch(`${BASE}/api/crm-agents`, {
       method: "POST",
       body: JSON.stringify({
         ...form,

@@ -1,7 +1,74 @@
 import twilio from "twilio";
 import { db, agentConfigsTable, callLogsTable, contactsTable, campaignsTable, campaignContactsTable, tenantsTable, sipTrunkConfigsTable } from "@workspace/db";
-import { eq, and, ne, lt, or, lte, sql, isNull } from "drizzle-orm";
+import { eq, and, ne, lt, or, lte, sql, isNull, desc } from "drizzle-orm";
 import { decrypt } from "./encryption";
+import { logger } from "./logger";
+import { buildCallCrmMetadataForCampaign } from "./campaign-transfer";
+
+function getCampaignBaseUrl(): string {
+  const domains = process.env.REPLIT_DOMAINS;
+  if (domains) {
+    return `https://${domains.split(",")[0].trim()}`;
+  }
+  return process.env.PUBLIC_BASE_URL || "https://dialog.noeticminds.com";
+}
+
+/** Contacts stuck in "calling" with no active call log block parallel slots — release them. */
+async function releaseStaleCallingContacts(campaignId: number): Promise<void> {
+  const campaign = await db.query.campaignsTable.findFirst({
+    where: eq(campaignsTable.id, campaignId),
+  });
+  if (!campaign) return;
+
+  const callingContacts = await db
+    .select({
+      linkId: campaignContactsTable.id,
+      contactId: campaignContactsTable.contactId,
+      attempts: campaignContactsTable.attempts,
+    })
+    .from(campaignContactsTable)
+    .where(
+      and(
+        eq(campaignContactsTable.campaignId, campaignId),
+        eq(campaignContactsTable.status, "calling"),
+      ),
+    );
+
+  for (const cc of callingContacts) {
+    const activeCall = await db.query.callLogsTable.findFirst({
+      where: and(
+        eq(callLogsTable.campaignId, campaignId),
+        eq(callLogsTable.contactId, cc.contactId),
+        isNull(callLogsTable.endedAt),
+      ),
+    });
+
+    if (activeCall) continue;
+
+    const lastCall = await db.query.callLogsTable.findFirst({
+      where: and(
+        eq(callLogsTable.campaignId, campaignId),
+        eq(callLogsTable.contactId, cc.contactId),
+      ),
+      orderBy: desc(callLogsTable.startedAt),
+    });
+
+    if (lastCall?.outcome === "answered") {
+      await db.update(campaignContactsTable)
+        .set({ status: "answered" })
+        .where(eq(campaignContactsTable.id, cc.linkId));
+    } else if (cc.attempts >= 1 + campaign.maxRetries) {
+      await db.update(campaignContactsTable)
+        .set({ status: "failed" })
+        .where(eq(campaignContactsTable.id, cc.linkId));
+    } else {
+      const nextTime = new Date(Date.now() + campaign.retryIntervalMinutes * 60 * 1000);
+      await db.update(campaignContactsTable)
+        .set({ status: "retrying", nextAttemptAt: nextTime })
+        .where(eq(campaignContactsTable.id, cc.linkId));
+    }
+  }
+}
 
 function getTwilioClient(accountSid: string, authToken: string) {
   return twilio(accountSid, authToken);
@@ -9,6 +76,8 @@ function getTwilioClient(accountSid: string, authToken: string) {
 
 export interface DialNextResult {
   done: boolean;
+  dialFailed?: boolean;
+  error?: string;
   message?: string;
   callSid?: string;
   callLogId?: number;
@@ -19,6 +88,34 @@ export interface DialNextResult {
     lastName: string | null;
   };
   remaining?: number;
+}
+
+/** Twilio errors that won't succeed on retry without user action (verify number, fix format, etc.) */
+function isPermanentDialError(err: unknown): boolean {
+  const code = (err as { code?: number })?.code;
+  return code === 21219 || code === 21211 || code === 21214 || code === 21608 || code === 13224;
+}
+
+async function resolveFailedContactStatus(
+  campaign: { maxRetries: number; retryIntervalMinutes: number },
+  linkId: number,
+  previousAttempts: number,
+  err: unknown,
+): Promise<void> {
+  const newAttempts = previousAttempts + 1;
+  const permanent = isPermanentDialError(err);
+
+  if (permanent || newAttempts >= 1 + campaign.maxRetries) {
+    await db.update(campaignContactsTable)
+      .set({ status: "failed" })
+      .where(eq(campaignContactsTable.id, linkId));
+    return;
+  }
+
+  const nextTime = new Date(Date.now() + campaign.retryIntervalMinutes * 60 * 1000);
+  await db.update(campaignContactsTable)
+    .set({ status: "retrying", nextAttemptAt: nextTime })
+    .where(eq(campaignContactsTable.id, linkId));
 }
 
 export async function dialNextForCampaign(
@@ -100,22 +197,6 @@ export async function dialNextForCampaign(
     lastName: nextLink.lastName,
   };
 
-  await db.update(contactsTable)
-    .set({ status: "called", lastCalledAt: new Date(), updatedAt: new Date() })
-    .where(eq(contactsTable.id, nextContact.id));
-
-  await db.update(campaignContactsTable)
-    .set({
-      status: "calling",
-      attempts: nextLink.attempts + 1,
-      lastAttemptAt: new Date(),
-    })
-    .where(eq(campaignContactsTable.id, nextLink.linkId));
-
-  await db.update(campaignsTable)
-    .set({ calledCount: campaign.calledCount + 1, updatedAt: new Date() })
-    .where(eq(campaignsTable.id, campaign.id));
-
   const agentConfig = await db.query.agentConfigsTable.findFirst({ where: eq(agentConfigsTable.userId, userId) });
 
   if (!agentConfig?.twilioAccountSid || !agentConfig?.twilioAuthToken) {
@@ -149,7 +230,7 @@ export async function dialNextForCampaign(
     sipAuthUsername = sipConfig.sipUsername;
     try {
       sipAuthPassword = decrypt(sipConfig.sipPassword);
-    } catch (err) {
+    } catch {
       throw new Error("Failed to decrypt SIP password.");
     }
   } else {
@@ -159,7 +240,21 @@ export async function dialNextForCampaign(
     fromPhone = agentConfig.phoneNumber;
   }
 
+  await db.update(contactsTable)
+    .set({ status: "called", lastCalledAt: new Date(), updatedAt: new Date() })
+    .where(eq(contactsTable.id, nextContact.id));
+
+  await db.update(campaignContactsTable)
+    .set({
+      status: "calling",
+      attempts: nextLink.attempts + 1,
+      lastAttemptAt: new Date(),
+    })
+    .where(eq(campaignContactsTable.id, nextLink.linkId));
+
   const client = getTwilioClient(agentConfig.twilioAccountSid, agentConfig.twilioAuthToken);
+
+  const crmMetadata = await buildCallCrmMetadataForCampaign(campaign, userId);
 
   const [callLog] = await db.insert(callLogsTable).values({
     userId,
@@ -170,6 +265,7 @@ export async function dialNextForCampaign(
     outcome: "no_answer",
     aiModel: agentConfig.aiModel || "gpt-4o-mini",
     startedAt: new Date(),
+    crmMetadata: crmMetadata ?? null,
   }).returning();
 
   let call;
@@ -186,30 +282,36 @@ export async function dialNextForCampaign(
       ...(sipAuthUsername && sipAuthPassword ? { sipAuthUsername, sipAuthPassword } : {}),
     });
   } catch (err: any) {
-    // Mark call log as ended and failed so it doesn't block parallel dialing
+    const errMsg = err?.message || String(err);
+    logger.warn(
+      { err, campaignId: campaign.id, contactId: nextContact.id, phone: nextContact.phone, code: err?.code },
+      "Campaign dial failed for contact",
+    );
+
     await db.update(callLogsTable)
       .set({
         outcome: "no_answer",
         endedAt: new Date(),
-        transcript: `Failed to dial: ${err.message || err}`
+        transcript: `Failed to dial: ${errMsg}`,
       })
       .where(eq(callLogsTable.id, callLog.id));
 
-    // Resolve campaign contact retry status
-    if (nextLink) {
-      if (nextLink.attempts >= 1 + campaign.maxRetries) {
-        await db.update(campaignContactsTable)
-          .set({ status: "failed" })
-          .where(eq(campaignContactsTable.id, nextLink.linkId));
-      } else {
-        const nextTime = new Date(Date.now() + campaign.retryIntervalMinutes * 60 * 1000);
-        await db.update(campaignContactsTable)
-          .set({ status: "retrying", nextAttemptAt: nextTime })
-          .where(eq(campaignContactsTable.id, nextLink.linkId));
-      }
-    }
-    throw err;
+    await resolveFailedContactStatus(campaign, nextLink.linkId, nextLink.attempts, err);
+
+    // Do not throw — caller continues to next contact in parallel mode
+    return {
+      done: false,
+      dialFailed: true,
+      error: errMsg,
+      callLogId: callLog.id,
+      contact: nextContact,
+      remaining: pendingLinks.length - 1,
+    };
   }
+
+  await db.update(campaignsTable)
+    .set({ calledCount: campaign.calledCount + 1, updatedAt: new Date() })
+    .where(eq(campaignsTable.id, campaign.id));
 
   // Store the actual Call SID in the call logs
   await db.update(callLogsTable)
@@ -243,29 +345,71 @@ export async function triggerDialingForCampaign(
     return;
   }
 
-  const activeCalls = await db.select().from(callLogsTable).where(
-    and(
-      eq(callLogsTable.campaignId, campaignId),
-      isNull(callLogsTable.endedAt)
-    )
-  );
+  await releaseStaleCallingContacts(campaignId);
 
   const maxAllowed = campaign.dialParallel ? campaign.maxConcurrentCalls : 1;
-  const callsNeeded = maxAllowed - activeCalls.length;
+  let safety = 0;
 
-  if (callsNeeded <= 0) {
-    return;
-  }
+  // Fill parallel slots; failed dials return dialFailed and we immediately try the next contact.
+  while (safety++ < 50) {
+    const activeCalls = await db.select({ id: callLogsTable.id }).from(callLogsTable).where(
+      and(
+        eq(callLogsTable.campaignId, campaignId),
+        isNull(callLogsTable.endedAt),
+      ),
+    );
 
-  for (let i = 0; i < callsNeeded; i++) {
+    if (activeCalls.length >= maxAllowed) {
+      logger.debug({ campaignId, active: activeCalls.length, maxAllowed }, "Parallel dial slots full");
+      break;
+    }
+
     try {
       const result = await dialNextForCampaign(campaignId, userId, baseUrl);
+
       if (result.done) {
         break;
       }
+
+      if (result.dialFailed) {
+        continue;
+      }
+
+      // Sequential auto-dial: stop after placing one successful call
+      if (!campaign.dialParallel) {
+        break;
+      }
     } catch (err) {
-      console.error(`[triggerDialingForCampaign] Dial failed for campaign ${campaignId}:`, err);
+      logger.error({ err, campaignId }, "Campaign dial aborted — configuration error");
       break;
     }
   }
+}
+
+/** Periodically fill parallel slots and pick up retry-ready contacts for active campaigns. */
+export function startCampaignDialScheduler(): void {
+  const intervalMs = 15_000;
+
+  setInterval(async () => {
+    try {
+      const activeCampaigns = await db.select().from(campaignsTable).where(
+        and(
+          eq(campaignsTable.status, "active"),
+          eq(campaignsTable.isAutomatic, true),
+        ),
+      );
+
+      if (activeCampaigns.length === 0) return;
+
+      const baseUrl = getCampaignBaseUrl();
+
+      for (const campaign of activeCampaigns) {
+        await triggerDialingForCampaign(campaign.id, campaign.userId, baseUrl);
+      }
+    } catch (err) {
+      logger.error({ err }, "[campaign-dial-scheduler] Error");
+    }
+  }, intervalMs);
+
+  logger.info("Campaign dial scheduler started (15s interval)");
 }

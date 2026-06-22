@@ -1,9 +1,10 @@
 import { Router, type IRouter } from "express";
 import twilio from "twilio";
-import { db, agentConfigsTable, callLogsTable, contactsTable, campaignsTable, campaignContactsTable, callingScriptsTable, tenantsTable, sipTrunkConfigsTable } from "@workspace/db";
+import { db, agentConfigsTable, callLogsTable, contactsTable, campaignsTable, campaignContactsTable, callingScriptsTable, tenantsTable, sipTrunkConfigsTable, crmAgentsTable } from "@workspace/db";
 import { eq, and } from "drizzle-orm";
 import { dialNextForCampaign } from "../lib/campaign-dialer";
 import { decrypt } from "../lib/encryption";
+import { executeTransfer, hasCrmIntegration } from "../lib/transfer-manager";
 
 const router: IRouter = Router();
 
@@ -347,6 +348,89 @@ router.post("/dial/calls/:id/end", async (req, res) => {
     res.json({ success: true, message: `Call ${callId} ended` });
   } catch (err: any) {
     res.status(500).json({ error: err.message || "Failed to end call" });
+  }
+});
+
+// ── Internal: Transfer active call to CRM agent (JWT auth — used by Dialer UI) ──
+router.post("/dial/calls/:id/transfer", async (req, res) => {
+  const userId = req.userId!;
+  const callId = parseInt(req.params.id);
+
+  if (isNaN(callId)) {
+    res.status(400).json({ error: "Invalid call ID" });
+    return;
+  }
+
+  if (!(await hasCrmIntegration(userId))) {
+    res.status(400).json({
+      error: "CRM not connected. Generate an API key under Dialer → API Integration and connect your CRM.",
+    });
+    return;
+  }
+
+  const call = await db.query.callLogsTable.findFirst({
+    where: and(eq(callLogsTable.id, callId), eq(callLogsTable.userId, userId)),
+  });
+
+  if (!call) {
+    res.status(404).json({ error: "Call not found" });
+    return;
+  }
+
+  if (call.endedAt) {
+    res.status(400).json({ error: "Call has already ended" });
+    return;
+  }
+
+  if (!call.callSid) {
+    res.status(400).json({ error: "Call SID not available — call may not have connected yet" });
+    return;
+  }
+
+  const { crmAgentId, reason, transferType = "cold", briefingMessage } = req.body;
+
+  if (!crmAgentId) {
+    res.status(400).json({ error: "crmAgentId is required" });
+    return;
+  }
+
+  const agent = await db.query.crmAgentsTable.findFirst({
+    where: and(
+      eq(crmAgentsTable.userId, userId),
+      eq(crmAgentsTable.crmAgentId, crmAgentId),
+    ),
+  });
+
+  if (!agent) {
+    res.status(404).json({ error: `CRM agent ${crmAgentId} not found` });
+    return;
+  }
+
+  const targetPhone = agent.phone || agent.sipUri;
+  if (!targetPhone) {
+    res.status(400).json({ error: `CRM agent ${crmAgentId} has no phone or SIP URI configured` });
+    return;
+  }
+
+  const result = await executeTransfer(userId, {
+    callId,
+    callSid: call.callSid,
+    transferTo: targetPhone,
+    reason: reason || "Manual transfer from dialer",
+    transferType,
+    briefingMessage,
+    crmAgentId,
+  });
+
+  if (result.success) {
+    res.json({
+      success: true,
+      conferenceSid: result.conferenceSid,
+      crmAgentId,
+      message: `Call ${callId} transfer initiated to ${agent.name}. CRM will receive transcript and contact details.`,
+    });
+  } else {
+    res.status(500).json({ success: false, error: result.error });
   }
 });
 

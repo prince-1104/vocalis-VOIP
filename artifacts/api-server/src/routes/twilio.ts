@@ -6,9 +6,10 @@ import { openai } from "@workspace/integrations-openai-ai-server";
 import { randomUUID } from "crypto";
 import { crmEventBus } from "../lib/crm-event-bus";
 import { classifyIntent, shouldTransfer, detectHumanRequest, type TransferRules } from "../lib/intent-classifier";
-import { findBestAgent } from "../lib/transfer-manager";
+import { findBestAgent, buildTransferEventData } from "../lib/transfer-manager";
 import { logLLMCost, logTTSCost, resolveTenantIdForOwner } from "../lib/cost-logger";
 import { dialNextForCampaign, triggerDialingForCampaign } from "../lib/campaign-dialer";
+import { loadCampaignTransferRulesForCall } from "../lib/campaign-transfer";
 
 const router: IRouter = Router();
 
@@ -131,10 +132,22 @@ async function getCallMeta(callLogId: string): Promise<CallMeta | null> {
     }
   }
 
+  let crmMetadata = log.crmMetadata as Record<string, unknown> | undefined;
+  if (log.campaignId && !crmMetadata?.__transferRules) {
+    const rules = await loadCampaignTransferRulesForCall(log.campaignId, log.userId);
+    if (rules) {
+      crmMetadata = {
+        ...(crmMetadata || {}),
+        __transferRules: rules,
+        __campaignId: log.campaignId,
+      };
+    }
+  }
+
   const meta: CallMeta = {
     userId: log.userId,
     callSid: log.callSid ?? undefined,
-    crmMetadata: log.crmMetadata as Record<string, unknown> | undefined,
+    crmMetadata,
     liveTranscript: (log.liveTranscript as any) || [],
     scriptId,
   };
@@ -1167,17 +1180,30 @@ router.post("/twilio/voice", async (req, res) => {
           if (targetPhone) {
             console.log(`[twilio/voice] Auto-transfer triggered: intent=${intentResult.intent} reason="${decision.reason}" target=${targetPhone}`);
 
+            const callLogRow = await db.query.callLogsTable.findFirst({
+              where: eq(callLogsTable.id, numId),
+            });
+
+            const transferringData = userId && callLogRow
+              ? await buildTransferEventData(callLogRow, userId, {
+                  transferTo: targetPhone,
+                  reason: decision.reason,
+                  intent: intentResult.intent,
+                  crmAgentId: agentId,
+                })
+              : {
+                  transferTo: targetPhone,
+                  reason: decision.reason,
+                  intent: intentResult.intent,
+                  crmAgentId: agentId,
+                };
+
             crmEventBus.emitCallEvent({
               type: "call.transferring",
               callId: numId,
               callSid: callMeta.callSid || undefined,
               userId: userId || undefined,
-              data: {
-                transferTo: targetPhone,
-                reason: decision.reason,
-                intent: intentResult.intent,
-                crmAgentId: agentId,
-              },
+              data: transferringData,
               metadata: meta,
               timestamp: new Date().toISOString(),
             });
@@ -1217,13 +1243,29 @@ router.post("/twilio/voice", async (req, res) => {
                 statusCallback: `${baseUrl}/api/crm/agent-call-status?callId=${numId}`,
                 statusCallbackMethod: "POST",
                 statusCallbackEvent: ["completed", "no-answer", "busy", "failed"],
-              }).then(agentCall => {
+              }).then(async agentCall => {
+                const transferredData = userId && callLogRow
+                  ? await buildTransferEventData(callLogRow, userId, {
+                      conferenceSid: conferenceName,
+                      agentCallSid: agentCall.sid,
+                      transferTo: targetPhone,
+                      reason: decision.reason,
+                      crmAgentId: agentId,
+                    })
+                  : {
+                      conferenceSid: conferenceName,
+                      agentCallSid: agentCall.sid,
+                      transferTo: targetPhone,
+                      reason: decision.reason,
+                      crmAgentId: agentId,
+                    };
+
                 crmEventBus.emitCallEvent({
                   type: "call.transferred",
                   callId: numId,
                   callSid: callMeta.callSid || undefined,
                   userId: userId || undefined,
-                  data: { conferenceSid: conferenceName, agentCallSid: agentCall.sid, transferTo: targetPhone },
+                  data: transferredData,
                   metadata: meta,
                   timestamp: new Date().toISOString(),
                 });
