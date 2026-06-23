@@ -70,6 +70,31 @@ export async function syncDatabase() {
       );
     `);
 
+    // Ensure external_crm_configs exists
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS "external_crm_configs" (
+        "id" serial PRIMARY KEY NOT NULL,
+        "user_id" integer NOT NULL REFERENCES "users"("id") ON DELETE CASCADE,
+        "name" text NOT NULL,
+        "is_enabled" boolean DEFAULT true NOT NULL,
+        "lookup_url" text NOT NULL,
+        "http_method" text DEFAULT 'GET' NOT NULL,
+        "auth_type" text DEFAULT 'bearer' NOT NULL,
+        "auth_value" text,
+        "auth_header_name" text,
+        "phone_param_name" text DEFAULT 'phone' NOT NULL,
+        "phone_param_location" text DEFAULT 'query' NOT NULL,
+        "response_mapping" jsonb,
+        "use_raw_response" boolean DEFAULT false NOT NULL,
+        "max_context_chars" integer DEFAULT 2000 NOT NULL,
+        "timeout_ms" integer DEFAULT 3000 NOT NULL,
+        "cache_ttl_seconds" integer DEFAULT 300 NOT NULL,
+        "created_at" timestamp DEFAULT now() NOT NULL,
+        "updated_at" timestamp DEFAULT now() NOT NULL,
+        UNIQUE("user_id")
+      );
+    `);
+
     // 3. Add columns that might be missing from older schema versions
     const alterQueries = [
       'ALTER TABLE "api_cost_logs" ADD COLUMN IF NOT EXISTS "context" text;',

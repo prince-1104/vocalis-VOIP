@@ -21,6 +21,7 @@ import adminCostsRouter from "./routes/admin-costs";
 import invoicesRouter, { checkAndMarkOverdueInvoices } from "./routes/invoices";
 import widgetRouter from "./routes/widget";
 import crmRouter, { crmAdminRouter } from "./routes/crm";
+import externalCrmRouter from "./routes/external-crm";
 import { startWebhookDispatcher } from "./lib/webhook-dispatcher";
 import { startCampaignDialScheduler } from "./lib/campaign-dialer";
 
@@ -71,6 +72,7 @@ app.use("/api", requireRole("admin"), scriptsRouter);
 
 app.use("/api", requireRole("admin"), dialRouter);
 app.use("/api", requireRole("admin"), crmAdminRouter);  // CRM API key management
+app.use("/api", requireRole("admin"), externalCrmRouter);
 
 app.use("/api", requireSuperadmin, adminRouter);
 app.use("/api", requireSuperadmin, adminCostsRouter);

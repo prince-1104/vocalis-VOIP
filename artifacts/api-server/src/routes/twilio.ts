@@ -10,6 +10,7 @@ import { findBestAgent, buildTransferEventData } from "../lib/transfer-manager";
 import { logLLMCost, logTTSCost, resolveTenantIdForOwner } from "../lib/cost-logger";
 import { dialNextForCampaign, triggerDialingForCampaign, tryMarkCampaignCompleted } from "../lib/campaign-dialer";
 import { loadCampaignTransferRulesForCall } from "../lib/campaign-transfer";
+import { fetchExternalCrmData, type ExternalCrmContext } from "../lib/external-crm-lookup";
 
 const router: IRouter = Router();
 
@@ -66,6 +67,7 @@ interface CallMeta {
   crmMetadata?: Record<string, unknown>;
   liveTranscript: Array<{ role: string; content: string; timestamp: string }>;
   scriptId?: number | null;
+  externalCrmContext?: ExternalCrmContext | null;
 }
 const callMetaCache = new Map<string, CallMeta>();
 
@@ -77,12 +79,12 @@ async function getCachedAgentConfig(userId: number): Promise<any> {
   return data;
 }
 
-async function getCachedSystemPrompt(userId: number, agentConfig: any, scriptId?: number | null): Promise<string> {
-  // Cache key includes language and scriptId so prompt configurations don't collide
-  const key = `${userId}:${agentConfig.language ?? "en-US"}:${scriptId ?? "default"}`;
+async function getCachedSystemPrompt(userId: number, agentConfig: any, scriptId?: number | null, externalCrmContext?: ExternalCrmContext | null): Promise<string> {
+  const crmSuffix = externalCrmContext ? `:crm:${externalCrmContext.fetchedAt}` : "";
+  const key = `${userId}:${agentConfig.language ?? "en-US"}:${scriptId ?? "default"}${crmSuffix}`;
   const cached = systemPromptCache.get(key);
   if (cached && Date.now() - cached.fetchedAt < SYSTEM_PROMPT_CACHE_TTL) return cached.prompt;
-  const prompt = await buildSystemPrompt(userId, agentConfig, scriptId);
+  const prompt = await buildSystemPrompt(userId, agentConfig, scriptId, externalCrmContext);
   systemPromptCache.set(key, { prompt, fetchedAt: Date.now() });
   return prompt;
 }
@@ -144,12 +146,18 @@ async function getCallMeta(callLogId: string): Promise<CallMeta | null> {
     }
   }
 
+  let externalCrmContext: ExternalCrmContext | null = null;
+  if (log.phone) {
+    externalCrmContext = await fetchExternalCrmData(log.userId, log.phone).catch(() => null);
+  }
+
   const meta: CallMeta = {
     userId: log.userId,
     callSid: log.callSid ?? undefined,
     crmMetadata,
     liveTranscript: (log.liveTranscript as any) || [],
     scriptId,
+    externalCrmContext,
   };
   callMetaCache.set(callLogId, meta);
   return meta;
@@ -242,7 +250,7 @@ function buildScriptInstruction(language?: string | null): string {
   return "";
 }
 
-async function buildSystemPrompt(userId: number, agentConfig: any, scriptId?: number | null): Promise<string> {
+async function buildSystemPrompt(userId: number, agentConfig: any, scriptId?: number | null, externalCrmContext?: ExternalCrmContext | null): Promise<string> {
   const [trainingData, script] = await Promise.all([
     db.select().from(trainingDataTable).where(eq(trainingDataTable.userId, userId)).limit(KB_MAX_ENTRIES),
     resolveActiveScript(userId, scriptId),
@@ -272,6 +280,31 @@ async function buildSystemPrompt(userId: number, agentConfig: any, scriptId?: nu
       system += `• [${td.type.replace(/_/g, " ").toUpperCase()}] ${td.title}: ${snippet}\n`;
     }
     system += "\n";
+  }
+
+  if (externalCrmContext) {
+    system += `CUSTOMER CONTEXT (fetched from CRM for the current caller):\n`;
+    if (externalCrmContext.customerName) {
+      system += `• Customer Name: ${externalCrmContext.customerName}\n`;
+    }
+    if (externalCrmContext.email) {
+      system += `• Email: ${externalCrmContext.email}\n`;
+    }
+    if (externalCrmContext.accountId) {
+      system += `• Account ID: ${externalCrmContext.accountId}\n`;
+    }
+    if (externalCrmContext.recentOrders) {
+      system += `• Recent Orders/Activity: ${externalCrmContext.recentOrders}\n`;
+    }
+    if (externalCrmContext.rawData && Object.keys(externalCrmContext.rawData).length > 0) {
+      for (const [key, val] of Object.entries(externalCrmContext.rawData)) {
+        const display = typeof val === "object" ? JSON.stringify(val) : String(val);
+        system += `• ${key}: ${display}\n`;
+      }
+    }
+    system += `\nIMPORTANT: Use the above customer context to personalize the conversation. ` +
+      `Address the customer by name if available. Reference their orders or account details when relevant. ` +
+      `Do NOT read out raw IDs or technical fields unless the customer asks.\n\n`;
   }
 
   if (script) {
@@ -1010,13 +1043,24 @@ router.post("/twilio/inbound", async (req, res) => {
   // ── Pre-warm caches for the first voice turn (fire-and-forget) ──────
   // By the time the caller finishes speaking (2–5s), these will be ready.
   const callLogIdStr = String(callLog.id);
+  const callerPhone = req.body.From || "unknown";
   callMetaCache.set(callLogIdStr, {
     userId,
     callSid: req.body.CallSid ?? undefined,
     crmMetadata: undefined,
     liveTranscript: [],
     scriptId: script?.id || null,
+    externalCrmContext: null,
   });
+
+  // Fire-and-forget: fetch external CRM data by caller phone number
+  fetchExternalCrmData(userId, callerPhone).then(crmCtx => {
+    const meta = callMetaCache.get(callLogIdStr);
+    if (meta && crmCtx) {
+      meta.externalCrmContext = crmCtx;
+    }
+  }).catch(() => {});
+
   getCachedSystemPrompt(userId, { ...(agentConfig || {}), language: agentConfig?.language || "en-US" }, script?.id || null).catch(() => {});
 
   attachCallStatusCallback(twiml, baseUrl, callLog.id);
@@ -1311,7 +1355,7 @@ router.post("/twilio/voice", async (req, res) => {
       ? { ...(agentConfig || {}), language: lang }
       : (agentConfig || {});
     // ── Cached system prompt — no DB queries on warm turns ───────────
-    const basePrompt = await getCachedSystemPrompt(userId, promptConfig, callMeta?.scriptId);
+    const basePrompt = await getCachedSystemPrompt(userId, promptConfig, callMeta?.scriptId, callMeta?.externalCrmContext);
 
     let systemPrompt = basePrompt;
     if (intentTraining && intentTraining.trainingContent) {
@@ -1510,7 +1554,7 @@ router.post("/twilio/voice-indic", async (req, res) => {
   } else {
     // ── Cached system prompt + intent training lookup in parallel ───────
     const [systemPrompt, intentTraining] = await Promise.all([
-      getCachedSystemPrompt(userId, { ...(agentConfig || {}), language: lang }, callMeta?.scriptId),
+      getCachedSystemPrompt(userId, { ...(agentConfig || {}), language: lang }, callMeta?.scriptId, callMeta?.externalCrmContext),
       detectedIntent !== "general_question"
         ? db.query.intentTrainingTable.findFirst({
             where: and(
@@ -1804,7 +1848,14 @@ router.post("/twilio/widget-voice", async (req, res) => {
     crmMetadata: undefined,
     liveTranscript: [],
     scriptId: script?.id || null,
+    externalCrmContext: null,
   });
+
+  fetchExternalCrmData(userId, callerIdentity).then(crmCtx => {
+    const meta = callMetaCache.get(callLogIdStr);
+    if (meta && crmCtx) meta.externalCrmContext = crmCtx;
+  }).catch(() => {});
+
   getCachedSystemPrompt(userId, { ...(agentConfig || {}), language: configuredLang }, script?.id || null).catch(() => {});
 
   attachCallStatusCallback(twiml, baseUrl, callLog.id);

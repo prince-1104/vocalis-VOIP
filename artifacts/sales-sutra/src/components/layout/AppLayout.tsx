@@ -17,6 +17,7 @@ import {
   Shield,
   Receipt,
   Globe,
+  Database,
   Loader2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -39,6 +40,7 @@ const ALL_NAV_ITEMS = [
   { href: "/widget", label: "Web Widget", icon: Globe, roles: ["admin", "superadmin"] },
   { href: "/training", label: "Training", icon: GraduationCap, roles: ["admin", "superadmin"] },
   { href: "/scripts", label: "Scripts", icon: ScrollText, roles: ["admin", "superadmin"] },
+  { href: "/external-crm", label: "External CRM", icon: Database, roles: ["admin", "superadmin"] },
   { href: "/analytics", label: "Analytics", icon: BarChart3, roles: ["admin", "manager", "superadmin"] },
   { href: "/billing", label: "Billing", icon: Receipt, roles: ["admin", "manager", "superadmin"] },
 ];

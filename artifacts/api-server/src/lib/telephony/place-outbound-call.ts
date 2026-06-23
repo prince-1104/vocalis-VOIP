@@ -3,6 +3,8 @@ import { db, callLogsTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
 import { exotelConnectToFlow } from "./exotel-client";
 import { resolveTelephonyForUser, TelephonyNotConfiguredError } from "./resolve-telephony";
+import { fetchExternalCrmData } from "../external-crm-lookup";
+import { callMetaCache } from "../../routes/twilio";
 
 export interface PlaceOutboundCallParams {
   userId: number;
@@ -44,6 +46,16 @@ export async function placeOutboundCall(params: PlaceOutboundCallParams): Promis
     crmContactId: params.crmContactId ?? null,
     crmMetadata: params.crmMetadata ?? null,
   }).returning();
+
+  // Fire-and-forget: pre-fetch external CRM data so it's available when the media stream connects
+  fetchExternalCrmData(userId, phone).then(crmCtx => {
+    if (!crmCtx) return;
+    const key = String(callLog.id);
+    const meta = callMetaCache.get(key);
+    if (meta) {
+      meta.externalCrmContext = crmCtx;
+    }
+  }).catch(() => {});
 
   if (telephony.provider === "EXOTEL") {
     const statusCallback = `${baseUrl}/api/exotel/status?callLogId=${callLog.id}`;

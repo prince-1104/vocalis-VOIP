@@ -27,6 +27,7 @@ import AdminAlerts from "@/pages/superadmin/AdminAlerts";
 import AdminPricing from "@/pages/superadmin/AdminPricing";
 import AdminSettings from "@/pages/superadmin/AdminSettings";
 import Billing from "@/pages/Billing";
+import ExternalCrm from "@/pages/ExternalCrm";
 import NotFound from "@/pages/not-found";
 import WidgetTest from "@/pages/WidgetTest";
 import WidgetDemo from "@/pages/WidgetDemo";
@@ -157,6 +158,7 @@ function Router() {
               <Route path="/training" component={Training} />
               <Route path="/scripts" component={Scripts} />
               <Route path="/analytics" component={Analytics} />
+              <Route path="/external-crm" component={ExternalCrm} />
               <Route path="/billing" component={Billing} />
               <Route component={NotFound} />
             </Switch>

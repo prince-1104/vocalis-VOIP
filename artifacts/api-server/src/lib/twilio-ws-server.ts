@@ -1220,7 +1220,7 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
         }
       }
 
-      const basePrompt = await getCachedSystemPrompt(userId, { ...(agentConfig || {}), language: lang }, callMeta.scriptId);
+      const basePrompt = await getCachedSystemPrompt(userId, { ...(agentConfig || {}), language: lang }, callMeta.scriptId, callMeta.externalCrmContext);
       let systemPrompt = basePrompt;
 
       const intentTraining = intentResult.intent !== "general_question"
