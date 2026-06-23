@@ -20,6 +20,14 @@ import { hangupCall } from "./telephony/hangup-call";
 import { registerExotelStream, unregisterExotelStream } from "./telephony/exotel-stream-registry";
 import OpenAI from "openai";
 import { buildWhisperPrompt, normalizePhoneTranscript } from "./phone-stt-normalize";
+import {
+  getActiveLanguageMenu,
+  buildLanguageMenuPrompt,
+  resolveLanguageFromDigit,
+  resolveCallLanguage,
+  shouldAutoDetectLanguage,
+  greetingForLanguage,
+} from "./language-menu";
 
 import {
   getCallMeta,
@@ -600,8 +608,16 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
 
   const { userId, agentConfig, script, callMeta } = config;
   const configuredLang = agentConfig?.language || "en-US";
+  const languageMenuConfig = getActiveLanguageMenu(agentConfig || {});
   const aiModel = agentConfig?.aiModel || "gpt-4o-mini";
   const voice = agentConfig?.voice || "nova";
+
+  let lockedCallLang: string | null = null;
+  let languageMenuPhase = false;
+  let languageMenuTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const getCallLang = (detected?: string) =>
+    resolveCallLanguage(configuredLang, lockedCallLang, detected);
 
   let streamSid = "";
   let callSid = "";
@@ -650,7 +666,7 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
 
     const closingMessage = transferRules?.transferMessage || DEFAULT_CAMPAIGN_CLOSING_MESSAGE;
     const callLogIdNum = parseInt(callLogId, 10);
-    const lang = configuredLang;
+    const lang = getCallLang();
 
     logger.info({ callLogId, reason }, "Campaign call limit reached — ending with closing message");
     player?.clear();
@@ -710,16 +726,27 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
     ws.close();
   };
 
-  // Initial greeting
-  const greeting = script?.openingLine || agentConfig?.greeting || "Hi, thank you for calling. How can I help you today?";
+  // Initial greeting (may be replaced after DTMF language menu)
+  let currentGreeting = script?.openingLine || agentConfig?.greeting || "Hi, thank you for calling. How can I help you today?";
+
+  const clearLanguageMenuTimer = () => {
+    if (languageMenuTimer) {
+      clearTimeout(languageMenuTimer);
+      languageMenuTimer = null;
+    }
+  };
 
   const playGreeting = async () => {
     try {
       isGenerating = true;
       greetingCancelled = false;
 
-      logger.info({ callLogId, greeting }, "Generating greeting TTS...");
-      const audio = await generateSentenceTTS(greeting, configuredLang, voice);
+      const greetingLang = lockedCallLang && lockedCallLang !== "auto"
+        ? lockedCallLang
+        : configuredLang;
+
+      logger.info({ callLogId, greeting: currentGreeting, greetingLang }, "Generating greeting TTS...");
+      const audio = await generateSentenceTTS(currentGreeting, greetingLang, voice);
 
       if (!greetingCancelled) {
         isGenerating = false;
@@ -736,11 +763,11 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
         player?.enqueue(audio);
         logger.info({ callLogId, bytes: audio.length }, "Greeting audio enqueued");
 
-        history.push({ role: "assistant", content: greeting });
+        history.push({ role: "assistant", content: currentGreeting });
 
         const updatedTranscript = [
           ...callMeta.liveTranscript,
-          { role: "assistant", content: greeting, timestamp: new Date().toISOString() }
+          { role: "assistant", content: currentGreeting, timestamp: new Date().toISOString() }
         ];
         callMeta.liveTranscript = updatedTranscript;
 
@@ -766,6 +793,81 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
     } catch (err) {
       logger.error({ err }, "Error playing greeting");
       isGenerating = false;
+    }
+  };
+
+  const finalizeLanguageSelection = async (selectedLang: string, source: string) => {
+    if (!languageMenuPhase || !languageMenuConfig) return;
+    clearLanguageMenuTimer();
+    languageMenuPhase = false;
+    lockedCallLang = selectedLang;
+
+    const effectiveLang = selectedLang === "auto" ? "en-US" : selectedLang;
+    currentGreeting = greetingForLanguage(
+      effectiveLang,
+      script?.openingLine,
+      agentConfig?.greeting,
+    );
+
+    logger.info({ callLogId, selectedLang, source }, "Call language locked from menu");
+
+    player?.clear();
+    if (streamSid) {
+      ws.send(JSON.stringify({ event: "clear", streamSid }));
+    }
+    isSpeaking = false;
+    isGenerating = false;
+    greetingPhase = true;
+
+    await playGreeting();
+  };
+
+  const handleLanguageMenuDigit = (digit: string) => {
+    if (!languageMenuConfig) return;
+    const selected = resolveLanguageFromDigit(languageMenuConfig, digit);
+    if (selected) {
+      finalizeLanguageSelection(selected, `dtmf:${digit}`).catch(err =>
+        logger.error({ err, callLogId, digit }, "Language menu DTMF handling failed"),
+      );
+    }
+  };
+
+  const playLanguageMenu = async () => {
+    if (!languageMenuConfig) {
+      await playGreeting();
+      return;
+    }
+
+    try {
+      languageMenuPhase = true;
+      greetingPhase = true;
+      isGenerating = true;
+      greetingCancelled = false;
+
+      const prompt = buildLanguageMenuPrompt(languageMenuConfig);
+      logger.info({ callLogId, prompt }, "Playing language menu prompt");
+      const audio = await generateSentenceTTS(prompt, "en-US", voice);
+
+      if (!greetingCancelled && languageMenuPhase) {
+        isGenerating = false;
+        isSpeaking = true;
+        player?.setOnComplete(() => {
+          isSpeaking = false;
+        });
+        player?.enqueue(audio);
+
+        languageMenuTimer = setTimeout(() => {
+          const defaultLang = languageMenuConfig.defaultLanguage || "en-US";
+          finalizeLanguageSelection(defaultLang, "timeout").catch(err =>
+            logger.error({ err, callLogId }, "Language menu timeout handling failed"),
+          );
+        }, (languageMenuConfig.timeoutSeconds || 12) * 1000);
+      }
+    } catch (err) {
+      logger.error({ err, callLogId }, "Error playing language menu — falling back to greeting");
+      languageMenuPhase = false;
+      clearLanguageMenuTimer();
+      await playGreeting();
     }
   };
 
@@ -806,11 +908,26 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
           logger.info({ callLogId, remainingMs }, "Campaign duration limit timer started");
         }
 
-        playGreeting();
+        playLanguageMenu();
+      }
+
+      if (data.event === "dtmf") {
+        const digit = data.dtmf?.digit ?? data.dtmf?.digits?.[0];
+        if (digit && languageMenuPhase) {
+          greetingCancelled = true;
+          player?.clear();
+          if (streamSid) {
+            ws.send(JSON.stringify({ event: "clear", streamSid }));
+          }
+          isSpeaking = false;
+          isGenerating = false;
+          handleLanguageMenuDigit(String(digit));
+        }
       }
 
       if (data.event === "media") {
         if (!player) return;
+        if (languageMenuPhase) return;
 
         const payload = data.media.payload;
         const rawBuffer = Buffer.from(payload, "base64");
@@ -895,6 +1012,7 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
       if (data.event === "stop") {
         logger.info({ callLogId }, "Twilio Media Stream stopped");
         if (limitTimer) clearTimeout(limitTimer);
+        clearLanguageMenuTimer();
         player?.clear();
         finalizeCallLog(parseInt(callLogId, 10), callStartedAt).catch(err =>
           logger.error({ err, callLogId }, "Failed to finalize call log on stream stop")
@@ -908,6 +1026,7 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
   ws.on("close", () => {
     logger.info({ callLogId }, "Twilio Media Stream WebSocket closed");
     if (limitTimer) clearTimeout(limitTimer);
+    clearLanguageMenuTimer();
     if (streamProvider === "exotel") unregisterExotelStream(callLogId);
     player?.clear();
     finalizeCallLog(parseInt(callLogId, 10), callStartedAt).catch(err =>
@@ -937,6 +1056,12 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
     activeGenerationId = genId;
     isGenerating = true;
 
+    if (languageMenuPhase) {
+      isProcessingTurn = false;
+      isGenerating = false;
+      return;
+    }
+
     if (greetingPhase && !greetingCancelled) {
       deferredUtterance = pcmSamples;
       logger.info({ callLogId }, "Deferring utterance until greeting completes");
@@ -947,26 +1072,28 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
 
     try {
       const wavBuffer = createWavBuffer(pcmSamples, 8000);
-      let lang = configuredLang;
-      logger.info({ callLogId, lang }, "Transcribing audio...");
+      let sttLang = getCallLang();
+      if (sttLang === "auto") sttLang = "en-US";
+      let lang = sttLang;
+      logger.info({ callLogId, sttLang, lockedCallLang }, "Transcribing audio...");
       let transcript = "";
 
-      const useSarvamStt = isIndianLanguage(lang);
+      const useSarvamStt = isIndianLanguage(sttLang);
       if (useSarvamStt) {
-        transcript = await callSarvamSTT(wavBuffer, "audio/wav", lang);
+        transcript = await callSarvamSTT(wavBuffer, "audio/wav", sttLang);
       } else {
         const file = await toFile(wavBuffer, "audio.wav", { type: "audio/wav" });
         const res = await openai.audio.transcriptions.create({
           file,
           model: "whisper-1",
-          language: lang === "auto" ? undefined : lang.split("-")[0],
-          prompt: buildWhisperPrompt(history, greeting),
+          language: sttLang === "auto" ? undefined : sttLang.split("-")[0],
+          prompt: buildWhisperPrompt(history, currentGreeting),
         });
         transcript = res.text;
       }
 
       const rawTranscript = transcript;
-      transcript = normalizePhoneTranscript(transcript, history, greeting);
+      transcript = normalizePhoneTranscript(transcript, history, currentGreeting);
       if (transcript !== rawTranscript) {
         logger.info({ callLogId, rawTranscript, transcript }, "STT transcript corrected");
       }
@@ -983,7 +1110,7 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
         return;
       }
 
-      if (configuredLang === "auto") {
+      if (shouldAutoDetectLanguage(configuredLang, lockedCallLang)) {
         lang = detectCallLanguage(transcript);
         logger.info({ callLogId, lang }, "Language auto-detected");
       }

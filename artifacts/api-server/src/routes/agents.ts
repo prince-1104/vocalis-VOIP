@@ -69,6 +69,7 @@ router.put("/agents", async (req, res) => {
     telephonyProvider, telephonyProviderName, telephonyApiKey, telephonyApiSecret, telephonyAppId,
     greeting, personality, maxCallDuration, voicemailMessage, businessHoursOnly, aiModel,
     widgetEnabled, widgetCampaignId, widgetVoiceEnabled,
+    languageMenuConfig,
   } = req.body;
 
   const updateData: any = { updatedAt: new Date() };
@@ -86,6 +87,7 @@ router.put("/agents", async (req, res) => {
   if (widgetEnabled !== undefined) updateData.widgetEnabled = widgetEnabled;
   if (widgetCampaignId !== undefined) updateData.widgetCampaignId = widgetCampaignId === null ? null : Number(widgetCampaignId);
   if (widgetVoiceEnabled !== undefined) updateData.widgetVoiceEnabled = widgetVoiceEnabled;
+  if (languageMenuConfig !== undefined) updateData.languageMenuConfig = languageMenuConfig;
 
   // Defensive fallback: if a specific premium AI model is chosen, but language is somehow set to "auto"
   // (e.g., due to frontend cache or state mismatch), force the language to "en-US" to disable Auto-AI Mode.

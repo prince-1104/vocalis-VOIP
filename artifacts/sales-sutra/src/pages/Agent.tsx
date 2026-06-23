@@ -53,6 +53,42 @@ interface AgentFormValues {
   telephonyAppId: string;
 }
 
+interface LanguageMenuOption {
+  digit: string;
+  language: string;
+  label: string;
+}
+
+interface LanguageMenuConfig {
+  enabled: boolean;
+  promptText?: string | null;
+  options: LanguageMenuOption[];
+  timeoutSeconds: number;
+  defaultLanguage: string;
+}
+
+const DEFAULT_LANGUAGE_MENU: LanguageMenuConfig = {
+  enabled: false,
+  promptText: null,
+  options: [
+    { digit: "1", language: "hi-IN", label: "Hindi" },
+    { digit: "2", language: "en-US", label: "English" },
+    { digit: "3", language: "auto", label: "Other languages" },
+  ],
+  timeoutSeconds: 12,
+  defaultLanguage: "en-US",
+};
+
+const LANGUAGE_MENU_LANGUAGES = [
+  { value: "hi-IN", label: "Hindi" },
+  { value: "en-US", label: "English" },
+  { value: "auto", label: "Auto-detect (other languages)" },
+  { value: "kn-IN", label: "Kannada" },
+  { value: "ta-IN", label: "Tamil" },
+  { value: "te-IN", label: "Telugu" },
+  { value: "mr-IN", label: "Marathi" },
+];
+
 function WebhookUrl({ label, path }: { label: string; path: string }) {
   const [copied, setCopied] = useState(false);
   const baseUrl = window.location.origin;
@@ -104,7 +140,127 @@ function TelephonyReadOnly({ configured, phoneNumber, provider }: { configured: 
   );
 }
 
-function AutoModePanel() {
+function LanguageMenuPanel({
+  config,
+  onChange,
+}: {
+  config: LanguageMenuConfig;
+  onChange: (config: LanguageMenuConfig) => void;
+}) {
+  const updateOption = (index: number, field: keyof LanguageMenuOption, value: string) => {
+    const options = config.options.map((opt, i) =>
+      i === index ? { ...opt, [field]: value } : opt,
+    );
+    onChange({ ...config, options });
+  };
+
+  return (
+    <div className="rounded-xl border border-cyan-500/30 bg-gradient-to-br from-cyan-500/10 via-slate-500/5 to-violet-500/10 p-5 space-y-4">
+      <div className="flex items-center gap-2">
+        <Phone className="w-4 h-4 text-cyan-300" />
+        <span className="text-sm font-semibold text-cyan-200">Phone Keypad Language Menu</span>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={config.enabled}
+          onClick={() => onChange({ ...config, enabled: !config.enabled })}
+          className={`ml-auto relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${
+            config.enabled ? "bg-cyan-500" : "bg-white/15"
+          }`}
+        >
+          <span
+            className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow transition ${
+              config.enabled ? "translate-x-[22px]" : "translate-x-0.5"
+            }`}
+          />
+        </button>
+      </div>
+
+      <p className="text-xs text-muted-foreground leading-relaxed">
+        At the start of each call, callers hear a short prompt and press a number to choose their language.
+        Once selected, the entire conversation stays in that language (Hindi uses Sarvam STT + DeepSeek + Bulbul TTS).
+      </p>
+
+      {config.enabled && (
+        <div className="space-y-4">
+          <div className="space-y-2">
+            <label className="text-xs font-medium text-muted-foreground">Custom prompt (optional)</label>
+            <Textarea
+              value={config.promptText || ""}
+              onChange={(e) => onChange({ ...config, promptText: e.target.value || null })}
+              placeholder="Hindi ke liye 1 dabayein. For English press 2. For other languages press 3."
+              className="bg-background/50 border-white/10 min-h-[80px] text-sm"
+            />
+            <p className="text-[10px] text-muted-foreground">Leave blank to use the default bilingual prompt.</p>
+          </div>
+
+          <div className="space-y-2">
+            <label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Keypad options</label>
+            {config.options.map((opt, i) => (
+              <div key={i} className="grid grid-cols-[60px_1fr_1fr] gap-2 items-center">
+                <Input
+                  value={opt.digit}
+                  onChange={(e) => updateOption(i, "digit", e.target.value.replace(/\D/g, "").slice(0, 1))}
+                  className="bg-background/50 border-white/10 text-center"
+                  maxLength={1}
+                />
+                <select
+                  value={opt.language}
+                  onChange={(e) => updateOption(i, "language", e.target.value)}
+                  className={selectCls}
+                >
+                  {LANGUAGE_MENU_LANGUAGES.map((l) => (
+                    <option key={l.value} value={l.value}>{l.label}</option>
+                  ))}
+                </select>
+                <Input
+                  value={opt.label}
+                  onChange={(e) => updateOption(i, "label", e.target.value)}
+                  placeholder="Label spoken in prompt"
+                  className="bg-background/50 border-white/10"
+                />
+              </div>
+            ))}
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="space-y-2">
+              <label className="text-xs font-medium text-muted-foreground">Timeout (seconds)</label>
+              <Input
+                type="number"
+                min={5}
+                max={30}
+                value={config.timeoutSeconds}
+                onChange={(e) => onChange({ ...config, timeoutSeconds: Math.min(30, Math.max(5, Number(e.target.value) || 12)) })}
+                className="bg-background/50 border-white/10"
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-xs font-medium text-muted-foreground">Default if no key pressed</label>
+              <select
+                value={config.defaultLanguage}
+                onChange={(e) => onChange({ ...config, defaultLanguage: e.target.value })}
+                className={selectCls}
+              >
+                {LANGUAGE_MENU_LANGUAGES.filter((l) => l.value !== "auto").map((l) => (
+                  <option key={l.value} value={l.value}>{l.label}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AutoModePanel({
+  languageMenuConfig,
+  onLanguageMenuChange,
+}: {
+  languageMenuConfig: LanguageMenuConfig;
+  onLanguageMenuChange: (config: LanguageMenuConfig) => void;
+}) {
   return (
     <div className="rounded-xl border border-fuchsia-500/30 bg-gradient-to-br from-fuchsia-500/10 via-violet-500/5 to-cyan-500/10 p-5 space-y-4">
       <div className="flex items-center gap-2">
@@ -155,11 +311,12 @@ function AutoModePanel() {
       <div className="flex items-start gap-2 text-[11px] text-muted-foreground bg-black/30 border border-white/5 rounded-lg p-3">
         <Languages className="w-3.5 h-3.5 text-fuchsia-300 mt-0.5 shrink-0" />
         <div>
-          Detection runs on every turn — if the user switches mid-conversation (e.g. starts in English then
-          switches to Kannada), the pipeline switches automatically. Tamil, Telugu, and Marathi are also
-          supported with Sarvam-M + Bulbul v3.
+          Enable the phone keypad menu below to lock language for the whole call (recommended for Hindi).
+          Without it, detection runs per turn — if the caller switches mid-conversation, the pipeline adapts.
         </div>
       </div>
+
+      <LanguageMenuPanel config={languageMenuConfig} onChange={onLanguageMenuChange} />
     </div>
   );
 }
@@ -254,6 +411,7 @@ export default function AgentSettings() {
   const { toast } = useToast();
   const { isSuperadmin } = useAuth();
   const [autoAiMode, setAutoAiMode] = useState(false);
+  const [languageMenuConfig, setLanguageMenuConfig] = useState<LanguageMenuConfig>(DEFAULT_LANGUAGE_MENU);
 
   const agentAny = agent as any;
 
@@ -290,6 +448,18 @@ export default function AgentSettings() {
         telephonyAppId: agentAny?.telephonyAppId || "",
       });
       setAutoAiMode((agentAny?.language || "en-US") === "auto");
+      const rawMenu = agentAny?.languageMenuConfig;
+      if (rawMenu && typeof rawMenu === "object") {
+        setLanguageMenuConfig({
+          ...DEFAULT_LANGUAGE_MENU,
+          ...rawMenu,
+          options: Array.isArray(rawMenu.options) && rawMenu.options.length > 0
+            ? rawMenu.options
+            : DEFAULT_LANGUAGE_MENU.options,
+        });
+      } else {
+        setLanguageMenuConfig(DEFAULT_LANGUAGE_MENU);
+      }
     }
   }, [agent]);
 
@@ -312,6 +482,7 @@ export default function AgentSettings() {
         language: autoAiMode ? "auto" : (data.language === "auto" ? "en-US" : data.language),
         personality: data.personality, aiModel: data.aiModel,
         greeting: data.greeting, voicemailMessage: data.voicemailMessage,
+        languageMenuConfig: autoAiMode ? languageMenuConfig : { ...languageMenuConfig, enabled: false },
       };
       if (isSuperadmin) {
         payload.phoneNumber = data.phoneNumber;
@@ -530,7 +701,12 @@ export default function AgentSettings() {
                 <div className="text-muted-foreground text-[9px] mt-0.5 leading-tight">Sarvam AI<br/>Indic-native</div>
               </div>
             </div>
-            {isAuto(watchedLanguage) && <AutoModePanel />}
+            {isAuto(watchedLanguage) && (
+              <AutoModePanel
+                languageMenuConfig={languageMenuConfig}
+                onLanguageMenuChange={setLanguageMenuConfig}
+              />
+            )}
             {isIndian(watchedLanguage) && <SplitModelPanel language={watchedLanguage} />}
           </CardContent>
         </Card>

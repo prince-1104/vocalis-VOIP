@@ -1,4 +1,4 @@
-import { pgTable, text, serial, timestamp, integer, boolean } from "drizzle-orm/pg-core";
+import { pgTable, text, serial, timestamp, integer, boolean, jsonb } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 import { usersTable } from "./users";
@@ -10,6 +10,7 @@ export const agentConfigsTable = pgTable("agent_configs", {
   agentName: text("agent_name").notNull().default("SalesBot"),
   voice: text("voice").notNull().default("nova"),
   language: text("language").default("en-US"),
+  languageMenuConfig: jsonb("language_menu_config"),
 
   // Telephony provider (BYOC)
   telephonyProvider: text("telephony_provider").notNull().default("twilio"),
