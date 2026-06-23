@@ -63,6 +63,15 @@ interface TenantDetail {
     terminationUri: string | null;
     isEnabled: boolean;
   } | null;
+  exotelConfig: {
+    accountSid: string;
+    exophone: string;
+    region: string;
+    appFlowUrl: string;
+    apiKeyConfigured: boolean;
+    apiTokenConfigured: boolean;
+    isEnabled: boolean;
+  } | null;
   stats: {
     callsThisMonth: number;
     costThisMonth: number;
@@ -84,11 +93,22 @@ export default function AdminTenantDetail() {
   const [showTelephony, setShowTelephony] = useState(false);
   const [telephonyForm, setTelephonyForm] = useState({ phoneNumber: "", twilioAccountSid: "", twilioAuthToken: "" });
   const [savingTelephony, setSavingTelephony] = useState(false);
-  const [activeTab, setActiveTab] = useState<"TWILIO" | "SIP_TRUNK">("TWILIO");
+  const [activeTab, setActiveTab] = useState<"TWILIO" | "SIP_TRUNK" | "EXOTEL">("TWILIO");
   const [showSipTrunk, setShowSipTrunk] = useState(false);
+  const [showExotel, setShowExotel] = useState(false);
+  const [savingExotel, setSavingExotel] = useState(false);
+  const [exotelForm, setExotelForm] = useState({
+    accountSid: "",
+    apiKey: "",
+    apiToken: "",
+    exophone: "",
+    region: "singapore",
+    appFlowUrl: "",
+  });
   const [isEditingSip, setIsEditingSip] = useState(false);
   const [savingSip, setSavingSip] = useState(false);
   const [showSipPassword, setShowSipPassword] = useState(false);
+  const [showExotelSecrets, setShowExotelSecrets] = useState(false);
   const [sipForm, setSipForm] = useState({
     sipDomain: "",
     sipUsername: "",
@@ -113,7 +133,21 @@ export default function AdminTenantDetail() {
         twilioAccountSid: data.telephony.twilioAccountSid || "",
         twilioAuthToken: "",
       });
-      setActiveTab(data.telephonyType === "SIP_TRUNK" ? "SIP_TRUNK" : "TWILIO");
+      setActiveTab(
+        data.telephonyType === "SIP_TRUNK" ? "SIP_TRUNK"
+        : data.telephonyType === "EXOTEL" ? "EXOTEL"
+        : "TWILIO",
+      );
+      if (data.exotelConfig) {
+        setExotelForm({
+          accountSid: data.exotelConfig.accountSid || "",
+          apiKey: "",
+          apiToken: "",
+          exophone: data.exotelConfig.exophone || "",
+          region: data.exotelConfig.region || "singapore",
+          appFlowUrl: data.exotelConfig.appFlowUrl || "",
+        });
+      }
     } catch (e: unknown) {
       toast({ title: "Error", description: e instanceof Error ? e.message : "Unknown error", variant: "destructive" });
     } finally {
@@ -209,7 +243,7 @@ export default function AdminTenantDetail() {
     }
   }
 
-  function handleConfigureSipTrunk(existingConfig?: any) {
+  function handleConfigureSipTrunk(existingConfig?: TenantDetail["sipTrunkConfig"]) {
     if (existingConfig) {
       setIsEditingSip(true);
       setSipForm({
@@ -233,6 +267,62 @@ export default function AdminTenantDetail() {
     }
     setShowSipPassword(false);
     setShowSipTrunk(true);
+  }
+
+  async function handleSaveExotel(e: React.FormEvent) {
+    e.preventDefault();
+    setSavingExotel(true);
+    try {
+      await apiFetch(`/api/superadmin/tenants/${id}/telephony/exotel`, {
+        method: "POST",
+        body: JSON.stringify({
+          accountSid: exotelForm.accountSid,
+          apiKey: exotelForm.apiKey || undefined,
+          apiToken: exotelForm.apiToken || undefined,
+          exophone: exotelForm.exophone,
+          region: exotelForm.region,
+          appFlowUrl: exotelForm.appFlowUrl,
+        }),
+      });
+      toast({ title: "Exotel configuration saved" });
+      setShowExotel(false);
+      fetchTenant();
+    } catch (e: unknown) {
+      toast({ title: "Error", description: e instanceof Error ? e.message : "Unknown error", variant: "destructive" });
+    } finally {
+      setSavingExotel(false);
+    }
+  }
+
+  async function handleToggleExotel() {
+    if (!tenant?.exotelConfig) return;
+    const nextState = !tenant.exotelConfig.isEnabled;
+    const confirmMsg = nextState
+      ? "Enable Exotel for this tenant? Outbound calls will use Exotel instead of Twilio."
+      : "Disable Exotel? Calls will revert to Twilio.";
+    if (!window.confirm(confirmMsg)) return;
+    try {
+      await apiFetch(`/api/superadmin/tenants/${id}/telephony/exotel/toggle`, {
+        method: "PATCH",
+        body: JSON.stringify({ isEnabled: nextState }),
+      });
+      toast({ title: nextState ? "Exotel enabled" : "Exotel disabled" });
+      fetchTenant();
+    } catch (e: unknown) {
+      toast({ title: "Error", description: e instanceof Error ? e.message : "Unknown error", variant: "destructive" });
+    }
+  }
+
+  async function handleRemoveExotel() {
+    if (!window.confirm("Remove Exotel configuration for this tenant?")) return;
+    try {
+      await apiFetch(`/api/superadmin/tenants/${id}/telephony/exotel`, { method: "DELETE" });
+      toast({ title: "Exotel configuration removed" });
+      setActiveTab("TWILIO");
+      fetchTenant();
+    } catch (e: unknown) {
+      toast({ title: "Error", description: e instanceof Error ? e.message : "Unknown error", variant: "destructive" });
+    }
   }
 
   async function handleSaveSipTrunk(e: React.FormEvent) {
@@ -401,7 +491,7 @@ export default function AdminTenantDetail() {
               <Key className="w-5 h-5 text-primary" /> Telephony
             </h2>
             <span className="text-xs font-semibold flex items-center gap-1.5 text-muted-foreground bg-white/5 px-2.5 py-1 rounded-full border border-white/5">
-              Active: {tenant.telephonyType === "SIP_TRUNK" ? "SIP Trunk" : "Twilio"} <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
+              Active: {tenant.telephonyType === "SIP_TRUNK" ? "SIP Trunk" : tenant.telephonyType === "EXOTEL" ? "Exotel" : "Twilio"} <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
             </span>
           </div>
 
@@ -428,6 +518,17 @@ export default function AdminTenantDetail() {
             >
               SIP Trunk
             </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab("EXOTEL")}
+              className={`flex-1 py-1.5 text-xs font-medium rounded-md transition-all ${
+                activeTab === "EXOTEL"
+                  ? "bg-primary text-primary-foreground shadow"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              Exotel
+            </button>
           </div>
 
           {activeTab === "TWILIO" ? (
@@ -452,7 +553,7 @@ export default function AdminTenantDetail() {
                 </Button>
               </div>
             </div>
-          ) : (
+          ) : activeTab === "SIP_TRUNK" ? (
             <div className="space-y-4">
               {!tenant.sipTrunkConfig ? (
                 <div className="flex flex-col items-center justify-center py-6 text-center space-y-3">
@@ -519,6 +620,78 @@ export default function AdminTenantDetail() {
                       Remove
                     </Button>
                     <Button variant="outline" size="sm" onClick={() => handleConfigureSipTrunk(tenant.sipTrunkConfig)}>
+                      <Edit2 className="w-4 h-4 mr-1.5" /> Edit
+                    </Button>
+                  </div>
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {!tenant.exotelConfig ? (
+                <div className="flex flex-col items-center justify-center py-6 text-center space-y-3">
+                  <Phone className="w-8 h-8 text-muted-foreground opacity-55" />
+                  <div className="space-y-1">
+                    <p className="text-sm font-medium text-foreground">Exotel Not Configured</p>
+                    <p className="text-xs text-muted-foreground max-w-[280px]">
+                      Connect Exotel API credentials and call flow for AI outbound dialing.
+                    </p>
+                  </div>
+                  <Button variant="outline" size="sm" onClick={() => setShowExotel(true)}>
+                    <Plus className="w-4 h-4 mr-1.5" /> Configure Exotel
+                  </Button>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between p-3 rounded-lg bg-white/5 border border-white/5">
+                    <div className="flex items-center gap-2">
+                      <Badge
+                        variant={tenant.exotelConfig.isEnabled ? "default" : "secondary"}
+                        className={tenant.exotelConfig.isEnabled ? "bg-green-500/20 text-green-400 border-green-500/30 text-xs" : "bg-yellow-500/20 text-yellow-400 border-yellow-500/30 text-xs"}
+                      >
+                        {tenant.exotelConfig.isEnabled ? "Active" : "Inactive"}
+                      </Badge>
+                      <span className="text-xs text-muted-foreground font-medium">Exotel</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleToggleExotel}
+                      className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                        tenant.exotelConfig.isEnabled ? "bg-primary" : "bg-white/10"
+                      }`}
+                    >
+                      <span
+                        className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
+                          tenant.exotelConfig.isEnabled ? "translate-x-4" : "translate-x-0"
+                        }`}
+                      />
+                    </button>
+                  </div>
+                  <dl className="space-y-2.5">
+                    <Row label="Account SID" value={tenant.exotelConfig.accountSid} />
+                    <Row label="ExoPhone" value={tenant.exotelConfig.exophone} />
+                    <Row label="Region" value={tenant.exotelConfig.region === "mumbai" ? "Mumbai (api.in.exotel.com)" : "Singapore (api.exotel.com)"} />
+                    <Row label="App Flow URL" value={<span className="text-xs break-all">{tenant.exotelConfig.appFlowUrl}</span>} />
+                    <Row label="API Key" value={tenant.exotelConfig.apiKeyConfigured ? "Configured" : "—"} />
+                    <Row label="API Token" value={tenant.exotelConfig.apiTokenConfigured ? "Configured" : "—"} />
+                  </dl>
+                  <div className="text-[10px] text-muted-foreground leading-relaxed border border-white/10 rounded-md p-2 bg-white/5 space-y-1">
+                    <p>
+                      <span className="text-foreground font-medium">Voicebot applet:</span>{" "}
+                      <code className="text-primary">wss://your-domain/ws/exotel/media-stream/{"{callLogId}"}</code>
+                    </p>
+                    <p>
+                      <span className="text-foreground font-medium">Connect applet (for transfers):</span>{" "}
+                      Dial Whom = Dynamic URL →{" "}
+                      <code className="text-primary">https://your-domain/api/exotel/connect</code>
+                    </p>
+                    <p>Set CustomField to callLogId. Flow order: Voicebot → Connect (dynamic) → Hangup.</p>
+                  </div>
+                  <div className="flex justify-end gap-2 pt-2">
+                    <Button variant="outline" size="sm" className="border-red-500/30 text-red-400 hover:bg-red-500/10" onClick={handleRemoveExotel}>
+                      Remove
+                    </Button>
+                    <Button variant="outline" size="sm" onClick={() => setShowExotel(true)}>
                       <Edit2 className="w-4 h-4 mr-1.5" /> Edit
                     </Button>
                   </div>
@@ -729,6 +902,123 @@ export default function AdminTenantDetail() {
               <Button type="button" variant="ghost" onClick={() => setShowSipTrunk(false)}>Cancel</Button>
               <Button type="submit" disabled={savingSip}>
                 {savingSip ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Saving…</> : "Save SIP Trunk"}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={showExotel} onOpenChange={setShowExotel}>
+        <DialogContent className="bg-card border-white/10 max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>{tenant.exotelConfig ? "Edit Exotel" : "Configure Exotel"}</DialogTitle>
+          </DialogHeader>
+          <form onSubmit={handleSaveExotel} className="space-y-4">
+            <div className="text-xs text-muted-foreground leading-relaxed border border-white/10 rounded-md p-3 bg-white/5 space-y-1.5">
+              <p>Copy credentials from Exotel → Developer Settings → API Credentials.</p>
+              <p>
+                Build a call flow: <span className="text-foreground font-medium">Voicebot</span> →{" "}
+                <span className="text-foreground font-medium">Connect</span> →{" "}
+                <span className="text-foreground font-medium">Hangup</span>.
+              </p>
+              <p>
+                Voicebot WebSocket URL:{" "}
+                <code className="text-primary text-[10px]">wss://your-domain/ws/exotel/media-stream/{"{callLogId}"}</code>
+              </p>
+              <p>
+                Connect applet (human transfer): Dial Whom = Dynamic URL →{" "}
+                <code className="text-primary text-[10px]">https://your-domain/api/exotel/connect</code>
+              </p>
+            </div>
+            <div className="space-y-2">
+              <Label>Account SID *</Label>
+              <Input
+                value={exotelForm.accountSid}
+                onChange={(e) => setExotelForm({ ...exotelForm, accountSid: e.target.value })}
+                placeholder="naveenindia1"
+                required
+                className="bg-white/5 border-white/10"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>
+                API Key (Username) *{" "}
+                {tenant.exotelConfig?.apiKeyConfigured && (
+                  <span className="text-muted-foreground text-xs">(leave blank to keep existing)</span>
+                )}
+              </Label>
+              <Input
+                type={showExotelSecrets ? "text" : "password"}
+                value={exotelForm.apiKey}
+                onChange={(e) => setExotelForm({ ...exotelForm, apiKey: e.target.value })}
+                placeholder="••••••••"
+                required={!tenant.exotelConfig?.apiKeyConfigured}
+                className="bg-white/5 border-white/10"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>
+                API Token (Password) *{" "}
+                {tenant.exotelConfig?.apiTokenConfigured && (
+                  <span className="text-muted-foreground text-xs">(leave blank to keep existing)</span>
+                )}
+              </Label>
+              <div className="relative">
+                <Input
+                  type={showExotelSecrets ? "text" : "password"}
+                  value={exotelForm.apiToken}
+                  onChange={(e) => setExotelForm({ ...exotelForm, apiToken: e.target.value })}
+                  placeholder="••••••••"
+                  required={!tenant.exotelConfig?.apiTokenConfigured}
+                  className="bg-white/5 border-white/10 pr-16"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowExotelSecrets(!showExotelSecrets)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-xs font-semibold text-muted-foreground hover:text-foreground focus:outline-none"
+                >
+                  {showExotelSecrets ? "Hide" : "Show"}
+                </button>
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Label>ExoPhone (Caller ID) *</Label>
+              <Input
+                value={exotelForm.exophone}
+                onChange={(e) => setExotelForm({ ...exotelForm, exophone: e.target.value })}
+                placeholder="+91XXXXXXXXXX"
+                required
+                className="bg-white/5 border-white/10"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Account Region *</Label>
+              <select
+                value={exotelForm.region}
+                onChange={(e) => setExotelForm({ ...exotelForm, region: e.target.value })}
+                className="w-full h-10 rounded-md border border-white/10 bg-white/5 px-3 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+              >
+                <option value="singapore" className="bg-card text-foreground">Singapore (api.exotel.com)</option>
+                <option value="mumbai" className="bg-card text-foreground">Mumbai (api.in.exotel.com)</option>
+              </select>
+            </div>
+            <div className="space-y-2">
+              <Label>App Flow URL *</Label>
+              <Input
+                value={exotelForm.appFlowUrl}
+                onChange={(e) => setExotelForm({ ...exotelForm, appFlowUrl: e.target.value })}
+                placeholder="http://my.exotel.com/{sid}/exoml/start_voice/{app_id}"
+                required
+                className="bg-white/5 border-white/10"
+              />
+              <p className="text-[10px] text-muted-foreground">
+                ExoML flow URL from Exotel dashboard — must include Voicebot applet for AI audio.
+              </p>
+            </div>
+            <DialogFooter className="pt-2">
+              <Button type="button" variant="ghost" onClick={() => setShowExotel(false)}>Cancel</Button>
+              <Button type="submit" disabled={savingExotel}>
+                {savingExotel ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Saving…</> : "Save Exotel"}
               </Button>
             </DialogFooter>
           </form>

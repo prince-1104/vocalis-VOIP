@@ -1,9 +1,8 @@
-import twilio from "twilio";
-import { db, agentConfigsTable, callLogsTable, contactsTable, campaignsTable, campaignContactsTable, tenantsTable, sipTrunkConfigsTable } from "@workspace/db";
+import { db, agentConfigsTable, callLogsTable, contactsTable, campaignsTable, campaignContactsTable } from "@workspace/db";
 import { eq, and, ne, lt, or, lte, sql, isNull, desc } from "drizzle-orm";
-import { decrypt } from "./encryption";
 import { logger } from "./logger";
 import { buildCallCrmMetadataForCampaign } from "./campaign-transfer";
+import { placeOutboundCall } from "./telephony/place-outbound-call";
 
 function getCampaignBaseUrl(): string {
   const domains = process.env.REPLIT_DOMAINS;
@@ -68,10 +67,6 @@ async function releaseStaleCallingContacts(campaignId: number): Promise<void> {
         .where(eq(campaignContactsTable.id, cc.linkId));
     }
   }
-}
-
-function getTwilioClient(accountSid: string, authToken: string) {
-  return twilio(accountSid, authToken);
 }
 
 export interface DialNextResult {
@@ -259,47 +254,6 @@ export async function dialNextForCampaign(
 
   const agentConfig = await db.query.agentConfigsTable.findFirst({ where: eq(agentConfigsTable.userId, userId) });
 
-  if (!agentConfig?.twilioAccountSid || !agentConfig?.twilioAuthToken) {
-    throw new Error("Twilio not fully configured. Check AI Agent settings.");
-  }
-
-  const tenant = await db.query.tenantsTable.findFirst({
-    where: eq(tenantsTable.ownerId, userId),
-  });
-
-  if (!tenant) {
-    throw new Error("Tenant not found for user.");
-  }
-
-  let toPhone = nextContact.phone;
-  let fromPhone: string;
-  let sipAuthUsername: string | undefined;
-  let sipAuthPassword: string | undefined;
-
-  if (tenant.telephonyType === "SIP_TRUNK") {
-    const sipConfig = await db.query.sipTrunkConfigsTable.findFirst({
-      where: eq(sipTrunkConfigsTable.tenantId, tenant.id),
-    });
-
-    if (!sipConfig || !sipConfig.isEnabled) {
-      throw new Error("SIP Trunk configuration is disabled or not found.");
-    }
-
-    toPhone = `sip:${nextContact.phone}@${sipConfig.sipDomain}`;
-    fromPhone = sipConfig.phoneNumber;
-    sipAuthUsername = sipConfig.sipUsername;
-    try {
-      sipAuthPassword = decrypt(sipConfig.sipPassword);
-    } catch {
-      throw new Error("Failed to decrypt SIP password.");
-    }
-  } else {
-    if (!agentConfig.phoneNumber) {
-      throw new Error("Twilio phone number not configured. Check AI Agent settings.");
-    }
-    fromPhone = agentConfig.phoneNumber;
-  }
-
   await db.update(contactsTable)
     .set({ status: "called", lastCalledAt: new Date(), updatedAt: new Date() })
     .where(eq(contactsTable.id, nextContact.id));
@@ -312,35 +266,30 @@ export async function dialNextForCampaign(
     })
     .where(eq(campaignContactsTable.id, nextLink.linkId));
 
-  const client = getTwilioClient(agentConfig.twilioAccountSid, agentConfig.twilioAuthToken);
-
   const crmMetadata = await buildCallCrmMetadataForCampaign(campaign, userId);
 
-  const [callLog] = await db.insert(callLogsTable).values({
-    userId,
-    contactId: nextContact.id,
-    campaignId: campaign.id,
-    direction: "outbound",
-    phone: nextContact.phone,
-    outcome: "no_answer",
-    aiModel: agentConfig.aiModel || "gpt-4o-mini",
-    startedAt: new Date(),
-    crmMetadata: crmMetadata ?? null,
-  }).returning();
-
-  let call;
   try {
-    call = await client.calls.create({
-      to: toPhone,
-      from: fromPhone,
-      url: `${baseUrl}/api/twilio/outbound-voice?callLogId=${callLog.id}&userId=${userId}`,
-      statusCallback: `${baseUrl}/api/twilio/status?callLogId=${callLog.id}`,
-      statusCallbackMethod: "POST",
-      statusCallbackEvent: ["completed", "no-answer", "busy", "failed"],
-      machineDetection: "Enable",
-      asyncAmd: "true",
-      ...(sipAuthUsername && sipAuthPassword ? { sipAuthUsername, sipAuthPassword } : {}),
+    const placed = await placeOutboundCall({
+      userId,
+      contactId: nextContact.id,
+      campaignId: campaign.id,
+      phone: nextContact.phone,
+      aiModel: agentConfig?.aiModel || "gpt-4o-mini",
+      baseUrl,
+      crmMetadata: crmMetadata ?? null,
     });
+
+    await db.update(campaignsTable)
+      .set({ calledCount: campaign.calledCount + 1, updatedAt: new Date() })
+      .where(eq(campaignsTable.id, campaign.id));
+
+    return {
+      done: false,
+      callSid: placed.providerCallId,
+      callLogId: placed.callLogId,
+      contact: nextContact,
+      remaining: pendingLinks.length - 1,
+    };
   } catch (err: any) {
     const errMsg = err?.message || String(err);
     logger.warn(
@@ -348,48 +297,35 @@ export async function dialNextForCampaign(
       "Campaign dial failed for contact",
     );
 
-    await db.update(callLogsTable)
-      .set({
-        outcome: "no_answer",
-        endedAt: new Date(),
-        transcript: `Failed to dial: ${errMsg}`,
-      })
-      .where(eq(callLogsTable.id, callLog.id));
+    const failedLog = await db.query.callLogsTable.findFirst({
+      where: and(
+        eq(callLogsTable.campaignId, campaign.id),
+        eq(callLogsTable.contactId, nextContact.id),
+      ),
+      orderBy: desc(callLogsTable.startedAt),
+    });
+
+    if (failedLog) {
+      await db.update(callLogsTable)
+        .set({
+          outcome: "no_answer",
+          endedAt: new Date(),
+          transcript: `Failed to dial: ${errMsg}`,
+        })
+        .where(eq(callLogsTable.id, failedLog.id));
+    }
 
     await resolveFailedContactStatus(campaign, nextLink.linkId, nextLink.attempts, err);
 
-    // Do not throw — caller continues to next contact in parallel mode
     return {
       done: false,
       dialFailed: true,
       error: errMsg,
-      callLogId: callLog.id,
+      callLogId: failedLog?.id,
       contact: nextContact,
       remaining: pendingLinks.length - 1,
     };
   }
-
-  await db.update(campaignsTable)
-    .set({ calledCount: campaign.calledCount + 1, updatedAt: new Date() })
-    .where(eq(campaignsTable.id, campaign.id));
-
-  // Store the actual Call SID in the call logs
-  await db.update(callLogsTable)
-    .set({ callSid: call.sid })
-    .where(eq(callLogsTable.id, callLog.id));
-
-  return {
-    done: false,
-    callSid: call.sid,
-    callLogId: callLog.id,
-    contact: {
-      id: nextContact.id,
-      phone: nextContact.phone,
-      firstName: nextContact.firstName,
-      lastName: nextContact.lastName,
-    },
-    remaining: pendingLinks.length - 1,
-  };
 }
 
 export async function triggerDialingForCampaign(

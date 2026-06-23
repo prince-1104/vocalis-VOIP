@@ -14,6 +14,7 @@ import trainingRouter from "./routes/training";
 import scriptsRouter from "./routes/scripts";
 import analyticsRouter from "./routes/analytics";
 import twilioRouter from "./routes/twilio";
+import exotelRouter from "./routes/exotel";
 import dialRouter from "./routes/dial";
 import adminRouter from "./routes/admin";
 import adminCostsRouter from "./routes/admin-costs";
@@ -51,6 +52,7 @@ app.use(express.urlencoded({ extended: true }));
 app.use("/api", healthRouter);
 app.use("/api", authPublicRouter);
 app.use("/api", twilioRouter);
+app.use("/api", exotelRouter);
 app.use("/api", widgetRouter);
 app.use("/api", crmRouter);            // CRM routes use their own API-key auth
 

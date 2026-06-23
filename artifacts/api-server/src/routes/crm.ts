@@ -1,5 +1,4 @@
 import { Router, type IRouter } from "express";
-import twilio from "twilio";
 import {
   db,
   callLogsTable,
@@ -15,6 +14,8 @@ import { eq, and, desc } from "drizzle-orm";
 import { resolveCrmApiKey, requireScope, generateCrmApiKey, generateWebhookSecret } from "../lib/crm-auth";
 import { crmEventBus } from "../lib/crm-event-bus";
 import { executeTransfer, findBestAgent } from "../lib/transfer-manager";
+import { placeOutboundCall, TelephonyNotConfiguredError } from "../lib/telephony/place-outbound-call";
+import { hangupCall } from "../lib/telephony/hangup-call";
 import { logger } from "../lib/logger";
 
 const router: IRouter = Router();
@@ -58,90 +59,52 @@ router.post("/crm/calls", requireScope("calls:write"), async (req, res) => {
     where: eq(agentConfigsTable.userId, userId),
   });
 
-  if (!agentConfig?.twilioAccountSid || !agentConfig?.twilioAuthToken) {
-    res.status(400).json({ error: "Twilio credentials not configured for this tenant" });
-    return;
-  }
-
-  if (!agentConfig.phoneNumber) {
-    res.status(400).json({ error: "Twilio phone number not configured for this tenant" });
-    return;
-  }
-
   const baseUrl = getBaseUrl(req);
-  const client = twilio(agentConfig.twilioAccountSid, agentConfig.twilioAuthToken);
-
-  // Create call log with CRM metadata
-  const [callLog] = await db.insert(callLogsTable).values({
-    userId,
-    contactId: null,
-    campaignId: campaignId || null,
-    direction: "outbound",
-    phone,
-    outcome: "no_answer",
-    aiModel: agentConfig.aiModel || "gpt-4o-mini",
-    startedAt: new Date(),
-    crmContactId: crmContactId || null,
-    crmMetadata: metadata || null,
-  }).returning();
-
-  // Store transfer rules in metadata for the voice handler to pick up
-  if (transferRules) {
-    await db.update(callLogsTable)
-      .set({
-        crmMetadata: {
-          ...(metadata || {}),
-          __transferRules: transferRules,
-        },
-      })
-      .where(eq(callLogsTable.id, callLog.id));
-  }
+  const mergedMetadata = transferRules
+    ? { ...(metadata || {}), __transferRules: transferRules }
+    : (metadata || null);
 
   try {
-    const call = await client.calls.create({
-      to: phone,
-      from: agentConfig.phoneNumber,
-      url: `${baseUrl}/api/twilio/outbound-voice?callLogId=${callLog.id}&userId=${userId}`,
-      statusCallback: `${baseUrl}/api/twilio/status?callLogId=${callLog.id}`,
-      statusCallbackMethod: "POST",
-      statusCallbackEvent: ["completed", "no-answer", "busy", "failed"],
-      machineDetection: "Enable",
-      asyncAmd: "true",
+    // Routes through Exotel or Twilio based on the tenant's telephonyType.
+    const placed = await placeOutboundCall({
+      userId,
+      campaignId: campaignId || null,
+      phone,
+      aiModel: agentConfig?.aiModel || undefined,
+      baseUrl,
+      crmContactId: crmContactId || null,
+      crmMetadata: mergedMetadata,
     });
-
-    // Store the Twilio Call SID
-    await db.update(callLogsTable)
-      .set({ callSid: call.sid })
-      .where(eq(callLogsTable.id, callLog.id));
 
     // Emit ringing event
     crmEventBus.emitCallEvent({
       type: "call.ringing",
-      callId: callLog.id,
-      callSid: call.sid,
+      callId: placed.callLogId,
+      callSid: placed.providerCallId,
       userId,
-      data: { phone, campaignId },
+      data: { phone, campaignId, provider: placed.provider },
       metadata,
       timestamp: new Date().toISOString(),
     });
 
     res.json({
-      callId: callLog.id,
-      callSid: call.sid,
+      callId: placed.callLogId,
+      callSid: placed.providerCallId,
       status: "dialing",
-      streamUrl: `wss://${req.headers.host}/ws/crm/calls/${callLog.id}`,
+      provider: placed.provider,
+      streamUrl: `wss://${req.headers.host}/ws/crm/calls/${placed.callLogId}`,
     });
   } catch (err: any) {
-    logger.error({ err, callId: callLog.id }, "CRM call initiation failed");
+    logger.error({ err, phone }, "CRM call initiation failed");
 
-    await db.update(callLogsTable)
-      .set({ outcome: "no_answer", endedAt: new Date() })
-      .where(eq(callLogsTable.id, callLog.id));
+    if (err instanceof TelephonyNotConfiguredError) {
+      res.status(400).json({ error: err.message });
+      return;
+    }
 
     res.status(500).json({
       error: "Failed to initiate call",
       detail: err.message,
-      callId: callLog.id,
     });
   }
 });
@@ -336,14 +299,7 @@ router.post("/crm/calls/:id/end", requireScope("calls:write"), async (req, res) 
   }
 
   try {
-    const agentConfig = await db.query.agentConfigsTable.findFirst({
-      where: eq(agentConfigsTable.userId, userId),
-    });
-
-    if (agentConfig?.twilioAccountSid && agentConfig?.twilioAuthToken) {
-      const client = twilio(agentConfig.twilioAccountSid, agentConfig.twilioAuthToken);
-      await client.calls(call.callSid).update({ status: "completed" });
-    }
+    await hangupCall(userId, call.callSid, call.phone || undefined);
 
     await db.update(callLogsTable)
       .set({ endedAt: new Date(), outcome: "answered" })

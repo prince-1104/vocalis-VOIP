@@ -35,6 +35,23 @@ export async function syncDatabase() {
       );
     `);
 
+    // Ensure exotel_configs exists
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS "exotel_configs" (
+        "id" serial PRIMARY KEY NOT NULL,
+        "tenant_id" integer NOT NULL UNIQUE REFERENCES "tenants"("id") ON DELETE CASCADE,
+        "account_sid" text NOT NULL,
+        "api_key" text NOT NULL,
+        "api_token" text NOT NULL,
+        "exophone" text NOT NULL,
+        "region" text DEFAULT 'singapore' NOT NULL,
+        "app_flow_url" text NOT NULL,
+        "is_enabled" boolean DEFAULT false NOT NULL,
+        "created_at" timestamp DEFAULT now() NOT NULL,
+        "updated_at" timestamp DEFAULT now() NOT NULL
+      );
+    `);
+
     // Ensure sip_trunk_configs exists
     await db.execute(sql`
       CREATE TABLE IF NOT EXISTS "sip_trunk_configs" (

@@ -1,5 +1,5 @@
 import { Router, type IRouter } from "express";
-import { db, tenantsTable, tenantUsersTable, callLogsTable, agentConfigsTable, usersTable, platformSettingsTable, apiCostLogsTable, sipTrunkConfigsTable } from "@workspace/db";
+import { db, tenantsTable, tenantUsersTable, callLogsTable, agentConfigsTable, usersTable, platformSettingsTable, apiCostLogsTable, sipTrunkConfigsTable, exotelConfigsTable } from "@workspace/db";
 import { eq, and, gte, sql } from "drizzle-orm";
 import bcrypt from "bcryptjs";
 import { encrypt } from "../lib/encryption";
@@ -156,6 +156,10 @@ router.get("/superadmin/tenants/:id", async (req, res) => {
     where: eq(sipTrunkConfigsTable.tenantId, tenantId),
   });
 
+  const exotelConfig = await db.query.exotelConfigsTable.findFirst({
+    where: eq(exotelConfigsTable.tenantId, tenantId),
+  });
+
   res.json({
     ...tenant,
     users,
@@ -173,6 +177,15 @@ router.get("/superadmin/tenants/:id", async (req, res) => {
       transport: sipTrunkConfig.transport,
       terminationUri: sipTrunkConfig.terminationUri,
       isEnabled: sipTrunkConfig.isEnabled,
+    } : null,
+    exotelConfig: exotelConfig ? {
+      accountSid: exotelConfig.accountSid,
+      exophone: exotelConfig.exophone,
+      region: exotelConfig.region,
+      appFlowUrl: exotelConfig.appFlowUrl,
+      apiKeyConfigured: !!exotelConfig.apiKey,
+      apiTokenConfigured: !!exotelConfig.apiToken,
+      isEnabled: exotelConfig.isEnabled,
     } : null,
     stats: {
       callsThisMonth: monthStats.callsThisMonth,
@@ -336,6 +349,11 @@ router.put("/superadmin/tenants/:id/telephony", async (req, res) => {
   }
 
   await db.update(agentConfigsTable).set(updateData).where(eq(agentConfigsTable.userId, tenant.ownerId));
+
+  await db.update(tenantsTable)
+    .set({ telephonyType: "TWILIO", updatedAt: new Date() })
+    .where(eq(tenantsTable.id, tenantId));
+
   res.json({ success: true });
 });
 
@@ -466,6 +484,143 @@ router.delete("/superadmin/tenants/:id/telephony/sip-trunk", async (req, res) =>
 
   await db.transaction(async (tx) => {
     await tx.delete(sipTrunkConfigsTable).where(eq(sipTrunkConfigsTable.tenantId, tenantId));
+    await tx.update(tenantsTable)
+      .set({ telephonyType: "TWILIO", updatedAt: new Date() })
+      .where(eq(tenantsTable.id, tenantId));
+  });
+
+  res.json({ success: true });
+});
+
+// ── Exotel Configuration (Superadmin Only) ──
+router.post("/superadmin/tenants/:id/telephony/exotel", async (req, res) => {
+  const tenantId = parseInt(req.params.id, 10);
+  const {
+    accountSid,
+    apiKey,
+    apiToken,
+    exophone,
+    region = "singapore",
+    appFlowUrl,
+  } = req.body as {
+    accountSid?: string;
+    apiKey?: string;
+    apiToken?: string;
+    exophone?: string;
+    region?: string;
+    appFlowUrl?: string;
+  };
+
+  if (!accountSid || !exophone || !appFlowUrl) {
+    res.status(400).json({ error: "accountSid, exophone, and appFlowUrl are required" });
+    return;
+  }
+
+  const tenant = await db.query.tenantsTable.findFirst({ where: eq(tenantsTable.id, tenantId) });
+  if (!tenant) {
+    res.status(404).json({ error: "Tenant not found" });
+    return;
+  }
+
+  const existing = await db.query.exotelConfigsTable.findFirst({
+    where: eq(exotelConfigsTable.tenantId, tenantId),
+  });
+
+  let encryptedKey = existing?.apiKey || "";
+  let encryptedToken = existing?.apiToken || "";
+
+  if (apiKey) encryptedKey = encrypt(apiKey);
+  else if (!existing) {
+    res.status(400).json({ error: "apiKey is required for new Exotel configuration" });
+    return;
+  }
+
+  if (apiToken) encryptedToken = encrypt(apiToken);
+  else if (!existing) {
+    res.status(400).json({ error: "apiToken is required for new Exotel configuration" });
+    return;
+  }
+
+  const resolvedRegion = region === "mumbai" ? "mumbai" : "singapore";
+
+  if (existing) {
+    await db.update(exotelConfigsTable)
+      .set({
+        accountSid,
+        apiKey: encryptedKey,
+        apiToken: encryptedToken,
+        exophone,
+        region: resolvedRegion,
+        appFlowUrl,
+        updatedAt: new Date(),
+      })
+      .where(eq(exotelConfigsTable.tenantId, tenantId));
+  } else {
+    await db.insert(exotelConfigsTable).values({
+      tenantId,
+      accountSid,
+      apiKey: encryptedKey,
+      apiToken: encryptedToken,
+      exophone,
+      region: resolvedRegion,
+      appFlowUrl,
+      isEnabled: false,
+    });
+  }
+
+  if (tenant.ownerId) {
+    await db.update(agentConfigsTable)
+      .set({
+        telephonyProvider: "exotel",
+        phoneNumber: exophone,
+        twilioAccountSid: accountSid,
+        updatedAt: new Date(),
+      })
+      .where(eq(agentConfigsTable.userId, tenant.ownerId));
+  }
+
+  res.json({ success: true });
+});
+
+router.patch("/superadmin/tenants/:id/telephony/exotel/toggle", async (req, res) => {
+  const tenantId = parseInt(req.params.id, 10);
+  const { isEnabled } = req.body as { isEnabled?: boolean };
+
+  const config = await db.query.exotelConfigsTable.findFirst({
+    where: eq(exotelConfigsTable.tenantId, tenantId),
+  });
+  if (!config) {
+    res.status(404).json({ error: "Exotel configuration not found" });
+    return;
+  }
+
+  await db.transaction(async (tx) => {
+    await tx.update(exotelConfigsTable)
+      .set({ isEnabled: !!isEnabled, updatedAt: new Date() })
+      .where(eq(exotelConfigsTable.tenantId, tenantId));
+
+    if (isEnabled) {
+      await tx.update(sipTrunkConfigsTable)
+        .set({ isEnabled: false, updatedAt: new Date() })
+        .where(eq(sipTrunkConfigsTable.tenantId, tenantId));
+      await tx.update(tenantsTable)
+        .set({ telephonyType: "EXOTEL", updatedAt: new Date() })
+        .where(eq(tenantsTable.id, tenantId));
+    } else {
+      await tx.update(tenantsTable)
+        .set({ telephonyType: "TWILIO", updatedAt: new Date() })
+        .where(eq(tenantsTable.id, tenantId));
+    }
+  });
+
+  res.json({ success: true, telephonyType: isEnabled ? "EXOTEL" : "TWILIO" });
+});
+
+router.delete("/superadmin/tenants/:id/telephony/exotel", async (req, res) => {
+  const tenantId = parseInt(req.params.id, 10);
+
+  await db.transaction(async (tx) => {
+    await tx.delete(exotelConfigsTable).where(eq(exotelConfigsTable.tenantId, tenantId));
     await tx.update(tenantsTable)
       .set({ telephonyType: "TWILIO", updatedAt: new Date() })
       .where(eq(tenantsTable.id, tenantId));

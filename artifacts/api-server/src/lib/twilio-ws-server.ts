@@ -16,7 +16,8 @@ import {
   DEFAULT_CAMPAIGN_CLOSING_MESSAGE,
 } from "./campaign-transfer";
 import { logger } from "./logger";
-import twilio from "twilio";
+import { hangupCall } from "./telephony/hangup-call";
+import { registerExotelStream, unregisterExotelStream } from "./telephony/exotel-stream-registry";
 import OpenAI from "openai";
 import { buildWhisperPrompt, normalizePhoneTranscript } from "./phone-stt-normalize";
 
@@ -236,9 +237,12 @@ class AudioPlayer {
   private playbackStartMs: number | null = null;
   private chunksSent = 0;
 
-  constructor(ws: WebSocket, streamSid: string) {
+  private streamProvider: "twilio" | "exotel";
+
+  constructor(ws: WebSocket, streamSid: string, streamProvider: "twilio" | "exotel" = "twilio") {
     this.ws = ws;
     this.streamSid = streamSid;
+    this.streamProvider = streamProvider;
   }
 
   public enqueue(muLawAudio: Buffer) {
@@ -284,13 +288,20 @@ class AudioPlayer {
 
   private sendChunk(chunk: Buffer) {
     if (this.ws.readyState !== WebSocket.OPEN) return;
-    this.ws.send(JSON.stringify({
-      event: "media",
-      streamSid: this.streamSid,
-      media: {
-        payload: chunk.toString("base64"),
-      },
-    }));
+    const payload = chunk.toString("base64");
+    if (this.streamProvider === "exotel") {
+      this.ws.send(JSON.stringify({
+        event: "media",
+        stream_sid: this.streamSid,
+        media: { payload },
+      }));
+    } else {
+      this.ws.send(JSON.stringify({
+        event: "media",
+        streamSid: this.streamSid,
+        media: { payload },
+      }));
+    }
   }
 
   /** Flush trailing partial frame once, then signal completion */
@@ -535,6 +546,24 @@ async function* streamLLMResponse(
 // ── WebSocket Server Definition & Event Loop ───────────────────────────
 export const twilioWss = new WebSocketServer({ noServer: true });
 
+export async function handleExotelStreamUpgrade(request: any, socket: any, head: any) {
+  const url = new URL(request.url || "", `http://${request.headers.host}`);
+  let callLogId = url.searchParams.get("callLogId");
+  if (!callLogId) {
+    const pathParts = url.pathname.split("/").filter(Boolean);
+    callLogId = pathParts[3] || null;
+  }
+  if (!callLogId) {
+    socket.write("HTTP/1.1 400 Bad Request\r\n\r\n");
+    socket.destroy();
+    return;
+  }
+
+  twilioWss.handleUpgrade(request, socket, head, (ws) => {
+    twilioWss.emit("connection", ws, request, callLogId, "exotel");
+  });
+}
+
 export async function handleTwilioStreamUpgrade(request: any, socket: any, head: any) {
   const url = new URL(request.url || "", `http://${request.headers.host}`);
   let callLogId = url.searchParams.get("callLogId");
@@ -549,12 +578,12 @@ export async function handleTwilioStreamUpgrade(request: any, socket: any, head:
   }
 
   twilioWss.handleUpgrade(request, socket, head, (ws) => {
-    twilioWss.emit("connection", ws, request, callLogId);
+    twilioWss.emit("connection", ws, request, callLogId, "twilio");
   });
 }
 
-twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string) => {
-  logger.info({ callLogId }, "Twilio Media Stream WebSocket client connected");
+twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string, streamProvider: "twilio" | "exotel" = "twilio") => {
+  logger.info({ callLogId, streamProvider }, "Media Stream WebSocket client connected");
   const connectionTime = Date.now();
 
   const config = await fetchConfig(callLogId);
@@ -576,6 +605,7 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
 
   let streamSid = "";
   let callSid = "";
+  let inboundEncoding: "mulaw" | "pcm" = "mulaw";
   let player: AudioPlayer | null = null;
 
   // VAD state variables
@@ -672,11 +702,8 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
       timestamp: new Date().toISOString(),
     });
 
-    if (agentConfig?.twilioAccountSid && agentConfig?.twilioAuthToken && callSid) {
-      const client = twilio(agentConfig.twilioAccountSid, agentConfig.twilioAuthToken);
-      await client.calls(callSid).update({ status: "completed" }).catch(err =>
-        logger.error({ err, callLogId }, "Failed to hang up after campaign limit")
-      );
+    if (callSid) {
+      await hangupCall(userId, callSid, callLogRow?.phone || undefined);
     }
 
     isGenerating = false;
@@ -746,10 +773,22 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
     try {
       const data = JSON.parse(msg.toString());
       if (data.event === "start") {
-        streamSid = data.start.streamSid;
-        callSid = data.start.callSid;
-        player = new AudioPlayer(ws, streamSid);
-        logger.info({ streamSid, callSid }, "Twilio Media Stream started");
+        streamSid = data.start?.streamSid || data.start?.stream_sid || "";
+        callSid = data.start?.callSid || data.start?.call_sid || "";
+        const fmt = String(data.start?.media_format?.encoding || "").toLowerCase();
+        if (fmt.includes("mulaw") || fmt.includes("pcmu")) {
+          inboundEncoding = "mulaw";
+        } else if (fmt.includes("raw") || fmt.includes("pcm") || fmt.includes("linear")) {
+          inboundEncoding = "pcm";
+        } else if (streamProvider === "exotel") {
+          inboundEncoding = "pcm";
+        }
+        player = new AudioPlayer(ws, streamSid, streamProvider);
+        logger.info({ streamSid, callSid, streamProvider, inboundEncoding }, "Media stream started");
+
+        if (streamProvider === "exotel") {
+          registerExotelStream(callLogId, ws);
+        }
 
         if (!callMeta.callSid) {
           callMeta.callSid = callSid;
@@ -774,8 +813,10 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
         if (!player) return;
 
         const payload = data.media.payload;
-        const muLawBuffer = Buffer.from(payload, "base64");
-        const pcmChunk = decodeMuLawBuffer(muLawBuffer);
+        const rawBuffer = Buffer.from(payload, "base64");
+        const pcmChunk = inboundEncoding === "pcm"
+          ? new Int16Array(rawBuffer.buffer, rawBuffer.byteOffset, Math.floor(rawBuffer.length / 2))
+          : decodeMuLawBuffer(rawBuffer);
 
         let sum = 0;
         for (let i = 0; i < pcmChunk.length; i++) {
@@ -867,6 +908,7 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
   ws.on("close", () => {
     logger.info({ callLogId }, "Twilio Media Stream WebSocket closed");
     if (limitTimer) clearTimeout(limitTimer);
+    if (streamProvider === "exotel") unregisterExotelStream(callLogId);
     player?.clear();
     finalizeCallLog(parseInt(callLogId, 10), callStartedAt).catch(err =>
       logger.error({ err, callLogId }, "Failed to finalize call log on websocket close")
@@ -1115,11 +1157,8 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
               timestamp: new Date().toISOString(),
             });
 
-            if (agentConfig?.twilioAccountSid && agentConfig?.twilioAuthToken && callSid) {
-              const client = twilio(agentConfig.twilioAccountSid, agentConfig.twilioAuthToken);
-              await client.calls(callSid).update({ status: "completed" }).catch(err =>
-                logger.error({ err, callLogId }, "Failed to end call after CRM handoff")
-              );
+            if (callSid) {
+              await hangupCall(userId, callSid, callLogRow?.phone || undefined);
             }
 
             isGenerating = false;

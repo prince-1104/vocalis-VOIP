@@ -187,7 +187,7 @@ router.get("/twilio/tts-audio-mp3/:id", (req, res) => {
   res.send(buf);
 });
 
-function getBaseUrl(req: any): string {
+export function getBaseUrl(req: any): string {
   const domains = process.env.REPLIT_DOMAINS;
   if (domains) {
     const first = domains.split(",")[0].trim();
@@ -750,7 +750,7 @@ const CALL_OUTCOME_MAP: Record<string, string> = {
   canceled: "no_answer",
 };
 
-async function completeCallLog(
+export async function completeCallLog(
   callLogId: number,
   callStatus: string,
   callDuration: number,

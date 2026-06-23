@@ -1,9 +1,10 @@
 import twilio from "twilio";
-import { db, callLogsTable, crmAgentsTable, agentConfigsTable, contactsTable, crmApiKeysTable } from "@workspace/db";
+import { db, callLogsTable, crmAgentsTable, agentConfigsTable, contactsTable, crmApiKeysTable, tenantsTable } from "@workspace/db";
 import { eq, and } from "drizzle-orm";
 import type { CallLog } from "@workspace/db";
 import { crmEventBus } from "./crm-event-bus";
 import { logger } from "./logger";
+import { requestExotelTransfer } from "./telephony/exotel-stream-registry";
 
 // ── Transfer Manager ───────────────────────────────────────────────────
 // Handles transferring active Twilio calls to CRM agents using Twilio
@@ -104,10 +105,100 @@ function getBaseUrl(req?: any): string {
   return process.env.BASE_URL || "https://localhost";
 }
 
+/**
+ * Exotel transfer — flow based.
+ *
+ * Exotel cannot add a third party to a live Voicebot stream over REST the way
+ * Twilio Conference can. Instead we record the destination and close the
+ * Voicebot WebSocket, which makes Exotel advance to the next applet — a Connect
+ * applet whose Dynamic URL (/api/exotel/connect) returns this destination.
+ */
+async function executeExotelTransfer(
+  userId: number,
+  request: TransferRequest,
+): Promise<{ success: boolean; conferenceSid?: string; error?: string }> {
+  try {
+    const callLog = await db.query.callLogsTable.findFirst({
+      where: eq(callLogsTable.id, request.callId),
+    });
+
+    requestExotelTransfer(String(request.callId), {
+      destination: request.transferTo,
+      reason: request.reason,
+      crmAgentId: request.crmAgentId,
+      transferType: request.transferType,
+      createdAt: Date.now(),
+    });
+
+    await db.update(callLogsTable)
+      .set({
+        transferredTo: request.transferTo,
+        transferReason: request.reason,
+        transferredAt: new Date(),
+      })
+      .where(eq(callLogsTable.id, request.callId));
+
+    if (request.crmAgentId) {
+      const agent = await db.query.crmAgentsTable.findFirst({
+        where: and(
+          eq(crmAgentsTable.userId, userId),
+          eq(crmAgentsTable.crmAgentId, request.crmAgentId),
+        ),
+      });
+      if (agent) {
+        await db.update(crmAgentsTable)
+          .set({ currentCalls: agent.currentCalls + 1 })
+          .where(eq(crmAgentsTable.id, agent.id));
+      }
+    }
+
+    crmEventBus.emitCallEvent({
+      type: "call.transferred",
+      callId: request.callId,
+      callSid: request.callSid,
+      userId,
+      data: await buildTransferEventData(callLog!, userId, {
+        transferTo: request.transferTo,
+        reason: request.reason,
+        crmAgentId: request.crmAgentId,
+        provider: "exotel",
+      }),
+      metadata: callLog?.crmMetadata as Record<string, unknown> | undefined,
+      timestamp: new Date().toISOString(),
+    });
+
+    logger.info(
+      { callId: request.callId, transferTo: request.transferTo },
+      "Exotel transfer initiated (caller will be connected via Connect applet)",
+    );
+
+    return { success: true };
+  } catch (err: any) {
+    logger.error({ err, callId: request.callId }, "Exotel transfer failed");
+    crmEventBus.emitCallEvent({
+      type: "call.error",
+      callId: request.callId,
+      callSid: request.callSid,
+      userId,
+      data: { error: `Transfer failed: ${err.message}` },
+      timestamp: new Date().toISOString(),
+    });
+    return { success: false, error: err.message };
+  }
+}
+
 export async function executeTransfer(
   userId: number,
   request: TransferRequest,
 ): Promise<{ success: boolean; conferenceSid?: string; error?: string }> {
+  const tenant = await db.query.tenantsTable.findFirst({
+    where: eq(tenantsTable.ownerId, userId),
+  });
+
+  if (tenant?.telephonyType === "EXOTEL") {
+    return executeExotelTransfer(userId, request);
+  }
+
   try {
     const agentConfig = await db.query.agentConfigsTable.findFirst({
       where: eq(agentConfigsTable.userId, userId),

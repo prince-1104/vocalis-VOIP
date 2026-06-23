@@ -73,3 +73,24 @@ export const sipTrunkConfigsTable = pgTable("sip_trunk_configs", {
 export const insertSipTrunkConfigSchema = createInsertSchema(sipTrunkConfigsTable).omit({ id: true, createdAt: true, updatedAt: true });
 export type InsertSipTrunkConfig = z.infer<typeof insertSipTrunkConfigSchema>;
 export type SipTrunkConfig = typeof sipTrunkConfigsTable.$inferSelect;
+
+/** Per-tenant Exotel credentials (superadmin-managed). */
+export const exotelConfigsTable = pgTable("exotel_configs", {
+  id: serial("id").primaryKey(),
+  tenantId: integer("tenant_id").notNull().unique().references(() => tenantsTable.id, { onDelete: "cascade" }),
+  accountSid: text("account_sid").notNull(),
+  apiKey: text("api_key").notNull(),
+  apiToken: text("api_token").notNull(),
+  exophone: text("exophone").notNull(),
+  /** singapore → api.exotel.com, mumbai → api.in.exotel.com */
+  region: text("region").notNull().default("singapore"),
+  /** ExoML flow URL, e.g. http://my.exotel.com/{sid}/exoml/start_voice/{app_id} */
+  appFlowUrl: text("app_flow_url").notNull(),
+  isEnabled: boolean("is_enabled").notNull().default(false),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+});
+
+export const insertExotelConfigSchema = createInsertSchema(exotelConfigsTable).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertExotelConfig = z.infer<typeof insertExotelConfigSchema>;
+export type ExotelConfig = typeof exotelConfigsTable.$inferSelect;

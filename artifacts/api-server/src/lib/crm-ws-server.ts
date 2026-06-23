@@ -6,7 +6,7 @@ import { db, crmApiKeysTable } from "@workspace/db";
 import { eq, and } from "drizzle-orm";
 import { crmEventBus, type CRMCallEvent } from "./crm-event-bus";
 import { logger } from "./logger";
-import { handleTwilioStreamUpgrade } from "./twilio-ws-server";
+import { handleTwilioStreamUpgrade, handleExotelStreamUpgrade } from "./twilio-ws-server";
 
 // ── WebSocket Server for CRM Real-Time Streaming ──────────────────────
 //
@@ -76,6 +76,12 @@ export function initWebSocketServer(server: HTTPServer): void {
     try {
       const url = new URL(request.url || "", `http://${request.headers.host}`);
       const pathname = url.pathname;
+
+      // Handle Exotel AgentStream upgrades
+      if (pathname.startsWith("/ws/exotel/media-stream")) {
+        await handleExotelStreamUpgrade(request, socket, head);
+        return;
+      }
 
       // Handle Twilio Media Stream upgrades
       if (pathname.startsWith("/ws/crm/calls/twilio-media-stream")) {
