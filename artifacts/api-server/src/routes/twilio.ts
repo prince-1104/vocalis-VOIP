@@ -1127,7 +1127,7 @@ router.post("/twilio/inbound", async (req, res) => {
   const isLocal = baseUrl.includes("localhost") || baseUrl.includes("127.0.0.1");
   const wsProto = isLocal ? "ws" : "wss";
   const streamUrl = `${baseUrl.replace(/^https?/, wsProto)}/ws/crm/calls/twilio-media-stream/${callLog.id}`;
-  connect.stream({ url: streamUrl });
+  connect.stream({ url: streamUrl, dtmfDetection: 'inband' } as any);
 
   res.type("text/xml");
   res.send(twiml.toString());

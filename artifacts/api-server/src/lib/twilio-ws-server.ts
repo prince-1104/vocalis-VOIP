@@ -1059,15 +1059,18 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
         isSpeaking = true;
         player?.setOnComplete(() => {
           isSpeaking = false;
+          // Start the DTMF timeout AFTER the prompt finishes playing,
+          // so the caller has the full configured time to press a digit.
+          if (languageMenuPhase) {
+            languageMenuTimer = setTimeout(() => {
+              const defaultLang = languageMenuConfig.defaultLanguage || "en-US";
+              finalizeLanguageSelection(defaultLang, "timeout").catch(err =>
+                logger.error({ err, callLogId }, "Language menu timeout handling failed"),
+              );
+            }, (languageMenuConfig.timeoutSeconds || 12) * 1000);
+          }
         });
         player?.enqueue(audio);
-
-        languageMenuTimer = setTimeout(() => {
-          const defaultLang = languageMenuConfig.defaultLanguage || "en-US";
-          finalizeLanguageSelection(defaultLang, "timeout").catch(err =>
-            logger.error({ err, callLogId }, "Language menu timeout handling failed"),
-          );
-        }, (languageMenuConfig.timeoutSeconds || 12) * 1000);
       }
     } catch (err) {
       logger.error({ err, callLogId }, "Error playing language menu — falling back to greeting");
@@ -1130,7 +1133,10 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
       }
 
       if (data.event === "dtmf") {
-        const digit = data.dtmf?.digit ?? data.dtmf?.digits?.[0];
+        // Twilio sends: { event: "dtmf", dtmf: { digit: "1" } }
+        // Exotel sends: { event: "dtmf", dtmf: { digits: ["1"] } } or { digit: "1" }
+        const digit = data.dtmf?.digit ?? data.dtmf?.digits?.[0] ?? data.digit;
+        logger.info({ callLogId, digit, languageMenuPhase, rawDtmf: data.dtmf ?? data.digit }, "DTMF event received");
         if (digit && languageMenuPhase) {
           greetingCancelled = true;
           player?.clear();
@@ -1260,7 +1266,8 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
   // Main turn pipeline
   const processUserUtterance = async (pcmSamples: Int16Array) => {
     if (isProcessingTurn) {
-      logger.info({ callLogId }, "Skipping utterance, turn already in progress");
+      logger.info({ callLogId }, "Deferring utterance, turn already in progress");
+      deferredUtterance = pcmSamples;
       return;
     }
 
@@ -1595,14 +1602,17 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
       const ttsPromises: Promise<void>[] = [];
       let sentenceIndex = 0;
 
+      let totalSentences = 0;
+
       const playAudioSequential = () => {
         while (ttsBuffersMap.has(nextWriteIndex)) {
           const buffer = ttsBuffersMap.get(nextWriteIndex)!;
           ttsBuffersMap.delete(nextWriteIndex);
 
-          if (nextWriteIndex === 0) {
-            player?.setOnComplete(() => { isSpeaking = false; });
-          }
+          // Set onComplete on every sentence — only the last one's callback
+          // will actually fire since AudioPlayer replaces the callback each time.
+          // This ensures isSpeaking stays true until ALL sentences finish playing.
+          player?.setOnComplete(() => { isSpeaking = false; });
 
           isSpeaking = true;
           player?.enqueue(buffer);
@@ -1729,6 +1739,13 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
       isGenerating = false;
     } finally {
       isProcessingTurn = false;
+      // If another utterance arrived while this turn was in progress, process it now
+      if (deferredUtterance) {
+        const pending = deferredUtterance;
+        deferredUtterance = null;
+        logger.info({ callLogId }, "Processing deferred utterance from previous turn");
+        processUserUtterance(pending);
+      }
     }
   };
 });
