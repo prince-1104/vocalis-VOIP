@@ -40,6 +40,11 @@ import {
   BULBUL_VOICE_FOR_LANG,
   finalizeCallLog,
 } from "../routes/twilio";
+import {
+  resolveCrmOpeningGreeting,
+  applyPitchTemplate,
+} from "./external-crm-lookup";
+import { shouldAutoHangupAfterTurn } from "./call-end-detector";
 
 // ── bitwise G.711 mu-law Codec ─────────────────────────────────────────
 const SIGN_BIT = 0x80;
@@ -279,6 +284,31 @@ class AudioPlayer {
 
   public setOnComplete(cb: () => void) {
     this.onComplete = cb;
+  }
+
+  /** Resolves when all queued audio has been sent and playback has stopped. */
+  public waitUntilIdle(): Promise<void> {
+    if (this.isIdle()) return Promise.resolve();
+
+    return new Promise((resolve) => {
+      const check = () => {
+        if (this.isIdle()) {
+          resolve();
+        } else {
+          this.setOnComplete(check);
+        }
+      };
+      this.setOnComplete(check);
+    });
+  }
+
+  private isIdle(): boolean {
+    return (
+      this.queue.length === 0 &&
+      !this.playbackTimer &&
+      !this.prebufferTimer &&
+      this.remainder.length === 0
+    );
   }
 
   private stopPlayback() {
@@ -651,9 +681,176 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
 
   const transferRules = callMeta.crmMetadata?.__transferRules as TransferRules | undefined;
   const hasTransferRules = !!transferRules;
+  const crmCallFlow = callMeta.externalCrmCallFlow;
 
   let limitTriggered = false;
   let limitTimer: ReturnType<typeof setTimeout> | null = null;
+  let crmLimitTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const defaultGreeting = script?.openingLine || agentConfig?.greeting || "Hi, thank you for calling. How can I help you today?";
+
+  /** End inbound CRM call: optional ending pitch, ending note, brief pause, then hang up */
+  const endCrmInboundCall = async (reason: string) => {
+    if (limitTriggered) return;
+    limitTriggered = true;
+    if (limitTimer) {
+      clearTimeout(limitTimer);
+      limitTimer = null;
+    }
+    if (crmLimitTimer) {
+      clearTimeout(crmLimitTimer);
+      crmLimitTimer = null;
+    }
+
+    const callLogIdNum = parseInt(callLogId, 10);
+    const lang = getCallLang();
+    const leadSeconds = crmCallFlow?.endingNoteLeadSeconds ?? 2;
+
+    logger.info({ callLogId, reason }, "CRM call flow limit reached — ending call");
+    player?.clear();
+    if (streamSid) {
+      ws.send(JSON.stringify({ event: "clear", streamSid }));
+    }
+
+    const playTtsMessage = async (message: string) => {
+      if (!message?.trim()) return;
+      try {
+        const audio = await generateSentenceTTS(message, lang, voice);
+        isSpeaking = true;
+        await new Promise<void>((resolve) => {
+          player?.setOnComplete(() => {
+            isSpeaking = false;
+            resolve();
+          });
+          player?.enqueue(audio);
+        });
+
+        const turn = { role: "assistant", content: message, timestamp: new Date().toISOString() };
+        callMeta.liveTranscript = [...callMeta.liveTranscript, turn];
+      } catch (ttsErr) {
+        logger.error({ ttsErr, callLogId }, "CRM ending TTS failed");
+      }
+    };
+
+    try {
+      const endingPitch = crmCallFlow?.endingPitch?.trim();
+      if (endingPitch) {
+        await playTtsMessage(applyPitchTemplate(endingPitch, callMeta.externalCrmContext));
+      }
+
+      const endingNote = crmCallFlow?.endingNote?.trim();
+      if (endingNote) {
+        await playTtsMessage(applyPitchTemplate(endingNote, callMeta.externalCrmContext));
+      } else if (!endingPitch) {
+        await playTtsMessage("Thank you for calling. Goodbye.");
+      }
+
+      if (leadSeconds > 0) {
+        await new Promise(resolve => setTimeout(resolve, leadSeconds * 1000));
+      }
+
+      const updatedTranscript = callMeta.liveTranscript;
+      await db.update(callLogsTable)
+        .set({
+          liveTranscript: updatedTranscript,
+          transcript: updatedTranscript.map(t => `${t.role === "user" ? "Caller" : "Agent"}: ${t.content}`).join("\n\n"),
+          transferReason: reason,
+          endedAt: new Date(),
+          outcome: "answered",
+        })
+        .where(eq(callLogsTable.id, callLogIdNum));
+    } catch (err) {
+      logger.error({ err, callLogId }, "CRM call ending sequence failed");
+    }
+
+    if (callSid) {
+      await hangupCall(userId, callSid, callLogRow?.phone || undefined);
+    }
+
+    isGenerating = false;
+    ws.close();
+  };
+
+  /** Hang up after the caller and AI have naturally concluded the conversation */
+  const finishCallNaturally = async (reason: string) => {
+    if (limitTriggered) return;
+    limitTriggered = true;
+    if (limitTimer) {
+      clearTimeout(limitTimer);
+      limitTimer = null;
+    }
+    if (crmLimitTimer) {
+      clearTimeout(crmLimitTimer);
+      crmLimitTimer = null;
+    }
+
+    const callLogIdNum = parseInt(callLogId, 10);
+    const lang = getCallLang();
+    const leadSeconds = crmCallFlow?.endingNoteLeadSeconds ?? 2;
+
+    logger.info({ callLogId, reason }, "Ending call after natural conversation close");
+
+    try {
+      const endingNote = crmCallFlow?.endingNote?.trim();
+      if (endingNote) {
+        const noteText = applyPitchTemplate(endingNote, callMeta.externalCrmContext);
+        const noteAudio = await generateSentenceTTS(noteText, lang, voice);
+        isSpeaking = true;
+        await new Promise<void>((resolve) => {
+          player?.setOnComplete(() => {
+            isSpeaking = false;
+            resolve();
+          });
+          player?.enqueue(noteAudio);
+        });
+        callMeta.liveTranscript = [
+          ...callMeta.liveTranscript,
+          { role: "assistant", content: noteText, timestamp: new Date().toISOString() },
+        ];
+      }
+
+      {
+        const pauseSec = endingNote ? leadSeconds : 1;
+        if (pauseSec > 0) {
+          await new Promise(resolve => setTimeout(resolve, pauseSec * 1000));
+        }
+      }
+
+      const updatedTranscript = callMeta.liveTranscript;
+      await db.update(callLogsTable)
+        .set({
+          liveTranscript: updatedTranscript,
+          transcript: updatedTranscript.map(t => `${t.role === "user" ? "Caller" : "Agent"}: ${t.content}`).join("\n\n"),
+          endedAt: new Date(),
+          outcome: "answered",
+        })
+        .where(eq(callLogsTable.id, callLogIdNum));
+    } catch (err) {
+      logger.error({ err, callLogId }, "Natural call end sequence failed");
+    }
+
+    crmEventBus.emitCallEvent({
+      type: "call.ended",
+      callId: callLogIdNum,
+      callSid: callSid || undefined,
+      userId,
+      data: {
+        outcome: "answered",
+        reason,
+        limitType: "natural_close",
+        liveTranscript: callMeta.liveTranscript,
+      },
+      metadata: callMeta.crmMetadata as Record<string, unknown> | undefined,
+      timestamp: new Date().toISOString(),
+    });
+
+    if (callSid) {
+      await hangupCall(userId, callSid, callLogRow?.phone || undefined);
+    }
+
+    isGenerating = false;
+    ws.close();
+  };
 
   /** Play closing message and hang up — no further LLM billing */
   const endCampaignCallWithMessage = async (reason: string) => {
@@ -727,7 +924,11 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
   };
 
   // Initial greeting (may be replaced after DTMF language menu)
-  let currentGreeting = script?.openingLine || agentConfig?.greeting || "Hi, thank you for calling. How can I help you today?";
+  let currentGreeting = resolveCrmOpeningGreeting(
+    crmCallFlow ?? null,
+    callMeta.externalCrmContext,
+    defaultGreeting,
+  );
 
   const clearLanguageMenuTimer = () => {
     if (languageMenuTimer) {
@@ -803,10 +1004,15 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
     lockedCallLang = selectedLang;
 
     const effectiveLang = selectedLang === "auto" ? "en-US" : selectedLang;
-    currentGreeting = greetingForLanguage(
+    const langFallback = greetingForLanguage(
       effectiveLang,
       script?.openingLine,
       agentConfig?.greeting,
+    );
+    currentGreeting = resolveCrmOpeningGreeting(
+      crmCallFlow ?? null,
+      callMeta.externalCrmContext,
+      langFallback,
     );
 
     logger.info({ callLogId, selectedLang, source }, "Call language locked from menu");
@@ -906,6 +1112,18 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
             ).catch(err => logger.error({ err, callLogId }, "Duration limit hangup failed"));
           }, remainingMs);
           logger.info({ callLogId, remainingMs }, "Campaign duration limit timer started");
+        }
+
+        if (crmCallFlow?.maxAiInteractionSeconds && crmCallFlow.maxAiInteractionSeconds > 0) {
+          const elapsed = Date.now() - callStartedAt.getTime();
+          const limitMs = crmCallFlow.maxAiInteractionSeconds * 1000;
+          const remainingMs = Math.max(0, limitMs - elapsed);
+          crmLimitTimer = setTimeout(() => {
+            endCrmInboundCall(
+              `CRM AI interaction limit reached (${crmCallFlow.maxAiInteractionSeconds}s)`,
+            ).catch(err => logger.error({ err, callLogId }, "CRM duration limit hangup failed"));
+          }, remainingMs);
+          logger.info({ callLogId, remainingMs, limitSec: crmCallFlow.maxAiInteractionSeconds }, "CRM AI interaction limit timer started");
         }
 
         playLanguageMenu();
@@ -1347,7 +1565,7 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
         }
       }
 
-      const basePrompt = await getCachedSystemPrompt(userId, { ...(agentConfig || {}), language: lang }, callMeta.scriptId, callMeta.externalCrmContext);
+      const basePrompt = await getCachedSystemPrompt(userId, { ...(agentConfig || {}), language: lang }, callMeta.scriptId, callMeta.externalCrmContext, callMeta.externalCrmCallFlow);
       let systemPrompt = basePrompt;
 
       const intentTraining = intentResult.intent !== "general_question"
@@ -1374,6 +1592,7 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
       let fullResponseText = "";
       let nextWriteIndex = 0;
       const ttsBuffersMap = new Map<number, Buffer>();
+      const ttsPromises: Promise<void>[] = [];
       let sentenceIndex = 0;
 
       const playAudioSequential = () => {
@@ -1390,6 +1609,19 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
           logger.info({ callLogId, bytes: buffer.length, index: nextWriteIndex }, "Response audio enqueued");
           nextWriteIndex++;
         }
+      };
+
+      const enqueueSentenceTTS = (sentence: string, index: number) => {
+        ttsPromises.push(
+          generateSentenceTTS(sentence, lang, voice)
+            .then(audioBuffer => {
+              if (activeGenerationId === genId) {
+                ttsBuffersMap.set(index, audioBuffer);
+                playAudioSequential();
+              }
+            })
+            .catch(err => logger.error({ err, sentence }, "TTS generation failed")),
+        );
       };
 
       for await (const chunk of responseStream) {
@@ -1410,15 +1642,7 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
           if (sentence) {
             const index = sentenceIndex++;
             logger.info({ callLogId, sentence, index }, "Streaming sentence to TTS");
-
-            generateSentenceTTS(sentence, lang, voice)
-              .then(audioBuffer => {
-                if (activeGenerationId === genId) {
-                  ttsBuffersMap.set(index, audioBuffer);
-                  playAudioSequential();
-                }
-              })
-              .catch(err => logger.error({ err, sentence }, "TTS generation failed"));
+            enqueueSentenceTTS(sentence, index);
           }
         }
       }
@@ -1427,16 +1651,13 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
         const index = sentenceIndex++;
         const sentence = sentenceBuffer.trim();
         logger.info({ callLogId, sentence, index }, "Streaming remainder sentence to TTS");
-
-        generateSentenceTTS(sentence, lang, voice)
-          .then(audioBuffer => {
-            if (activeGenerationId === genId) {
-              ttsBuffersMap.set(index, audioBuffer);
-              playAudioSequential();
-            }
-          })
-          .catch(err => logger.error({ err, sentence }, "TTS generation failed"));
+        enqueueSentenceTTS(sentence, index);
       }
+
+      await Promise.all(ttsPromises);
+
+      const endingPitchRef = crmCallFlow?.endingPitch?.trim() || script?.closingLine?.trim() || null;
+      const shouldHangup = shouldAutoHangupAfterTurn(transcript, fullResponseText, endingPitchRef);
 
       isGenerating = false;
       history.push({ role: "assistant", content: fullResponseText });
@@ -1495,6 +1716,13 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
           context: "twilio-tts-streaming"
         });
       }).catch(err => logger.error({ err }, "Cost logging error"));
+
+      if (shouldHangup && !limitTriggered) {
+        logger.info({ callLogId, transcript }, "Caller done + AI closing detected — hanging up");
+        await player?.waitUntilIdle();
+        await finishCallNaturally("Conversation naturally concluded");
+        return;
+      }
 
     } catch (err) {
       logger.error({ err }, "Error processing user utterance turn");

@@ -17,6 +17,9 @@ import {
   Shield,
   Settings2,
   Zap,
+  Phone,
+  Clock,
+  MessageSquare,
 } from "lucide-react";
 
 interface CrmConfig {
@@ -41,6 +44,14 @@ interface CrmConfig {
   maxContextChars: number;
   timeoutMs: number;
   cacheTtlSeconds: number;
+  openingPitch?: string | null;
+  endingPitch?: string | null;
+  unknownCallerPitch?: string | null;
+  endingNote?: string | null;
+  maxAiInteractionSeconds?: number;
+  endingNoteLeadSeconds?: number;
+  callInstructions?: string | null;
+  verifyIdentity?: boolean;
 }
 
 const AUTH_TYPES = [
@@ -84,6 +95,15 @@ export default function ExternalCrm() {
   const [recentOrdersPath, setRecentOrdersPath] = useState("");
   const [customFieldsStr, setCustomFieldsStr] = useState("");
 
+  const [openingPitch, setOpeningPitch] = useState("");
+  const [endingPitch, setEndingPitch] = useState("");
+  const [unknownCallerPitch, setUnknownCallerPitch] = useState("");
+  const [endingNote, setEndingNote] = useState("");
+  const [maxAiInteractionMinutes, setMaxAiInteractionMinutes] = useState(0);
+  const [endingNoteLeadSeconds, setEndingNoteLeadSeconds] = useState(2);
+  const [callInstructions, setCallInstructions] = useState("");
+  const [verifyIdentity, setVerifyIdentity] = useState(false);
+
   const [testPhone, setTestPhone] = useState("");
   const [testResult, setTestResult] = useState<any>(null);
 
@@ -117,6 +137,16 @@ export default function ExternalCrm() {
           setRecentOrdersPath(c.responseMapping.recentOrders || "");
           setCustomFieldsStr((c.responseMapping.customFields || []).join(", "));
         }
+        setOpeningPitch(c.openingPitch || "");
+        setEndingPitch(c.endingPitch || "");
+        setUnknownCallerPitch(c.unknownCallerPitch || "");
+        setEndingNote(c.endingNote || "");
+        setMaxAiInteractionMinutes(
+          c.maxAiInteractionSeconds ? Math.round(c.maxAiInteractionSeconds / 60) : 0,
+        );
+        setEndingNoteLeadSeconds(c.endingNoteLeadSeconds ?? 2);
+        setCallInstructions(c.callInstructions || "");
+        setVerifyIdentity(c.verifyIdentity ?? false);
       }
     } catch (err: any) {
       toast({ title: "Failed to load CRM config", description: err.message, variant: "destructive" });
@@ -158,6 +188,14 @@ export default function ExternalCrm() {
           maxContextChars,
           timeoutMs,
           cacheTtlSeconds,
+          openingPitch: openingPitch.trim() || null,
+          endingPitch: endingPitch.trim() || null,
+          unknownCallerPitch: unknownCallerPitch.trim() || null,
+          endingNote: endingNote.trim() || null,
+          maxAiInteractionSeconds: Math.max(0, maxAiInteractionMinutes) * 60,
+          endingNoteLeadSeconds: Math.max(0, endingNoteLeadSeconds),
+          callInstructions: callInstructions.trim() || null,
+          verifyIdentity,
         }),
       });
 
@@ -341,6 +379,124 @@ export default function ExternalCrm() {
               placeholder={authValue === "***configured***" ? "***configured*** (leave blank to keep)" : "Enter token or key"}
             />
           </div>
+        </CardContent>
+      </Card>
+
+      {/* Call Flow & Cost Control */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-lg">
+            <Phone className="w-5 h-5" />
+            Inbound Call Flow
+          </CardTitle>
+          <CardDescription>
+            Control how the AI opens, closes, and times inbound calls using CRM data. Use {"{{customerName}}"} and other field placeholders in pitches.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium">Opening Pitch</label>
+            <Textarea
+              value={openingPitch}
+              onChange={e => setOpeningPitch(e.target.value)}
+              placeholder="Hi {{customerName}}, thank you for calling. I can see your recent order is ready to ship. How may I help you today?"
+              rows={3}
+            />
+            <p className="text-xs text-muted-foreground">
+              Spoken when the call connects. Overrides the default agent greeting when CRM is enabled.
+            </p>
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium">Unknown Caller Opening</label>
+            <Textarea
+              value={unknownCallerPitch}
+              onChange={e => setUnknownCallerPitch(e.target.value)}
+              placeholder="Hi, thank you for calling. I couldn't find your account with this number — how can I assist you?"
+              rows={2}
+            />
+            <p className="text-xs text-muted-foreground">
+              Used when the CRM returns no match for the caller's phone number.
+            </p>
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium">Ending Pitch</label>
+            <Textarea
+              value={endingPitch}
+              onChange={e => setEndingPitch(e.target.value)}
+              placeholder="Is there anything else I can help you with today? Have a wonderful day!"
+              rows={2}
+            />
+            <p className="text-xs text-muted-foreground">
+              Closing line the AI uses when wrapping up, and spoken before hangup when the time limit is reached.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium flex items-center gap-1.5">
+                <Clock className="w-3.5 h-3.5" />
+                Max AI Interaction (minutes)
+              </label>
+              <Input
+                type="number"
+                min={0}
+                value={maxAiInteractionMinutes}
+                onChange={e => setMaxAiInteractionMinutes(Number(e.target.value))}
+              />
+              <p className="text-xs text-muted-foreground">0 = unlimited. Caps AI billing per inbound call.</p>
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium">Pause Before Hangup (seconds)</label>
+              <Input
+                type="number"
+                min={0}
+                value={endingNoteLeadSeconds}
+                onChange={e => setEndingNoteLeadSeconds(Number(e.target.value))}
+              />
+              <p className="text-xs text-muted-foreground">Brief pause after the ending note (default: 2 sec).</p>
+            </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium flex items-center gap-1.5">
+              <MessageSquare className="w-3.5 h-3.5" />
+              Custom Ending Note
+            </label>
+            <Textarea
+              value={endingNote}
+              onChange={e => setEndingNote(e.target.value)}
+              placeholder="Thank you for calling Rastafari Wellness. We appreciate your trust."
+              rows={2}
+            />
+            <p className="text-xs text-muted-foreground">
+              Played automatically when the time limit is reached, right before the call disconnects.
+            </p>
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium">AI Call Instructions</label>
+            <Textarea
+              value={callInstructions}
+              onChange={e => setCallInstructions(e.target.value)}
+              placeholder="Only discuss the 3 most recent orders. For prescription questions, mention the doctor on file. Never quote prices unless the customer asks."
+              rows={3}
+            />
+            <p className="text-xs text-muted-foreground">
+              Extra rules for precise CRM-aware conversations (order focus, tone, topics to avoid).
+            </p>
+          </div>
+
+          <label className="text-sm font-medium flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={verifyIdentity}
+              onChange={e => setVerifyIdentity(e.target.checked)}
+              className="rounded border-white/20"
+            />
+            Verify caller identity before sharing order or prescription details
+          </label>
         </CardContent>
       </Card>
 

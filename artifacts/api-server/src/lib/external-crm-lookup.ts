@@ -10,8 +10,20 @@ export interface ExternalCrmContext {
   email?: string;
   accountId?: string;
   recentOrders?: string;
+  customerFound?: boolean;
   rawData?: Record<string, unknown>;
   fetchedAt: string;
+}
+
+export interface ExternalCrmCallFlowConfig {
+  openingPitch?: string | null;
+  endingPitch?: string | null;
+  unknownCallerPitch?: string | null;
+  endingNote?: string | null;
+  maxAiInteractionSeconds: number;
+  endingNoteLeadSeconds: number;
+  callInstructions?: string | null;
+  verifyIdentity: boolean;
 }
 
 // ── Config cache (per userId, short TTL) ───────────────────────────────
@@ -165,6 +177,11 @@ function mapResponse(
   const mapping = config.responseMapping as ExternalCrmResponseMapping | null;
   const ctx: ExternalCrmContext = { fetchedAt: new Date().toISOString() };
 
+  const foundVal = resolveJsonPath(responseBody, "found");
+  if (typeof foundVal === "boolean") {
+    ctx.customerFound = foundVal;
+  }
+
   if (config.useRawResponse || !mapping) {
     const raw = typeof responseBody === "object" && responseBody !== null
       ? responseBody as Record<string, unknown>
@@ -180,6 +197,7 @@ function mapResponse(
 
   if (mapping.customerName) {
     ctx.customerName = stringifyValue(resolveJsonPath(responseBody, mapping.customerName));
+    if (ctx.customerFound === undefined && ctx.customerName) ctx.customerFound = true;
   }
   if (mapping.email) {
     ctx.email = stringifyValue(resolveJsonPath(responseBody, mapping.email));
@@ -206,6 +224,66 @@ function mapResponse(
   }
 
   return ctx;
+}
+
+// ── Call flow helpers ──────────────────────────────────────────────────
+
+export function extractCallFlowConfig(config: ExternalCrmConfig | null): ExternalCrmCallFlowConfig | null {
+  if (!config || !config.isEnabled) return null;
+  return {
+    openingPitch: config.openingPitch,
+    endingPitch: config.endingPitch,
+    unknownCallerPitch: config.unknownCallerPitch,
+    endingNote: config.endingNote,
+    maxAiInteractionSeconds: config.maxAiInteractionSeconds ?? 0,
+    endingNoteLeadSeconds: config.endingNoteLeadSeconds ?? 2,
+    callInstructions: config.callInstructions,
+    verifyIdentity: config.verifyIdentity ?? false,
+  };
+}
+
+export async function getExternalCrmCallFlow(userId: number): Promise<ExternalCrmCallFlowConfig | null> {
+  const config = await getCachedConfig(userId);
+  return extractCallFlowConfig(config);
+}
+
+export function applyPitchTemplate(
+  template: string,
+  ctx: ExternalCrmContext | null | undefined,
+): string {
+  if (!template) return template;
+
+  const vars: Record<string, string> = {
+    customerName: ctx?.customerName || "there",
+    email: ctx?.email || "",
+    accountId: ctx?.accountId || "",
+    recentOrders: ctx?.recentOrders || "",
+  };
+
+  if (ctx?.rawData) {
+    for (const [key, val] of Object.entries(ctx.rawData)) {
+      if (key.startsWith("_")) continue;
+      vars[key] = typeof val === "object" ? JSON.stringify(val) : String(val);
+    }
+  }
+
+  return template.replace(/\{\{(\w+)\}\}/g, (_, key: string) => vars[key] ?? "");
+}
+
+export function resolveCrmOpeningGreeting(
+  callFlow: ExternalCrmCallFlowConfig | null,
+  ctx: ExternalCrmContext | null | undefined,
+  fallbackGreeting: string,
+): string {
+  if (!callFlow) return fallbackGreeting;
+
+  const useUnknown = ctx?.customerFound === false && callFlow.unknownCallerPitch;
+  const template = useUnknown ? callFlow.unknownCallerPitch : callFlow.openingPitch;
+  if (template?.trim()) {
+    return applyPitchTemplate(template, ctx);
+  }
+
+  return fallbackGreeting;
 }
 
 // ── Main entry point ───────────────────────────────────────────────────

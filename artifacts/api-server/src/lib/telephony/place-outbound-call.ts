@@ -3,7 +3,7 @@ import { db, callLogsTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
 import { exotelConnectToFlow } from "./exotel-client";
 import { resolveTelephonyForUser, TelephonyNotConfiguredError } from "./resolve-telephony";
-import { fetchExternalCrmData } from "../external-crm-lookup";
+import { fetchExternalCrmData, getExternalCrmCallFlow } from "../external-crm-lookup";
 import { callMetaCache } from "../../routes/twilio";
 
 export interface PlaceOutboundCallParams {
@@ -55,6 +55,13 @@ export async function placeOutboundCall(params: PlaceOutboundCallParams): Promis
     if (meta) {
       meta.externalCrmContext = crmCtx;
     }
+  }).catch(() => {});
+
+  getExternalCrmCallFlow(userId).then(flow => {
+    if (!flow) return;
+    const key = String(callLog.id);
+    const meta = callMetaCache.get(key);
+    if (meta) meta.externalCrmCallFlow = flow;
   }).catch(() => {});
 
   if (telephony.provider === "EXOTEL") {

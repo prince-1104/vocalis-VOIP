@@ -111,7 +111,15 @@ export async function syncDatabase() {
       'ALTER TABLE "campaigns" ADD COLUMN IF NOT EXISTS "dial_parallel" boolean DEFAULT false NOT NULL;',
       'ALTER TABLE "campaigns" ADD COLUMN IF NOT EXISTS "transfer_config" jsonb;',
       'ALTER TABLE "tenants" ADD COLUMN IF NOT EXISTS "telephony_type" text DEFAULT \'TWILIO\' NOT NULL;',
-      'ALTER TABLE "agent_configs" ADD COLUMN IF NOT EXISTS "language_menu_config" jsonb;'
+      'ALTER TABLE "agent_configs" ADD COLUMN IF NOT EXISTS "language_menu_config" jsonb;',
+      'ALTER TABLE "external_crm_configs" ADD COLUMN IF NOT EXISTS "opening_pitch" text;',
+      'ALTER TABLE "external_crm_configs" ADD COLUMN IF NOT EXISTS "ending_pitch" text;',
+      'ALTER TABLE "external_crm_configs" ADD COLUMN IF NOT EXISTS "unknown_caller_pitch" text;',
+      'ALTER TABLE "external_crm_configs" ADD COLUMN IF NOT EXISTS "ending_note" text;',
+      'ALTER TABLE "external_crm_configs" ADD COLUMN IF NOT EXISTS "max_ai_interaction_seconds" integer DEFAULT 0 NOT NULL;',
+      'ALTER TABLE "external_crm_configs" ADD COLUMN IF NOT EXISTS "ending_note_lead_seconds" integer DEFAULT 2 NOT NULL;',
+      'ALTER TABLE "external_crm_configs" ADD COLUMN IF NOT EXISTS "call_instructions" text;',
+      'ALTER TABLE "external_crm_configs" ADD COLUMN IF NOT EXISTS "verify_identity" boolean DEFAULT false NOT NULL;',
     ];
 
     for (const q of alterQueries) {
