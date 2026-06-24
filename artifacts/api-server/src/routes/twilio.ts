@@ -247,10 +247,10 @@ const SUPPORTED_LANGUAGES_LINE =
 // Romanized Kannada / Hindi etc. is read as English by the TTS engine and sounds wrong.
 function buildScriptInstruction(language?: string | null): string {
   if (language === "hi-IN") {
-    return "CRITICAL SCRIPT RULE: Reply in Hindi using NATIVE Devanagari script (देवनागरी). Do NOT use romanized/Hinglish letters. Example: 'नमस्ते! मैं आपकी कैसे मदद कर सकता हूं?'";
+    return "CRITICAL SCRIPT RULE: Reply in Hindi using NATIVE Devanagari script (देवनागरी). Do NOT use romanized/Hinglish letters. Example: 'नमस्ते! मैं आपकी कैसे मदद कर सकती हूँ?'";
   }
   if (language === "kn-IN") {
-    return "CRITICAL SCRIPT RULE: Reply in Kannada using NATIVE Kannada script (ಕನ್ನಡ ಲಿಪಿ). Do NOT romanize. Example: 'ನಮಸ್ಕಾರ! ನಾನು ನಿಮಗೆ ಹೇಗೆ ಸಹಾಯ ಮಾಡಬಹುದು?'";
+    return "CRITICAL SCRIPT RULE: Reply in Kannada using NATIVE Kannada script (ಕನ್ನಡ ಲಿಪಿ). Do NOT romanize. Example: 'ನಮಸ್ಕಾರ! ನಾನು ನಿಮಗೆ ಹೇಗೆ ಸಹಾಯ ಮಾಡಬಲ್ಲೆ?'";
   }
   if (language === "ta-IN") {
     return "CRITICAL SCRIPT RULE: Reply in Tamil using NATIVE Tamil script (தமிழ்). Do NOT romanize.";
@@ -262,7 +262,7 @@ function buildScriptInstruction(language?: string | null): string {
     return "CRITICAL SCRIPT RULE: Reply in Marathi using NATIVE Devanagari script (मराठी). Do NOT romanize.";
   }
   if (language === "auto") {
-    return "CRITICAL SCRIPT RULE: Detect the caller's language. Reply in their NATIVE script — Hindi → Devanagari, Kannada → ಕನ್ನಡ, Tamil → தமிழ், Telugu → తెలుగు, Marathi → मराठी. Never romanize Indian languages.";
+    return "CRITICAL SCRIPT RULE: Detect the caller's language. Reply in their NATIVE script — Hindi → Devanagari, Kannada → ಕನ್ನಡ, Tamil → தமிழ், Telugu → తెలుగు, Marathi → मराठी. Never romanize Indian languages. Always use feminine verb forms.";
   }
   return "";
 }
@@ -279,9 +279,17 @@ async function buildSystemPrompt(
     resolveActiveScript(userId, scriptId),
   ]);
 
-  let system = `You are ${agentConfig.agentName || "SalesBot"}, an AI sales representative`;
+  let system = `You are ${agentConfig.agentName || "SalesBot"}, a female AI sales representative`;
   if (agentConfig.personality) system += ` with a ${agentConfig.personality} personality`;
   system += `. You are on a live phone call. Keep ALL responses under 2 sentences — be direct and conversational. Never mention you are an AI unless directly asked.\n\n`;
+
+  // All Indian-language TTS voices (kavya, priya, pooja, simran) are female.
+  // Instruct the LLM to use feminine grammar so verb conjugations match the voice.
+  const feminineVoiceLangs = ["hi-IN", "kn-IN", "ta-IN", "te-IN", "mr-IN"];
+  const effectiveLang = agentConfig.language ?? "en-US";
+  if (feminineVoiceLangs.includes(effectiveLang) || effectiveLang === "auto") {
+    system += `GENDER RULE: You are a FEMALE assistant. In Hindi use feminine verb forms — e.g. "मैं कर सकती हूँ" (sakti), NOT "मैं कर सकता हूँ" (sakta). Similarly use feminine forms in all Indian languages. This is critical for matching your voice.\n\n`;
+  }
 
   system += `${SUPPORTED_LANGUAGES_LINE}\n\n`;
 

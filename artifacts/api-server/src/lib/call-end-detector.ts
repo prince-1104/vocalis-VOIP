@@ -9,6 +9,15 @@ const CALLER_DONE_PATTERNS: RegExp[] = [
   /\bnot interested\b/i,
   /\b(i'?m|i am) (good|done|fine)\b/i,
   /^(ok(ay)?|sure)?[,.\s]*(thank you|thanks)\s*[.!]?\s*$/i,
+  // Hindi / Hinglish
+  /\b(alvida|अलविदा)\b/i,
+  /\b(dhanyavaad|dhanyawad|धन्यवाद)\b/i,
+  /\b(shukriya|शुक्रिया)\b/i,
+  /\b(bas|बस)\b.*\b(itna|इतना|ho gaya|हो गया)\b/i,
+  /\b(nahi|nhi|नहीं)\b.*\b(kuch nahi|कुछ नहीं|aur nahi|और नहीं)\b/i,
+  /\b(theek hai|ठीक है)\b.*\b(dhanyavaad|धन्यवाद|shukriya|शुक्रिया|thank)\b/i,
+  /\b(ok|okay|theek)\b.*\b(bye|बाय)\b/i,
+  /\b(ho gaya|हो गया|bas ho gaya|बस हो गया)\b/i,
 ];
 
 const AI_CLOSING_PATTERNS: RegExp[] = [
@@ -18,10 +27,19 @@ const AI_CLOSING_PATTERNS: RegExp[] = [
   /\btake care\b/i,
   /\bwe appreciate (your|you)\b/i,
   /\bfeel free to reach out\b/i,
+  // Hindi / Hinglish
+  /\b(अलविदा|alvida)\b/i,
+  /\b(शुभ दिन|shubh din)\b/i,
+  /\b(कॉल करने के लिए धन्यवाद|call karne ke liye dhanyavaad)\b/i,
+  /\b(ध्यान रखें|dhyan rakhein)\b/i,
+  /\b(फोन करने के लिए|phone karne ke liye)\b.*\b(धन्यवाद|शुक्रिया|dhanyavaad|shukriya)\b/i,
+  /\b(हम आपसे संपर्क|hum aapse sampark|हम.*संपर्क करेंगे)\b/i,
 ];
 
 const AI_CONTINUES_PATTERNS: RegExp[] = [
   /\b(anything else|can i help|is there anything|would you like|do you have any other|shall i|let me know if)\b/i,
+  // Hindi
+  /\b(और कुछ|aur kuch|कुछ और|kuch aur|मदद कर सकती|madad kar sakti)\b/i,
 ];
 
 export function callerWantsToEnd(text: string): boolean {

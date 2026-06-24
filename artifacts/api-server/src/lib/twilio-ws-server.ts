@@ -471,11 +471,12 @@ async function generateSentenceTTS(text: string, lang: string, voice: string): P
   const SARVAM_API_KEY = process.env.SARVAM_API_KEY ?? "";
   const useSarvamTts = isIndianLanguage(lang);
 
-  if (useSarvamTts) {
-    try {
-      if (!SARVAM_API_KEY) throw new Error("SARVAM_API_KEY not configured");
-      const speaker = BULBUL_VOICE_FOR_LANG[lang] ?? "manan";
+  if (useSarvamTts && SARVAM_API_KEY) {
+    const speaker = BULBUL_VOICE_FOR_LANG[lang] ?? "manan";
 
+    // Fire both Sarvam and OpenAI TTS in parallel — use whichever responds first.
+    // Sarvam has better Indian language prosody, so prefer it if it finishes quickly.
+    const sarvamPromise = (async (): Promise<{ source: "sarvam"; audio: Buffer }> => {
       const res = await fetchWithTimeout("https://api.sarvam.ai/text-to-speech", {
         method: "POST",
         headers: {
@@ -493,7 +494,7 @@ async function generateSentenceTTS(text: string, lang: string, voice: string): P
           enable_preprocessing: true,
           output_audio_codec: "wav",
         }),
-        timeout: 5000,
+        timeout: 4000,
       });
 
       if (!res.ok) {
@@ -506,20 +507,29 @@ async function generateSentenceTTS(text: string, lang: string, voice: string): P
       if (!audioBase64) throw new Error("No audio returned from Sarvam");
       const wavBuffer = Buffer.from(audioBase64, "base64");
       const mulaw = await convertToMulawWithFallback(wavBuffer);
-      logger.info({ bytes: mulaw.length, lang }, "Sarvam TTS mulaw audio ready");
-      return mulaw;
-    } catch (sarvamErr: any) {
-      logger.warn({ err: sarvamErr, lang }, "Sarvam TTS failed, falling back to OpenAI TTS");
+      return { source: "sarvam", audio: mulaw };
+    })();
+
+    const openaiPromise = (async (): Promise<{ source: "openai"; audio: Buffer }> => {
       const mp3Response = await openai.audio.speech.create({
         model: "tts-1",
         voice: (voice || "nova") as any,
         input: text,
       });
-
       const mp3Buffer = Buffer.from(await mp3Response.arrayBuffer());
       const mulaw = await convertToMulawWithFallback(mp3Buffer);
-      logger.info({ bytes: mulaw.length, lang, fallback: true }, "OpenAI TTS mulaw audio ready (Sarvam fallback)");
-      return mulaw;
+      return { source: "openai", audio: mulaw };
+    })();
+
+    try {
+      // Race both — whichever finishes first wins
+      const result = await Promise.any([sarvamPromise, openaiPromise]);
+      logger.info({ bytes: result.audio.length, lang, source: result.source }, `${result.source === "sarvam" ? "Sarvam" : "OpenAI"} TTS mulaw audio ready (race winner)`);
+      return result.audio;
+    } catch (aggErr) {
+      // Both failed — this is very unlikely but handle gracefully
+      logger.error({ err: aggErr, lang }, "Both Sarvam and OpenAI TTS failed");
+      throw aggErr;
     }
   } else {
     const mp3Response = await openai.audio.speech.create({
@@ -731,8 +741,15 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
       try {
         const audio = await generateSentenceTTS(message, lang, voice);
         isSpeaking = true;
+        // Timeout the player callback — if audio doesn't finish in 8s, proceed anyway
         await new Promise<void>((resolve) => {
+          const safetyTimeout = setTimeout(() => {
+            isSpeaking = false;
+            logger.warn({ callLogId }, "playTtsMessage timed out after 8s — proceeding to hangup");
+            resolve();
+          }, 8000);
           player?.setOnComplete(() => {
+            clearTimeout(safetyTimeout);
             isSpeaking = false;
             resolve();
           });
@@ -775,14 +792,16 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
         .where(eq(callLogsTable.id, callLogIdNum));
     } catch (err) {
       logger.error({ err, callLogId }, "CRM call ending sequence failed");
+    } finally {
+      // Always hang up — even if TTS/DB failed
+      if (callSid) {
+        await hangupCall(userId, callSid, callLogRow?.phone || undefined).catch(
+          (err) => logger.error({ err, callLogId }, "Hangup failed in endCrmInboundCall"),
+        );
+      }
+      isGenerating = false;
+      ws.close();
     }
-
-    if (callSid) {
-      await hangupCall(userId, callSid, callLogRow?.phone || undefined);
-    }
-
-    isGenerating = false;
-    ws.close();
   };
 
   /** Hang up after the caller and AI have naturally concluded the conversation */
@@ -811,7 +830,13 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
         const noteAudio = await generateSentenceTTS(noteText, lang, voice);
         isSpeaking = true;
         await new Promise<void>((resolve) => {
+          const safetyTimeout = setTimeout(() => {
+            isSpeaking = false;
+            logger.warn({ callLogId }, "finishCallNaturally TTS timed out after 8s — proceeding to hangup");
+            resolve();
+          }, 8000);
           player?.setOnComplete(() => {
+            clearTimeout(safetyTimeout);
             isSpeaking = false;
             resolve();
           });
@@ -841,29 +866,31 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
         .where(eq(callLogsTable.id, callLogIdNum));
     } catch (err) {
       logger.error({ err, callLogId }, "Natural call end sequence failed");
+    } finally {
+      crmEventBus.emitCallEvent({
+        type: "call.ended",
+        callId: callLogIdNum,
+        callSid: callSid || undefined,
+        userId,
+        data: {
+          outcome: "answered",
+          reason,
+          limitType: "natural_close",
+          liveTranscript: callMeta.liveTranscript,
+        },
+        metadata: callMeta.crmMetadata as Record<string, unknown> | undefined,
+        timestamp: new Date().toISOString(),
+      });
+
+      if (callSid) {
+        await hangupCall(userId, callSid, callLogRow?.phone || undefined).catch(
+          (err) => logger.error({ err, callLogId }, "Hangup failed in finishCallNaturally"),
+        );
+      }
+
+      isGenerating = false;
+      ws.close();
     }
-
-    crmEventBus.emitCallEvent({
-      type: "call.ended",
-      callId: callLogIdNum,
-      callSid: callSid || undefined,
-      userId,
-      data: {
-        outcome: "answered",
-        reason,
-        limitType: "natural_close",
-        liveTranscript: callMeta.liveTranscript,
-      },
-      metadata: callMeta.crmMetadata as Record<string, unknown> | undefined,
-      timestamp: new Date().toISOString(),
-    });
-
-    if (callSid) {
-      await hangupCall(userId, callSid, callLogRow?.phone || undefined);
-    }
-
-    isGenerating = false;
-    ws.close();
   };
 
   /** Play closing message and hang up — no further LLM billing */
@@ -889,7 +916,13 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
       const closingAudio = await generateSentenceTTS(closingMessage, lang, voice);
       isSpeaking = true;
       await new Promise<void>((resolve) => {
+        const safetyTimeout = setTimeout(() => {
+          isSpeaking = false;
+          logger.warn({ callLogId }, "endCampaignCallWithMessage TTS timed out after 8s — proceeding to hangup");
+          resolve();
+        }, 8000);
         player?.setOnComplete(() => {
+          clearTimeout(safetyTimeout);
           isSpeaking = false;
           resolve();
         });
@@ -912,29 +945,31 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
         .where(eq(callLogsTable.id, callLogIdNum));
     } catch (ttsErr) {
       logger.error({ ttsErr, callLogId }, "Closing message TTS failed");
+    } finally {
+      crmEventBus.emitCallEvent({
+        type: "call.ended",
+        callId: callLogIdNum,
+        callSid: callSid || undefined,
+        userId,
+        data: {
+          outcome: "answered",
+          reason,
+          limitType: "campaign",
+          liveTranscript: callMeta.liveTranscript,
+        },
+        metadata: callMeta.crmMetadata as Record<string, unknown> | undefined,
+        timestamp: new Date().toISOString(),
+      });
+
+      if (callSid) {
+        await hangupCall(userId, callSid, callLogRow?.phone || undefined).catch(
+          (err) => logger.error({ err, callLogId }, "Hangup failed in endCampaignCallWithMessage"),
+        );
+      }
+
+      isGenerating = false;
+      ws.close();
     }
-
-    crmEventBus.emitCallEvent({
-      type: "call.ended",
-      callId: callLogIdNum,
-      callSid: callSid || undefined,
-      userId,
-      data: {
-        outcome: "answered",
-        reason,
-        limitType: "campaign",
-        liveTranscript: callMeta.liveTranscript,
-      },
-      metadata: callMeta.crmMetadata as Record<string, unknown> | undefined,
-      timestamp: new Date().toISOString(),
-    });
-
-    if (callSid) {
-      await hangupCall(userId, callSid, callLogRow?.phone || undefined);
-    }
-
-    isGenerating = false;
-    ws.close();
   };
 
   // Initial greeting (may be replaced after DTMF language menu)
@@ -1493,7 +1528,13 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
               const handoffAudio = await generateSentenceTTS(transferMessage, lang, voice);
               isSpeaking = true;
               await new Promise<void>((resolve) => {
+                const safetyTimeout = setTimeout(() => {
+                  isSpeaking = false;
+                  logger.warn({ callLogId }, "Handoff TTS timed out after 8s — proceeding to hangup");
+                  resolve();
+                }, 8000);
                 player?.setOnComplete(() => {
+                  clearTimeout(safetyTimeout);
                   isSpeaking = false;
                   resolve();
                 });
@@ -1514,28 +1555,30 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
                 .where(eq(callLogsTable.id, callLogIdNum));
             } catch (ttsErr) {
               logger.error({ ttsErr, callLogId }, "Handoff TTS failed");
+            } finally {
+              crmEventBus.emitCallEvent({
+                type: "call.transferred",
+                callId: callLogIdNum,
+                callSid,
+                userId,
+                data: await buildHandoffData({
+                  transferTo: `crm:${agentId}`,
+                  reason: decision.reason,
+                  handoffMode: "crm_dashboard",
+                }),
+                metadata: callMeta.crmMetadata as Record<string, unknown> | undefined,
+                timestamp: new Date().toISOString(),
+              });
+
+              if (callSid) {
+                await hangupCall(userId, callSid, callLogRow?.phone || undefined).catch(
+                  (err) => logger.error({ err, callLogId }, "Hangup failed in CRM dashboard handoff"),
+                );
+              }
+
+              isGenerating = false;
+              ws.close();
             }
-
-            crmEventBus.emitCallEvent({
-              type: "call.transferred",
-              callId: callLogIdNum,
-              callSid,
-              userId,
-              data: await buildHandoffData({
-                transferTo: `crm:${agentId}`,
-                reason: decision.reason,
-                handoffMode: "crm_dashboard",
-              }),
-              metadata: callMeta.crmMetadata as Record<string, unknown> | undefined,
-              timestamp: new Date().toISOString(),
-            });
-
-            if (callSid) {
-              await hangupCall(userId, callSid, callLogRow?.phone || undefined);
-            }
-
-            isGenerating = false;
-            ws.close();
             return;
           }
 
