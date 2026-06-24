@@ -994,6 +994,13 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
     } catch (err) {
       logger.error({ err }, "Error playing greeting");
       isGenerating = false;
+      isSpeaking = false;
+      greetingPhase = false;
+      if (deferredUtterance) {
+        const pending = deferredUtterance;
+        deferredUtterance = null;
+        processUserUtterance(pending);
+      }
     }
   };
 
