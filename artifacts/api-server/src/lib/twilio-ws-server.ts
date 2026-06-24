@@ -472,41 +472,55 @@ async function generateSentenceTTS(text: string, lang: string, voice: string): P
   const useSarvamTts = isIndianLanguage(lang);
 
   if (useSarvamTts) {
-    if (!SARVAM_API_KEY) throw new Error("SARVAM_API_KEY not configured");
-    const speaker = BULBUL_VOICE_FOR_LANG[lang] ?? "manan";
+    try {
+      if (!SARVAM_API_KEY) throw new Error("SARVAM_API_KEY not configured");
+      const speaker = BULBUL_VOICE_FOR_LANG[lang] ?? "manan";
 
-    const res = await fetchWithTimeout("https://api.sarvam.ai/text-to-speech", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "api-subscription-key": SARVAM_API_KEY,
-      },
-      body: JSON.stringify({
-        inputs: [text],
-        target_language_code: lang,
-        speaker,
-        model: "bulbul:v3",
-        temperature: 0.4,
-        pace: 1.0,
-        speech_sample_rate: 8000,
-        enable_preprocessing: true,
-        output_audio_codec: "wav",
-      }),
-      timeout: 2500,
-    });
+      const res = await fetchWithTimeout("https://api.sarvam.ai/text-to-speech", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "api-subscription-key": SARVAM_API_KEY,
+        },
+        body: JSON.stringify({
+          inputs: [text],
+          target_language_code: lang,
+          speaker,
+          model: "bulbul:v3",
+          temperature: 0.4,
+          pace: 1.0,
+          speech_sample_rate: 8000,
+          enable_preprocessing: true,
+          output_audio_codec: "wav",
+        }),
+        timeout: 5000,
+      });
 
-    if (!res.ok) {
-      const errText = await res.text();
-      throw new Error(`Sarvam Bulbul v3 TTS error ${res.status}: ${errText}`);
+      if (!res.ok) {
+        const errText = await res.text();
+        throw new Error(`Sarvam Bulbul v3 TTS error ${res.status}: ${errText}`);
+      }
+
+      const data = await res.json() as any;
+      const audioBase64: string | undefined = data.audios?.[0];
+      if (!audioBase64) throw new Error("No audio returned from Sarvam");
+      const wavBuffer = Buffer.from(audioBase64, "base64");
+      const mulaw = await convertToMulawWithFallback(wavBuffer);
+      logger.info({ bytes: mulaw.length, lang }, "Sarvam TTS mulaw audio ready");
+      return mulaw;
+    } catch (sarvamErr: any) {
+      logger.warn({ err: sarvamErr, lang }, "Sarvam TTS failed, falling back to OpenAI TTS");
+      const mp3Response = await openai.audio.speech.create({
+        model: "tts-1",
+        voice: (voice || "nova") as any,
+        input: text,
+      });
+
+      const mp3Buffer = Buffer.from(await mp3Response.arrayBuffer());
+      const mulaw = await convertToMulawWithFallback(mp3Buffer);
+      logger.info({ bytes: mulaw.length, lang, fallback: true }, "OpenAI TTS mulaw audio ready (Sarvam fallback)");
+      return mulaw;
     }
-
-    const data = await res.json() as any;
-    const audioBase64: string | undefined = data.audios?.[0];
-    if (!audioBase64) throw new Error("No audio returned from Sarvam");
-    const wavBuffer = Buffer.from(audioBase64, "base64");
-    const mulaw = await convertToMulawWithFallback(wavBuffer);
-    logger.info({ bytes: mulaw.length, lang }, "Sarvam TTS mulaw audio ready");
-    return mulaw;
   } else {
     const mp3Response = await openai.audio.speech.create({
       model: "tts-1",
