@@ -349,6 +349,11 @@ async function buildSystemPrompt(
       `- If the customer asks about an order ID you don't have, respond: "I don't have order [ID] in my records. Your available orders are: [list the IDs you have]." Do NOT guess.\n` +
       `- Always use the exact product name and status from the CRM data — never paraphrase or abbreviate product names.\n\n`;
 
+    system += `DOCTOR INFORMATION RULES:\n` +
+      `- If the customer asks about their prescribing doctor or the doctor on file, check the "Doctor on File" in the CUSTOMER CONTEXT.\n` +
+      `- If a doctor is listed, state it clearly (e.g., "Your prescribing doctor is [Doctor Name]").\n` +
+      `- If no doctor is explicitly listed in your context, say: "I don't have a prescribing doctor on file for your account."\n\n`;
+
     system += `\nIMPORTANT: Use the above customer context to personalize the conversation. ` +
       `Address the customer by name if available. Reference their orders or account details when relevant. ` +
       `Do NOT read out raw IDs or technical fields unless the customer asks.\n`;
@@ -482,6 +487,18 @@ const INDIAN_LANGUAGES = new Set(["kn-IN", "hi-IN", "ta-IN", "te-IN", "mr-IN"]);
 
 function isIndianLanguage(lang?: string | null): boolean {
   return INDIAN_LANGUAGES.has(lang ?? "");
+}
+
+function isIndianAccentNeeded(lang?: string | null): boolean {
+  if (!lang) return false;
+  return ["hi-IN", "kn-IN", "ta-IN", "te-IN", "mr-IN", "en-IN", "en-US"].includes(lang);
+}
+
+function getIndianPollyVoice(lang: string): string {
+  if (lang.startsWith("hi") || lang.startsWith("kn") || lang.startsWith("ta") || lang.startsWith("te") || lang.startsWith("mr")) {
+    return "Polly.Aditi";
+  }
+  return "Polly.Raveena";
 }
 
 function getTwilioLang(lang?: string | null): string {
@@ -660,8 +677,9 @@ function normalizeTTSPronunciation(text: string, lang: string): string {
 async function callSarvamTTS(text: string, lang: string): Promise<string | null> {
   if (!SARVAM_API_KEY) return null;
 
-  const ttsText = normalizeTTSPronunciation(text, lang);
-  const speaker = BULBUL_VOICE_FOR_LANG[lang] ?? "manan";
+  const sarvamLang = (lang === "en-US") ? "en-IN" : lang;
+  const ttsText = normalizeTTSPronunciation(text, sarvamLang);
+  const speaker = BULBUL_VOICE_FOR_LANG[sarvamLang] ?? "manan";
 
   const res = await fetchWithTimeout("https://api.sarvam.ai/text-to-speech", {
     method: "POST",
@@ -671,7 +689,7 @@ async function callSarvamTTS(text: string, lang: string): Promise<string | null>
     },
     body: JSON.stringify({
       inputs: [ttsText],
-      target_language_code: lang,
+      target_language_code: sarvamLang,
       speaker,
       model: "bulbul:v3",
       // Lower temperature → deterministic, cleaner pronunciation. Bulbul v3 ignores pitch/loudness.
@@ -761,7 +779,7 @@ async function renderPromptAudioForCall(
   lang: string,
   voice: string,
 ): Promise<{ ttsAudioId: string | null; useMp3: boolean }> {
-  if (isIndianLanguage(lang)) {
+  if (isIndianAccentNeeded(lang)) {
     try {
       const sarvamTtsId = await withTimeout(callSarvamTTS(text, lang), 2500, "Greeting Sarvam TTS timeout");
       if (sarvamTtsId) {
@@ -1459,7 +1477,7 @@ router.post("/twilio/voice", async (req, res) => {
       llmDuration = Date.now() - llmStart;
 
       // Start TTS generation immediately (fire-and-forget race with DB writes below)
-      const useSarvamTts = isIndianLanguage(lang);
+      const useSarvamTts = isIndianAccentNeeded(lang);
       const ttsStart = Date.now();
       const ttsPromise = withTimeout(
         useSarvamTts
@@ -1570,13 +1588,14 @@ router.post("/twilio/voice", async (req, res) => {
 
   // TTS was already generated in parallel inside the AI response block above.
   // ttsAudioId is set if OpenAI TTS or Sarvam TTS succeeded.
-  const useSarvamTts = isIndianLanguage(lang);
+  const useSarvamTts = isIndianAccentNeeded(lang);
   const ttsUseMp3 = ttsAudioId !== null && !useSarvamTts;
 
   if (ttsAudioId) {
     gather.play(`${baseUrl}/api/twilio/${ttsUseMp3 ? "tts-audio-mp3" : "tts-audio"}/${ttsAudioId}`);
   } else {
-    gather.say({ voice: voice as any, language: getTwilioLang(lang) as any }, aiResponse);
+    const fallbackVoice = isIndianAccentNeeded(lang) ? getIndianPollyVoice(lang) : voice;
+    gather.say({ voice: fallbackVoice as any, language: getTwilioLang(lang) as any }, aiResponse);
   }
 
   twiml.redirect({ method: "POST" }, `${baseUrl}/api/twilio/voice?callLogId=${callLogId}&history=${encodedHistory}&intentCounts=${encodedIntentCounts}&humanReqCount=${humanReqCount}&silent=1`);
@@ -1736,7 +1755,8 @@ router.post("/twilio/voice-indic", async (req, res) => {
   if (ttsAudioId) {
     gather.play(`${baseUrl}/api/twilio/tts-audio/${ttsAudioId}`);
   } else {
-    gather.say({ voice: voice as any, language: getTwilioLang(lang) as any }, aiResponse);
+    const fallbackVoice = isIndianAccentNeeded(lang) ? getIndianPollyVoice(lang) : voice;
+    gather.say({ voice: fallbackVoice as any, language: getTwilioLang(lang) as any }, aiResponse);
   }
 
   twiml.redirect({ method: "POST" }, `${baseUrl}/api/twilio/voice?callLogId=${callLogId}&history=${encodedHistory}&intentCounts=${encodedIntentCounts}&humanReqCount=${humanReqCount}&silent=1`);

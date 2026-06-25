@@ -8,6 +8,7 @@ export interface ExternalCrmResponseMapping {
   email?: string;
   accountId?: string;
   recentOrders?: string;
+  doctor?: string;
   customFields?: string[];
 }
 

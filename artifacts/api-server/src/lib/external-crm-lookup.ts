@@ -185,6 +185,9 @@ function mapResponse(
 
   // Automatically extract doctor from the responseBody if present
   let doctorVal: any = resolveJsonPath(responseBody, "customer.doctor") || resolveJsonPath(responseBody, "doctor");
+  if (!doctorVal && mapping?.doctor) {
+    doctorVal = resolveJsonPath(responseBody, mapping.doctor);
+  }
   if (!doctorVal && typeof responseBody === "object" && responseBody !== null) {
     const orders = (responseBody as any).recentOrders;
     if (Array.isArray(orders) && orders.length > 0) {
@@ -271,6 +274,7 @@ export function applyPitchTemplate(
     email: ctx?.email || "",
     accountId: ctx?.accountId || "",
     recentOrders: ctx?.recentOrders || "",
+    doctor: ctx?.doctor || "",
   };
 
   if (ctx?.rawData) {

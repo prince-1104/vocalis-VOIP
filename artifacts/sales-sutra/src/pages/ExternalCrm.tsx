@@ -38,6 +38,7 @@ interface CrmConfig {
     email?: string;
     accountId?: string;
     recentOrders?: string;
+    doctor?: string;
     customFields?: string[];
   } | null;
   useRawResponse: boolean;
@@ -93,6 +94,7 @@ export default function ExternalCrm() {
   const [emailPath, setEmailPath] = useState("");
   const [accountIdPath, setAccountIdPath] = useState("");
   const [recentOrdersPath, setRecentOrdersPath] = useState("");
+  const [doctorPath, setDoctorPath] = useState("");
   const [customFieldsStr, setCustomFieldsStr] = useState("");
 
   const [openingPitch, setOpeningPitch] = useState("");
@@ -135,6 +137,7 @@ export default function ExternalCrm() {
           setEmailPath(c.responseMapping.email || "");
           setAccountIdPath(c.responseMapping.accountId || "");
           setRecentOrdersPath(c.responseMapping.recentOrders || "");
+          setDoctorPath(c.responseMapping.doctor || "");
           setCustomFieldsStr((c.responseMapping.customFields || []).join(", "));
         }
         setOpeningPitch(c.openingPitch || "");
@@ -167,6 +170,7 @@ export default function ExternalCrm() {
       if (emailPath) responseMapping.email = emailPath;
       if (accountIdPath) responseMapping.accountId = accountIdPath;
       if (recentOrdersPath) responseMapping.recentOrders = recentOrdersPath;
+      if (doctorPath) responseMapping.doctor = doctorPath;
       if (customFieldsStr.trim()) {
         responseMapping.customFields = customFieldsStr.split(",").map((s: string) => s.trim()).filter(Boolean);
       }
@@ -542,6 +546,15 @@ export default function ExternalCrm() {
                 <div className="space-y-1.5">
                   <label className="text-xs font-medium text-muted-foreground">Recent Orders</label>
                   <Input value={recentOrdersPath} onChange={e => setRecentOrdersPath(e.target.value)} placeholder="data.orders" />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-1.5">
+                  <label className="text-xs font-medium text-muted-foreground">Prescribing Doctor</label>
+                  <Input value={doctorPath} onChange={e => setDoctorPath(e.target.value)} placeholder="data.doctor" />
+                </div>
+                <div className="space-y-1.5">
+                  {/* Kept empty for layout balance */}
                 </div>
               </div>
               <div className="space-y-1.5">
