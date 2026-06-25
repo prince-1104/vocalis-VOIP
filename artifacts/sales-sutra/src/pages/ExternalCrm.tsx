@@ -68,6 +68,22 @@ const PARAM_LOCATIONS = [
   { value: "path", label: "URL Path ({phone})" },
 ];
 
+const CALL_FLOW_TEMPLATES: Record<string, string> = {
+  rastafari: `Only discuss the customer's orders and details available in the CRM context.
+- Order Status & Location: If asked "where is my order" or "order status", look up the status and explain.
+- Order Delays: If order is processing/pending, reassure the customer politely.
+- Doctor: If asked for prescribing doctor or doctor's name, share the "Doctor on File" (e.g. Dr. Priyanka Singh).
+- Order Creation Date: Share the order placement/creation date when asked.
+- Order Items & Details: Provide exact product names and totals without guessing.
+- Specific Order Lookup: When asked about a specific order ID (e.g. #5124), match it against context. If not found, list available order IDs.`,
+
+  verification: `Focus on prescription details and doctor-assigned information.
+- Verify Identity: First confirm customer name or email before sharing any details.
+- Doctor Name: State the prescribing doctor's name from file when asked.
+- Order & Rx Details: Mention if the prescription is valid and what products are included.
+- General Support: Guide patient queries to clinical support if data is missing.`,
+};
+
 export default function ExternalCrm() {
   const { toast } = useToast();
   const [loading, setLoading] = useState(true);
@@ -480,12 +496,34 @@ export default function ExternalCrm() {
           </div>
 
           <div className="space-y-1.5">
-            <label className="text-sm font-medium">AI Call Instructions</label>
+            <div className="flex items-center justify-between">
+              <label className="text-sm font-medium">AI Call Instructions</label>
+              <div className="flex gap-1.5">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-7 text-xs px-2"
+                  onClick={() => setCallInstructions(CALL_FLOW_TEMPLATES.rastafari)}
+                >
+                  Load Order/Status Flow Template
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-7 text-xs px-2"
+                  onClick={() => setCallInstructions(CALL_FLOW_TEMPLATES.verification)}
+                >
+                  Load Rx/Verification Template
+                </Button>
+              </div>
+            </div>
             <Textarea
               value={callInstructions}
               onChange={e => setCallInstructions(e.target.value)}
               placeholder="Only discuss the customer's orders. For prescription questions, mention the doctor on file. Never quote prices unless the customer asks."
-              rows={3}
+              rows={5}
             />
             <p className="text-xs text-muted-foreground">
               Extra rules for precise CRM-aware conversations (order focus, tone, topics to avoid).

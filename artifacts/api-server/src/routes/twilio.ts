@@ -343,9 +343,11 @@ async function buildSystemPrompt(
       `- Do NOT fabricate product names, statuses, prices, or reasons for any order.\n\n`;
 
     system += `ORDER HANDLING RULES:\n` +
-      `- When a customer asks about a specific order ID, match it EXACTLY against the order IDs in your context.\n` +
+      `- When a customer asks about a specific order ID (e.g. #5124 or 25214), match it EXACTLY against the order IDs in your context.\n` +
       `- If the order status is "Denied" or "Cancelled", explain clearly: mention the order ID, product name, and current status. If a reason is available in the data, share it. Otherwise say "For the exact reason, please contact our support team."\n` +
-      `- If the order status is "Processing" or "Pending", reassure the customer and provide the product details.\n` +
+      `- If the order status is "Processing" or "Pending", reassure the customer and provide the product details. If they ask about a delay, explain that the order is processing and will be updated shortly.\n` +
+      `- If the customer asks "when did I place/create my order", check the placement date in context (e.g. "placedAt" or date fields) and share it.\n` +
+      `- If the customer asks about "order items" or what is in the order, state the exact products (and quantity/price if available in the context).\n` +
       `- If the customer asks about an order ID you don't have, respond: "I don't have order [ID] in my records. Your available orders are: [list the IDs you have]." Do NOT guess.\n` +
       `- Always use the exact product name and status from the CRM data — never paraphrase or abbreviate product names.\n\n`;
 
