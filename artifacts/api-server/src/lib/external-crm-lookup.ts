@@ -286,6 +286,55 @@ export function resolveCrmOpeningGreeting(
   return fallbackGreeting;
 }
 
+// ── Order ID extraction ────────────────────────────────────────────────
+
+/**
+ * Extract order IDs from CRM context for use in greetings.
+ * Looks at recentOrders string and rawData for order-like IDs.
+ * Returns up to `limit` order IDs (default 3).
+ */
+export function extractOrderIds(
+  ctx: ExternalCrmContext | null | undefined,
+  limit = 3,
+): string[] {
+  if (!ctx) return [];
+  const ids = new Set<string>();
+
+  // Parse order IDs from the recentOrders string (various formats)
+  if (ctx.recentOrders) {
+    // Match patterns like "Order 25214", "#25214", "order_id: 25214", "ID: 25214"
+    const orderIdPattern = /(?:order[_\s]*(?:id)?[:\s#]*|#)(\d{3,})/gi;
+    let match: RegExpExecArray | null;
+    while ((match = orderIdPattern.exec(ctx.recentOrders)) !== null) {
+      ids.add(match[1]);
+    }
+    // Also try standalone numbers in structured data like "25214; 25213; 25215"
+    if (ids.size === 0) {
+      const standaloneNums = ctx.recentOrders.match(/\b\d{4,}\b/g);
+      if (standaloneNums) {
+        for (const n of standaloneNums) ids.add(n);
+      }
+    }
+  }
+
+  // Also check rawData for order-related fields
+  if (ctx.rawData) {
+    for (const [key, val] of Object.entries(ctx.rawData)) {
+      if (key.startsWith("_")) continue;
+      const keyLower = key.toLowerCase();
+      if (keyLower.includes("order")) {
+        const valStr = typeof val === "object" ? JSON.stringify(val) : String(val);
+        const nums = valStr.match(/\b\d{4,}\b/g);
+        if (nums) {
+          for (const n of nums) ids.add(n);
+        }
+      }
+    }
+  }
+
+  return Array.from(ids).slice(0, limit);
+}
+
 // ── Main entry point ───────────────────────────────────────────────────
 
 export async function fetchExternalCrmData(
