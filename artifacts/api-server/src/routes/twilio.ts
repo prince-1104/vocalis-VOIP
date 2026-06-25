@@ -327,6 +327,9 @@ async function buildSystemPrompt(
     if (externalCrmContext.recentOrders) {
       system += `• Recent Orders/Activity: ${externalCrmContext.recentOrders}\n`;
     }
+    if (externalCrmContext.doctor) {
+      system += `• Doctor on File: ${externalCrmContext.doctor}\n`;
+    }
     if (externalCrmContext.rawData && Object.keys(externalCrmContext.rawData).length > 0) {
       for (const [key, val] of Object.entries(externalCrmContext.rawData)) {
         const display = typeof val === "object" ? JSON.stringify(val) : String(val);
@@ -618,6 +621,7 @@ const BULBUL_VOICE_FOR_LANG: Record<string, string> = {
   "ta-IN": "priya",
   "te-IN": "pooja",
   "mr-IN": "simran",
+  "en-IN": "kavya",
 };
 
 // ── TTS pronunciation normalization ─────────────────────────────────────

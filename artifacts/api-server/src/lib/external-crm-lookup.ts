@@ -10,6 +10,7 @@ export interface ExternalCrmContext {
   email?: string;
   accountId?: string;
   recentOrders?: string;
+  doctor?: string;
   customerFound?: boolean;
   rawData?: Record<string, unknown>;
   fetchedAt: string;
@@ -180,6 +181,18 @@ function mapResponse(
   const foundVal = resolveJsonPath(responseBody, "found");
   if (typeof foundVal === "boolean") {
     ctx.customerFound = foundVal;
+  }
+
+  // Automatically extract doctor from the responseBody if present
+  let doctorVal: any = resolveJsonPath(responseBody, "customer.doctor") || resolveJsonPath(responseBody, "doctor");
+  if (!doctorVal && typeof responseBody === "object" && responseBody !== null) {
+    const orders = (responseBody as any).recentOrders;
+    if (Array.isArray(orders) && orders.length > 0) {
+      doctorVal = orders[0].doctor;
+    }
+  }
+  if (doctorVal) {
+    ctx.doctor = stringifyValue(doctorVal);
   }
 
   if (config.useRawResponse || !mapping) {

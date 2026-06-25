@@ -471,14 +471,17 @@ async function fetchConfig(callLogIdStr: string) {
 // ── Conversational Pipeline Helper Functions ───────────────────────────
 async function generateSentenceTTS(text: string, lang: string, voice: string): Promise<Buffer> {
   const SARVAM_API_KEY = process.env.SARVAM_API_KEY ?? "";
-  const useSarvamTts = isIndianLanguage(lang);
+  
+  // We want Indian accent for Indic languages AND English (en-US / en-IN)
+  const isIndianVoiceNeeded = ["hi-IN", "kn-IN", "ta-IN", "te-IN", "mr-IN", "en-US", "en-IN"].includes(lang);
 
-  if (useSarvamTts && SARVAM_API_KEY) {
-    const speaker = BULBUL_VOICE_FOR_LANG[lang] ?? "manan";
+  if (isIndianVoiceNeeded && SARVAM_API_KEY) {
+    // Map en-US to en-IN for Sarvam
+    const sarvamLang = (lang === "en-US") ? "en-IN" : lang;
+    const speaker = BULBUL_VOICE_FOR_LANG[sarvamLang] ?? "manan";
 
-    // Fire both Sarvam and OpenAI TTS in parallel — use whichever responds first.
-    // Sarvam has better Indian language prosody, so prefer it if it finishes quickly.
-    const sarvamPromise = (async (): Promise<{ source: "sarvam"; audio: Buffer }> => {
+    try {
+      logger.info({ lang, sarvamLang, speaker }, "Requesting Sarvam Bulbul v3 TTS for Indian accent...");
       const res = await fetchWithTimeout("https://api.sarvam.ai/text-to-speech", {
         method: "POST",
         headers: {
@@ -487,7 +490,7 @@ async function generateSentenceTTS(text: string, lang: string, voice: string): P
         },
         body: JSON.stringify({
           inputs: [text],
-          target_language_code: lang,
+          target_language_code: sarvamLang,
           speaker,
           model: "bulbul:v3",
           temperature: 0.4,
@@ -509,10 +512,12 @@ async function generateSentenceTTS(text: string, lang: string, voice: string): P
       if (!audioBase64) throw new Error("No audio returned from Sarvam");
       const wavBuffer = Buffer.from(audioBase64, "base64");
       const mulaw = await convertToMulawWithFallback(wavBuffer);
-      return { source: "sarvam", audio: mulaw };
-    })();
-
-    const openaiPromise = (async (): Promise<{ source: "openai"; audio: Buffer }> => {
+      
+      logger.info({ bytes: mulaw.length, lang, source: "sarvam" }, "Sarvam TTS mulaw audio ready");
+      return mulaw;
+    } catch (err: any) {
+      logger.warn({ err: err.message, lang }, "Sarvam TTS failed, falling back to OpenAI TTS");
+      // Fallback to OpenAI TTS
       const mp3Response = await openai.audio.speech.create({
         model: "tts-1",
         voice: (voice || "nova") as any,
@@ -520,20 +525,11 @@ async function generateSentenceTTS(text: string, lang: string, voice: string): P
       });
       const mp3Buffer = Buffer.from(await mp3Response.arrayBuffer());
       const mulaw = await convertToMulawWithFallback(mp3Buffer);
-      return { source: "openai", audio: mulaw };
-    })();
-
-    try {
-      // Race both — whichever finishes first wins
-      const result = await Promise.any([sarvamPromise, openaiPromise]);
-      logger.info({ bytes: result.audio.length, lang, source: result.source }, `${result.source === "sarvam" ? "Sarvam" : "OpenAI"} TTS mulaw audio ready (race winner)`);
-      return result.audio;
-    } catch (aggErr) {
-      // Both failed — this is very unlikely but handle gracefully
-      logger.error({ err: aggErr, lang }, "Both Sarvam and OpenAI TTS failed");
-      throw aggErr;
+      logger.info({ bytes: mulaw.length, lang, source: "openai_fallback" }, "OpenAI fallback TTS mulaw audio ready");
+      return mulaw;
     }
   } else {
+    // Non-Indian language, use OpenAI TTS directly
     const mp3Response = await openai.audio.speech.create({
       model: "tts-1",
       voice: (voice || "nova") as any,
@@ -542,7 +538,7 @@ async function generateSentenceTTS(text: string, lang: string, voice: string): P
 
     const mp3Buffer = Buffer.from(await mp3Response.arrayBuffer());
     const mulaw = await convertToMulawWithFallback(mp3Buffer);
-    logger.info({ bytes: mulaw.length, lang }, "OpenAI TTS mulaw audio ready");
+    logger.info({ bytes: mulaw.length, lang, source: "openai" }, "OpenAI TTS mulaw audio ready");
     return mulaw;
   }
 }
@@ -1243,8 +1239,8 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
         }
         const rms = Math.sqrt(sum / pcmChunk.length);
 
-        // While bot is speaking, ignore echo unless caller barges in (lower threshold during greeting).
-        if (isSpeaking) {
+        // While bot is speaking or generating, ignore echo unless caller barges in (lower threshold during greeting).
+        if (isSpeaking || isGenerating) {
           const interruptThreshold = greetingPhase ? 2800 : 7500;
           if (rms > interruptThreshold) {
             speechChunksCount++;
