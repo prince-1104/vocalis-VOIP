@@ -433,6 +433,8 @@ export async function fetchExternalCrmData(
     const responseBody = await callExternalCrm(config, normalizedPhone);
     if (responseBody == null) return null;
 
+    logger.info({ userId, phone: normalizedPhone, responseBody }, "Raw external CRM response body fetched");
+
     const ctx = mapResponse(responseBody, config);
 
     setCachedData(userId, normalizedPhone, ctx, config.cacheTtlSeconds);
