@@ -333,19 +333,6 @@ async function buildSystemPrompt(
         system += `• ${key}: ${display}\n`;
       }
     }
-    system += `\nSTRICT DATA ACCURACY RULES:\n` +
-      `- You MUST ONLY reference orders, statuses, product names, and details that are EXPLICITLY listed in the CUSTOMER CONTEXT above.\n` +
-      `- NEVER invent, guess, or assume any order information that is not in the context.\n` +
-      `- If a customer asks about an order ID that is NOT in your context, say "I don't have information about order [ID] in my records" and list the order IDs you DO have.\n` +
-      `- Do NOT fabricate product names, statuses, prices, or reasons for any order.\n\n`;
-
-    system += `ORDER HANDLING RULES:\n` +
-      `- When a customer asks about a specific order ID, match it EXACTLY against the order IDs in your context.\n` +
-      `- If the order status is "Denied" or "Cancelled", explain clearly: mention the order ID, product name, and current status. If a reason is available in the data, share it. Otherwise say "For the exact reason, please contact our support team."\n` +
-      `- If the order status is "Processing" or "Pending", reassure the customer and provide the product details.\n` +
-      `- If the customer asks about an order ID you don't have, respond: "I don't have order [ID] in my records. Your available orders are: [list the IDs you have]." Do NOT guess.\n` +
-      `- Always use the exact product name and status from the CRM data — never paraphrase or abbreviate product names.\n\n`;
-
     system += `\nIMPORTANT: Use the above customer context to personalize the conversation. ` +
       `Address the customer by name if available. Reference their orders or account details when relevant. ` +
       `Do NOT read out raw IDs or technical fields unless the customer asks.\n`;
@@ -392,9 +379,7 @@ async function buildSystemPrompt(
       `Keep answers concise and guide the caller toward resolution.\n\n`;
   }
 
-  system += `After each response, ask a specific follow-up based on context. ` +
-    `For order inquiries, ask "Would you like to know about another order?" or "Is there anything else about this order?" instead of generic questions. ` +
-    `Do NOT repeatedly ask vague questions like "How can I help you?" if the conversation context is already clear.`;
+  system += `After each response, ask one concise follow-up question to keep the conversation moving forward.`;
   return system;
 }
 
@@ -407,7 +392,7 @@ async function generateAIResponse(systemPrompt: string, history: {role: string, 
 
   const completionPromise = openai.chat.completions.create({
     model,
-    max_completion_tokens: 250,
+    max_completion_tokens: 150,
     messages,
   });
 
@@ -596,7 +581,7 @@ async function callSarvamLLM(
     body: JSON.stringify({
       model: "sarvam-m",
       messages,
-      max_completion_tokens: 250,
+      max_completion_tokens: 150,
     }),
     timeout: 4000,
   });

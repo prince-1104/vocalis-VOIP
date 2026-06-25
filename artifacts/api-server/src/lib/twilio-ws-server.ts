@@ -27,7 +27,6 @@ import {
   resolveCallLanguage,
   shouldAutoDetectLanguage,
   greetingForLanguage,
-  buildOrderAwareGreeting,
 } from "./language-menu";
 
 import {
@@ -44,7 +43,6 @@ import {
 import {
   resolveCrmOpeningGreeting,
   applyPitchTemplate,
-  extractOrderIds,
 } from "./external-crm-lookup";
 import { shouldAutoHangupAfterTurn } from "./call-end-detector";
 
@@ -595,7 +593,7 @@ async function* streamLLMResponse(
   const stream = await client.chat.completions.create({
     model: modelName,
     messages: messages as any[],
-    max_completion_tokens: 250,
+    max_completion_tokens: 150,
     stream: true
   });
 
@@ -1062,21 +1060,15 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
     lockedCallLang = selectedLang;
 
     const effectiveLang = selectedLang === "auto" ? "en-US" : selectedLang;
-
-    // When language menu is active, use language-specific greeting with order context.
-    // Do NOT let CRM openingPitch (which is typically English-only) override the
-    // language the user explicitly chose.
-    const orderIds = extractOrderIds(callMeta.externalCrmContext);
-    const agentName = agentConfig?.agentName || "AI Agent";
-    const customerName = callMeta.externalCrmContext?.customerName;
-
-    currentGreeting = buildOrderAwareGreeting(
+    const langFallback = greetingForLanguage(
       effectiveLang,
-      agentName,
-      customerName,
-      orderIds,
       script?.openingLine,
       agentConfig?.greeting,
+    );
+    currentGreeting = resolveCrmOpeningGreeting(
+      crmCallFlow ?? null,
+      callMeta.externalCrmContext,
+      langFallback,
     );
 
     logger.info({ callLogId, selectedLang, source }, "Call language locked from menu");

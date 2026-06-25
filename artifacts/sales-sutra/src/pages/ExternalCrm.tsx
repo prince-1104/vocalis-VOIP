@@ -480,7 +480,7 @@ export default function ExternalCrm() {
             <Textarea
               value={callInstructions}
               onChange={e => setCallInstructions(e.target.value)}
-              placeholder="Only discuss the customer's orders. For prescription questions, mention the doctor on file. Never quote prices unless the customer asks."
+              placeholder="Only discuss the 3 most recent orders. For prescription questions, mention the doctor on file. Never quote prices unless the customer asks."
               rows={3}
             />
             <p className="text-xs text-muted-foreground">
