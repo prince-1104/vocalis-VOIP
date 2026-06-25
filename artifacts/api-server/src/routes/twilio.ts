@@ -336,6 +336,9 @@ async function buildSystemPrompt(
     system += `\nIMPORTANT: Use the above customer context to personalize the conversation. ` +
       `Address the customer by name if available. Reference their orders or account details when relevant. ` +
       `Do NOT read out raw IDs or technical fields unless the customer asks.\n`;
+    system += `DATA ACCURACY: ONLY reference orders, statuses, and details EXPLICITLY listed above. ` +
+      `Match order IDs EXACTLY — if the caller asks about an order ID not in your context, say you don't have it and list the IDs you do have. ` +
+      `NEVER invent or guess order information.\n`;
 
     if (externalCrmContext.customerFound === false) {
       system += `The caller was NOT found in the CRM. Treat them as a new or unknown customer. ` +
@@ -396,7 +399,7 @@ async function generateAIResponse(systemPrompt: string, history: {role: string, 
 
   const completionPromise = openai.chat.completions.create({
     model,
-    max_completion_tokens: 150,
+    max_completion_tokens: 200,
     messages,
   });
 
@@ -585,7 +588,7 @@ async function callSarvamLLM(
     body: JSON.stringify({
       model: "sarvam-m",
       messages,
-      max_completion_tokens: 150,
+      max_completion_tokens: 200,
     }),
     timeout: 4000,
   });

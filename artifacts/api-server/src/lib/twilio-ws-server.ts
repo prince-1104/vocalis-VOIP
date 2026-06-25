@@ -593,7 +593,7 @@ async function* streamLLMResponse(
   const stream = await client.chat.completions.create({
     model: modelName,
     messages: messages as any[],
-    max_completion_tokens: 150,
+    max_completion_tokens: 200,
     stream: true
   });
 
@@ -683,7 +683,7 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
   const SPEECH_THRESHOLD = 1800;
   const SILENCE_THRESHOLD = 900;
   const MIN_SPEECH_DURATION_CHUNKS = 8; // Ignore speech shorter than 160ms
-  const SILENCE_DURATION_CHUNKS = 25; // 1.0 second silence (25 chunks * 40ms)
+  const SILENCE_DURATION_CHUNKS = 38; // ~1.5 second silence — longer for Indian languages where speakers pause mid-sentence
 
   let accumulatedPcm: number[] = [];
   let silenceChunksCount = 0;
