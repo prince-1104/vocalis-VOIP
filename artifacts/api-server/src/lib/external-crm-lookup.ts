@@ -291,11 +291,11 @@ export function resolveCrmOpeningGreeting(
 /**
  * Extract order IDs from CRM context for use in greetings.
  * Looks at recentOrders string and rawData for order-like IDs.
- * Returns up to `limit` order IDs (default 3).
+ * Returns up to `limit` order IDs (default 10).
  */
 export function extractOrderIds(
   ctx: ExternalCrmContext | null | undefined,
-  limit = 3,
+  limit = 10,
 ): string[] {
   if (!ctx) return [];
   const ids = new Set<string>();
