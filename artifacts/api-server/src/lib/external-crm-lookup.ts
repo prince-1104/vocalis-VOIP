@@ -286,6 +286,115 @@ export function resolveCrmOpeningGreeting(
   return fallbackGreeting;
 }
 
+// ── Phone number normalization ──────────────────────────────────────────
+
+export function normalizePhone(phone: string): string {
+  // remove all non-digits
+  let cleaned = phone.replace(/[^0-9]/g, '');
+  // strip country code 91 if it's 12 digits
+  if (cleaned.startsWith("91") && cleaned.length === 12) {
+    cleaned = cleaned.substring(2);
+  }
+  // strip country code 1 if it's 11 digits
+  if (cleaned.startsWith("1") && cleaned.length === 11) {
+    cleaned = cleaned.substring(1);
+  }
+  // strip leading 0 if it's 11 digits
+  if (cleaned.startsWith("0") && cleaned.length === 11) {
+    cleaned = cleaned.substring(1);
+  }
+  return cleaned;
+}
+
+// ── Order ID extraction ────────────────────────────────────────────────
+
+export function extractOrderIds(
+  ctx: ExternalCrmContext | null | undefined,
+  limit = 10,
+): string[] {
+  if (!ctx) return [];
+  const ids = new Set<string>();
+
+  // 1. Try parsing ctx.recentOrders if it contains JSON or serialized data
+  if (ctx.recentOrders) {
+    // If it's a JSON array or list of JSON objects, try parsing them
+    try {
+      // Split by semicolon (which is used in stringifyValue for arrays)
+      const parts = ctx.recentOrders.split("; ");
+      for (const part of parts) {
+        try {
+          const parsed = JSON.parse(part);
+          if (parsed && typeof parsed === "object") {
+            // Check common order ID fields
+            const idVal = parsed.orderId || parsed.id || parsed.order_id || parsed.orderNo || parsed.orderNumber;
+            if (idVal) {
+              ids.add(String(idVal));
+              continue;
+            }
+          }
+        } catch {
+          // Not a JSON object, proceed to regex
+        }
+      }
+    } catch {
+      // Ignore parsing errors
+    }
+
+    // Match patterns in string. We should support quotes, e.g. "orderId":"25214" or "order_id": 25214
+    const orderIdPattern = /(?:order[_\s]*(?:id|no|number)?|id|#)[:\s#"]*(\d{4,})/gi;
+    let match: RegExpExecArray | null;
+    orderIdPattern.lastIndex = 0;
+    while ((match = orderIdPattern.exec(ctx.recentOrders)) !== null) {
+      ids.add(match[1]);
+    }
+  }
+
+  // 2. Also check rawData for order-related fields
+  if (ctx.rawData) {
+    const checkValueForIds = (val: any) => {
+      if (val && typeof val === "object") {
+        if (Array.isArray(val)) {
+          for (const item of val) checkValueForIds(item);
+        } else {
+          const idVal = val.orderId || val.id || val.order_id || val.orderNo || val.orderNumber;
+          if (idVal) {
+            ids.add(String(idVal));
+          } else {
+            // Recurse into object keys
+            for (const [k, v] of Object.entries(val)) {
+              if (k.toLowerCase().includes("order") || k.toLowerCase() === "id") {
+                if (typeof v === "number" || typeof v === "string") {
+                  if (/^\d{4,}$/.test(String(v))) ids.add(String(v));
+                }
+              }
+            }
+          }
+        }
+      }
+    };
+
+    checkValueForIds(ctx.rawData);
+
+    // Fallback search in rawData values if still nothing
+    if (ids.size === 0) {
+      for (const [key, val] of Object.entries(ctx.rawData)) {
+        if (key.startsWith("_")) continue;
+        const keyLower = key.toLowerCase();
+        if (keyLower.includes("order") || keyLower.includes("recent")) {
+          const valStr = typeof val === "object" ? JSON.stringify(val) : String(val);
+          const orderIdPattern = /(?:order[_\s]*(?:id|no|number)?|id|#)[:\s#"]*(\d{4,})/gi;
+          let match: RegExpExecArray | null;
+          while ((match = orderIdPattern.exec(valStr)) !== null) {
+            ids.add(match[1]);
+          }
+        }
+      }
+    }
+  }
+
+  return Array.from(ids).slice(0, limit);
+}
+
 // ── Main entry point ───────────────────────────────────────────────────
 
 export async function fetchExternalCrmData(
@@ -296,26 +405,29 @@ export async function fetchExternalCrmData(
     const config = await getCachedConfig(userId);
     if (!config || !config.isEnabled) return null;
 
-    const cached = getCachedData(userId, phone);
+    const normalizedPhone = normalizePhone(phone);
+
+    const cached = getCachedData(userId, normalizedPhone);
     if (cached) {
-      logger.debug({ userId, phone }, "External CRM data served from cache");
+      logger.debug({ userId, phone: normalizedPhone }, "External CRM data served from cache");
       return cached;
     }
 
-    const responseBody = await callExternalCrm(config, phone);
+    const responseBody = await callExternalCrm(config, normalizedPhone);
     if (responseBody == null) return null;
 
     const ctx = mapResponse(responseBody, config);
 
-    setCachedData(userId, phone, ctx, config.cacheTtlSeconds);
-    logger.info({ userId, phone, hasName: !!ctx.customerName }, "External CRM data fetched successfully");
+    setCachedData(userId, normalizedPhone, ctx, config.cacheTtlSeconds);
+    logger.info({ userId, phone: normalizedPhone, hasName: !!ctx.customerName }, "External CRM data fetched successfully");
 
     return ctx;
   } catch (err: any) {
+    const normalizedPhone = normalizePhone(phone);
     if (err.name === "AbortError") {
-      logger.warn({ userId, phone }, "External CRM lookup timed out");
+      logger.warn({ userId, phone: normalizedPhone }, "External CRM lookup timed out");
     } else {
-      logger.error({ err, userId, phone }, "External CRM lookup failed");
+      logger.error({ err, userId, phone: normalizedPhone }, "External CRM lookup failed");
     }
     return null;
   }
@@ -334,7 +446,8 @@ export async function testExternalCrmLookup(
       return { success: false, error: "No external CRM configuration found" };
     }
 
-    const responseBody = await callExternalCrm(config, phone);
+    const normalizedPhone = normalizePhone(phone);
+    const responseBody = await callExternalCrm(config, normalizedPhone);
     if (responseBody == null) {
       return { success: false, error: "CRM returned empty or non-OK response" };
     }

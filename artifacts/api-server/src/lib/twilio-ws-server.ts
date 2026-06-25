@@ -27,6 +27,7 @@ import {
   resolveCallLanguage,
   shouldAutoDetectLanguage,
   greetingForLanguage,
+  buildOrderAwareGreeting,
 } from "./language-menu";
 
 import {
@@ -43,6 +44,7 @@ import {
 import {
   resolveCrmOpeningGreeting,
   applyPitchTemplate,
+  extractOrderIds,
 } from "./external-crm-lookup";
 import { shouldAutoHangupAfterTurn } from "./call-end-detector";
 
@@ -593,7 +595,7 @@ async function* streamLLMResponse(
   const stream = await client.chat.completions.create({
     model: modelName,
     messages: messages as any[],
-    max_completion_tokens: 150,
+    max_completion_tokens: 250,
     stream: true
   });
 
@@ -1060,16 +1062,36 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
     lockedCallLang = selectedLang;
 
     const effectiveLang = selectedLang === "auto" ? "en-US" : selectedLang;
-    const langFallback = greetingForLanguage(
-      effectiveLang,
-      script?.openingLine,
-      agentConfig?.greeting,
-    );
-    currentGreeting = resolveCrmOpeningGreeting(
-      crmCallFlow ?? null,
-      callMeta.externalCrmContext,
-      langFallback,
-    );
+    const orderIds = extractOrderIds(callMeta.externalCrmContext);
+    const agentName = agentConfig?.agentName || "AI Agent";
+    const customerName = callMeta.externalCrmContext?.customerName;
+
+    // Use language-specific greeting for non-English languages to avoid overriding with English openingPitch.
+    // If the language is English, we can still use the custom CRM openingPitch if it is configured.
+    if (effectiveLang === "en-US") {
+      const langFallback = buildOrderAwareGreeting(
+        effectiveLang,
+        agentName,
+        customerName,
+        orderIds,
+        script?.openingLine,
+        agentConfig?.greeting,
+      );
+      currentGreeting = resolveCrmOpeningGreeting(
+        crmCallFlow ?? null,
+        callMeta.externalCrmContext,
+        langFallback,
+      );
+    } else {
+      currentGreeting = buildOrderAwareGreeting(
+        effectiveLang,
+        agentName,
+        customerName,
+        orderIds,
+        script?.openingLine,
+        agentConfig?.greeting,
+      );
+    }
 
     logger.info({ callLogId, selectedLang, source }, "Call language locked from menu");
 
