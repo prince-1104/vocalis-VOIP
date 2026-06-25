@@ -31,7 +31,7 @@ GET /api/dialog/customer-lookup?phone=9004688178
 
 2. **Look up the customer by phone** in the customers/users table.
 
-3. **Fetch their recent orders (up to 10)** (sorted by placed date descending).
+3. **Fetch their most recent 3 orders** (sorted by placed date descending).
 
 4. **Return JSON** in this exact structure:
 
@@ -95,7 +95,7 @@ GET /api/dialog/customer-lookup?phone=9004688178
 7. **Performance**: This endpoint is called in real-time during phone calls.
    - Must respond in under 1 second (ideally < 500ms)
    - Use indexed queries on the phone column
-   - Limit orders to 10 most recent (don't fetch all history to keep response under 1s, but support up to 10 orders so caller can ask about recent purchases)
+   - Limit orders to 3 most recent (don't fetch all history)
    - No heavy joins or aggregations
 
 8. **Security**:

@@ -27,7 +27,6 @@ import {
   resolveCallLanguage,
   shouldAutoDetectLanguage,
   greetingForLanguage,
-  buildOrderAwareGreeting,
 } from "./language-menu";
 
 import {
@@ -44,7 +43,6 @@ import {
 import {
   resolveCrmOpeningGreeting,
   applyPitchTemplate,
-  extractOrderIds,
 } from "./external-crm-lookup";
 import { shouldAutoHangupAfterTurn } from "./call-end-detector";
 
@@ -471,17 +469,14 @@ async function fetchConfig(callLogIdStr: string) {
 // ── Conversational Pipeline Helper Functions ───────────────────────────
 async function generateSentenceTTS(text: string, lang: string, voice: string): Promise<Buffer> {
   const SARVAM_API_KEY = process.env.SARVAM_API_KEY ?? "";
-  
-  // We want Indian accent for Indic languages AND English (en-US / en-IN)
-  const isIndianVoiceNeeded = ["hi-IN", "kn-IN", "ta-IN", "te-IN", "mr-IN", "en-US", "en-IN"].includes(lang);
+  const useSarvamTts = isIndianLanguage(lang);
 
-  if (isIndianVoiceNeeded && SARVAM_API_KEY) {
-    // Map en-US to en-IN for Sarvam
-    const sarvamLang = (lang === "en-US") ? "en-IN" : lang;
-    const speaker = BULBUL_VOICE_FOR_LANG[sarvamLang] ?? "manan";
+  if (useSarvamTts && SARVAM_API_KEY) {
+    const speaker = BULBUL_VOICE_FOR_LANG[lang] ?? "manan";
 
-    try {
-      logger.info({ lang, sarvamLang, speaker }, "Requesting Sarvam Bulbul v3 TTS for Indian accent...");
+    // Fire both Sarvam and OpenAI TTS in parallel — use whichever responds first.
+    // Sarvam has better Indian language prosody, so prefer it if it finishes quickly.
+    const sarvamPromise = (async (): Promise<{ source: "sarvam"; audio: Buffer }> => {
       const res = await fetchWithTimeout("https://api.sarvam.ai/text-to-speech", {
         method: "POST",
         headers: {
@@ -490,7 +485,7 @@ async function generateSentenceTTS(text: string, lang: string, voice: string): P
         },
         body: JSON.stringify({
           inputs: [text],
-          target_language_code: sarvamLang,
+          target_language_code: lang,
           speaker,
           model: "bulbul:v3",
           temperature: 0.4,
@@ -512,12 +507,10 @@ async function generateSentenceTTS(text: string, lang: string, voice: string): P
       if (!audioBase64) throw new Error("No audio returned from Sarvam");
       const wavBuffer = Buffer.from(audioBase64, "base64");
       const mulaw = await convertToMulawWithFallback(wavBuffer);
-      
-      logger.info({ bytes: mulaw.length, lang, source: "sarvam" }, "Sarvam TTS mulaw audio ready");
-      return mulaw;
-    } catch (err: any) {
-      logger.warn({ err: err.message, lang }, "Sarvam TTS failed, falling back to OpenAI TTS");
-      // Fallback to OpenAI TTS
+      return { source: "sarvam", audio: mulaw };
+    })();
+
+    const openaiPromise = (async (): Promise<{ source: "openai"; audio: Buffer }> => {
       const mp3Response = await openai.audio.speech.create({
         model: "tts-1",
         voice: (voice || "nova") as any,
@@ -525,11 +518,20 @@ async function generateSentenceTTS(text: string, lang: string, voice: string): P
       });
       const mp3Buffer = Buffer.from(await mp3Response.arrayBuffer());
       const mulaw = await convertToMulawWithFallback(mp3Buffer);
-      logger.info({ bytes: mulaw.length, lang, source: "openai_fallback" }, "OpenAI fallback TTS mulaw audio ready");
-      return mulaw;
+      return { source: "openai", audio: mulaw };
+    })();
+
+    try {
+      // Race both — whichever finishes first wins
+      const result = await Promise.any([sarvamPromise, openaiPromise]);
+      logger.info({ bytes: result.audio.length, lang, source: result.source }, `${result.source === "sarvam" ? "Sarvam" : "OpenAI"} TTS mulaw audio ready (race winner)`);
+      return result.audio;
+    } catch (aggErr) {
+      // Both failed — this is very unlikely but handle gracefully
+      logger.error({ err: aggErr, lang }, "Both Sarvam and OpenAI TTS failed");
+      throw aggErr;
     }
   } else {
-    // Non-Indian language, use OpenAI TTS directly
     const mp3Response = await openai.audio.speech.create({
       model: "tts-1",
       voice: (voice || "nova") as any,
@@ -538,7 +540,7 @@ async function generateSentenceTTS(text: string, lang: string, voice: string): P
 
     const mp3Buffer = Buffer.from(await mp3Response.arrayBuffer());
     const mulaw = await convertToMulawWithFallback(mp3Buffer);
-    logger.info({ bytes: mulaw.length, lang, source: "openai" }, "OpenAI TTS mulaw audio ready");
+    logger.info({ bytes: mulaw.length, lang }, "OpenAI TTS mulaw audio ready");
     return mulaw;
   }
 }
@@ -591,7 +593,7 @@ async function* streamLLMResponse(
   const stream = await client.chat.completions.create({
     model: modelName,
     messages: messages as any[],
-    max_completion_tokens: 250,
+    max_completion_tokens: 150,
     stream: true
   });
 
@@ -1058,36 +1060,16 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
     lockedCallLang = selectedLang;
 
     const effectiveLang = selectedLang === "auto" ? "en-US" : selectedLang;
-    const orderIds = extractOrderIds(callMeta.externalCrmContext);
-    const agentName = agentConfig?.agentName || "AI Agent";
-    const customerName = callMeta.externalCrmContext?.customerName;
-
-    // Use language-specific greeting for non-English languages to avoid overriding with English openingPitch.
-    // If the language is English, we can still use the custom CRM openingPitch if it is configured.
-    if (effectiveLang === "en-US") {
-      const langFallback = buildOrderAwareGreeting(
-        effectiveLang,
-        agentName,
-        customerName,
-        orderIds,
-        script?.openingLine,
-        agentConfig?.greeting,
-      );
-      currentGreeting = resolveCrmOpeningGreeting(
-        crmCallFlow ?? null,
-        callMeta.externalCrmContext,
-        langFallback,
-      );
-    } else {
-      currentGreeting = buildOrderAwareGreeting(
-        effectiveLang,
-        agentName,
-        customerName,
-        orderIds,
-        script?.openingLine,
-        agentConfig?.greeting,
-      );
-    }
+    const langFallback = greetingForLanguage(
+      effectiveLang,
+      script?.openingLine,
+      agentConfig?.greeting,
+    );
+    currentGreeting = resolveCrmOpeningGreeting(
+      crmCallFlow ?? null,
+      callMeta.externalCrmContext,
+      langFallback,
+    );
 
     logger.info({ callLogId, selectedLang, source }, "Call language locked from menu");
 
@@ -1239,8 +1221,8 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
         }
         const rms = Math.sqrt(sum / pcmChunk.length);
 
-        // While bot is speaking or generating, ignore echo unless caller barges in (lower threshold during greeting).
-        if (isSpeaking || isGenerating) {
+        // While bot is speaking, ignore echo unless caller barges in (lower threshold during greeting).
+        if (isSpeaking) {
           const interruptThreshold = greetingPhase ? 2800 : 7500;
           if (rms > interruptThreshold) {
             speechChunksCount++;

@@ -327,35 +327,12 @@ async function buildSystemPrompt(
     if (externalCrmContext.recentOrders) {
       system += `• Recent Orders/Activity: ${externalCrmContext.recentOrders}\n`;
     }
-    if (externalCrmContext.doctor) {
-      system += `• Doctor on File: ${externalCrmContext.doctor}\n`;
-    }
     if (externalCrmContext.rawData && Object.keys(externalCrmContext.rawData).length > 0) {
       for (const [key, val] of Object.entries(externalCrmContext.rawData)) {
         const display = typeof val === "object" ? JSON.stringify(val) : String(val);
         system += `• ${key}: ${display}\n`;
       }
     }
-    system += `\nSTRICT DATA ACCURACY RULES:\n` +
-      `- You MUST ONLY reference orders, statuses, product names, and details that are EXPLICITLY listed in the CUSTOMER CONTEXT above.\n` +
-      `- NEVER invent, guess, or assume any order information that is not in the context.\n` +
-      `- If a customer asks about an order ID that is NOT in your context, say "I don't have information about order [ID] in my records" and list the order IDs you DO have.\n` +
-      `- Do NOT fabricate product names, statuses, prices, or reasons for any order.\n\n`;
-
-    system += `ORDER HANDLING RULES:\n` +
-      `- When a customer asks about a specific order ID (e.g. #5124 or 25214), match it EXACTLY against the order IDs in your context.\n` +
-      `- If the order status is "Denied" or "Cancelled", explain clearly: mention the order ID, product name, and current status. If a reason is available in the data, share it. Otherwise say "For the exact reason, please contact our support team."\n` +
-      `- If the order status is "Processing" or "Pending", reassure the customer and provide the product details. If they ask about a delay, explain that the order is processing and will be updated shortly.\n` +
-      `- If the customer asks "when did I place/create my order", check the placement date in context (e.g. "placedAt" or date fields) and share it.\n` +
-      `- If the customer asks about "order items" or what is in the order, state the exact products (and quantity/price if available in the context).\n` +
-      `- If the customer asks about an order ID you don't have, respond: "I don't have order [ID] in my records. Your available orders are: [list the IDs you have]." Do NOT guess.\n` +
-      `- Always use the exact product name and status from the CRM data — never paraphrase or abbreviate product names.\n\n`;
-
-    system += `DOCTOR INFORMATION RULES:\n` +
-      `- If the customer asks about their prescribing doctor or the doctor on file, check the "Doctor on File" in the CUSTOMER CONTEXT.\n` +
-      `- If a doctor is listed, state it clearly (e.g., "Your prescribing doctor is [Doctor Name]").\n` +
-      `- If no doctor is explicitly listed in your context, say: "I don't have a prescribing doctor on file for your account."\n\n`;
-
     system += `\nIMPORTANT: Use the above customer context to personalize the conversation. ` +
       `Address the customer by name if available. Reference their orders or account details when relevant. ` +
       `Do NOT read out raw IDs or technical fields unless the customer asks.\n`;
@@ -402,9 +379,7 @@ async function buildSystemPrompt(
       `Keep answers concise and guide the caller toward resolution.\n\n`;
   }
 
-  system += `After each response, ask a specific follow-up based on context. ` +
-    `For order inquiries, ask "Would you like to know about another order?" or "Is there anything else about this order?" instead of generic questions. ` +
-    `Do NOT repeatedly ask vague questions like "How can I help you?" if the conversation context is already clear.`;
+  system += `After each response, ask one concise follow-up question to keep the conversation moving forward.`;
   return system;
 }
 
@@ -417,7 +392,7 @@ async function generateAIResponse(systemPrompt: string, history: {role: string, 
 
   const completionPromise = openai.chat.completions.create({
     model,
-    max_completion_tokens: 250,
+    max_completion_tokens: 150,
     messages,
   });
 
@@ -489,18 +464,6 @@ const INDIAN_LANGUAGES = new Set(["kn-IN", "hi-IN", "ta-IN", "te-IN", "mr-IN"]);
 
 function isIndianLanguage(lang?: string | null): boolean {
   return INDIAN_LANGUAGES.has(lang ?? "");
-}
-
-function isIndianAccentNeeded(lang?: string | null): boolean {
-  if (!lang) return false;
-  return ["hi-IN", "kn-IN", "ta-IN", "te-IN", "mr-IN", "en-IN", "en-US"].includes(lang);
-}
-
-function getIndianPollyVoice(lang: string): string {
-  if (lang.startsWith("hi") || lang.startsWith("kn") || lang.startsWith("ta") || lang.startsWith("te") || lang.startsWith("mr")) {
-    return "Polly.Aditi";
-  }
-  return "Polly.Raveena";
 }
 
 function getTwilioLang(lang?: string | null): string {
@@ -618,7 +581,7 @@ async function callSarvamLLM(
     body: JSON.stringify({
       model: "sarvam-m",
       messages,
-      max_completion_tokens: 250,
+      max_completion_tokens: 150,
     }),
     timeout: 4000,
   });
@@ -640,7 +603,6 @@ const BULBUL_VOICE_FOR_LANG: Record<string, string> = {
   "ta-IN": "priya",
   "te-IN": "pooja",
   "mr-IN": "simran",
-  "en-IN": "kavya",
 };
 
 // ── TTS pronunciation normalization ─────────────────────────────────────
@@ -679,9 +641,8 @@ function normalizeTTSPronunciation(text: string, lang: string): string {
 async function callSarvamTTS(text: string, lang: string): Promise<string | null> {
   if (!SARVAM_API_KEY) return null;
 
-  const sarvamLang = (lang === "en-US") ? "en-IN" : lang;
-  const ttsText = normalizeTTSPronunciation(text, sarvamLang);
-  const speaker = BULBUL_VOICE_FOR_LANG[sarvamLang] ?? "manan";
+  const ttsText = normalizeTTSPronunciation(text, lang);
+  const speaker = BULBUL_VOICE_FOR_LANG[lang] ?? "manan";
 
   const res = await fetchWithTimeout("https://api.sarvam.ai/text-to-speech", {
     method: "POST",
@@ -691,7 +652,7 @@ async function callSarvamTTS(text: string, lang: string): Promise<string | null>
     },
     body: JSON.stringify({
       inputs: [ttsText],
-      target_language_code: sarvamLang,
+      target_language_code: lang,
       speaker,
       model: "bulbul:v3",
       // Lower temperature → deterministic, cleaner pronunciation. Bulbul v3 ignores pitch/loudness.
@@ -781,7 +742,7 @@ async function renderPromptAudioForCall(
   lang: string,
   voice: string,
 ): Promise<{ ttsAudioId: string | null; useMp3: boolean }> {
-  if (isIndianAccentNeeded(lang)) {
+  if (isIndianLanguage(lang)) {
     try {
       const sarvamTtsId = await withTimeout(callSarvamTTS(text, lang), 2500, "Greeting Sarvam TTS timeout");
       if (sarvamTtsId) {
@@ -1479,7 +1440,7 @@ router.post("/twilio/voice", async (req, res) => {
       llmDuration = Date.now() - llmStart;
 
       // Start TTS generation immediately (fire-and-forget race with DB writes below)
-      const useSarvamTts = isIndianAccentNeeded(lang);
+      const useSarvamTts = isIndianLanguage(lang);
       const ttsStart = Date.now();
       const ttsPromise = withTimeout(
         useSarvamTts
@@ -1590,14 +1551,13 @@ router.post("/twilio/voice", async (req, res) => {
 
   // TTS was already generated in parallel inside the AI response block above.
   // ttsAudioId is set if OpenAI TTS or Sarvam TTS succeeded.
-  const useSarvamTts = isIndianAccentNeeded(lang);
+  const useSarvamTts = isIndianLanguage(lang);
   const ttsUseMp3 = ttsAudioId !== null && !useSarvamTts;
 
   if (ttsAudioId) {
     gather.play(`${baseUrl}/api/twilio/${ttsUseMp3 ? "tts-audio-mp3" : "tts-audio"}/${ttsAudioId}`);
   } else {
-    const fallbackVoice = isIndianAccentNeeded(lang) ? getIndianPollyVoice(lang) : voice;
-    gather.say({ voice: fallbackVoice as any, language: getTwilioLang(lang) as any }, aiResponse);
+    gather.say({ voice: voice as any, language: getTwilioLang(lang) as any }, aiResponse);
   }
 
   twiml.redirect({ method: "POST" }, `${baseUrl}/api/twilio/voice?callLogId=${callLogId}&history=${encodedHistory}&intentCounts=${encodedIntentCounts}&humanReqCount=${humanReqCount}&silent=1`);
@@ -1757,8 +1717,7 @@ router.post("/twilio/voice-indic", async (req, res) => {
   if (ttsAudioId) {
     gather.play(`${baseUrl}/api/twilio/tts-audio/${ttsAudioId}`);
   } else {
-    const fallbackVoice = isIndianAccentNeeded(lang) ? getIndianPollyVoice(lang) : voice;
-    gather.say({ voice: fallbackVoice as any, language: getTwilioLang(lang) as any }, aiResponse);
+    gather.say({ voice: voice as any, language: getTwilioLang(lang) as any }, aiResponse);
   }
 
   twiml.redirect({ method: "POST" }, `${baseUrl}/api/twilio/voice?callLogId=${callLogId}&history=${encodedHistory}&intentCounts=${encodedIntentCounts}&humanReqCount=${humanReqCount}&silent=1`);

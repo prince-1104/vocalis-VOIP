@@ -10,7 +10,6 @@ export interface ExternalCrmContext {
   email?: string;
   accountId?: string;
   recentOrders?: string;
-  doctor?: string;
   customerFound?: boolean;
   rawData?: Record<string, unknown>;
   fetchedAt: string;
@@ -183,21 +182,6 @@ function mapResponse(
     ctx.customerFound = foundVal;
   }
 
-  // Automatically extract doctor from the responseBody if present
-  let doctorVal: any = resolveJsonPath(responseBody, "customer.doctor") || resolveJsonPath(responseBody, "doctor");
-  if (!doctorVal && mapping?.doctor) {
-    doctorVal = resolveJsonPath(responseBody, mapping.doctor);
-  }
-  if (!doctorVal && typeof responseBody === "object" && responseBody !== null) {
-    const orders = (responseBody as any).recentOrders;
-    if (Array.isArray(orders) && orders.length > 0) {
-      doctorVal = orders[0].doctor;
-    }
-  }
-  if (doctorVal) {
-    ctx.doctor = stringifyValue(doctorVal);
-  }
-
   if (config.useRawResponse || !mapping) {
     const raw = typeof responseBody === "object" && responseBody !== null
       ? responseBody as Record<string, unknown>
@@ -274,7 +258,6 @@ export function applyPitchTemplate(
     email: ctx?.email || "",
     accountId: ctx?.accountId || "",
     recentOrders: ctx?.recentOrders || "",
-    doctor: ctx?.doctor || "",
   };
 
   if (ctx?.rawData) {
@@ -303,105 +286,6 @@ export function resolveCrmOpeningGreeting(
   return fallbackGreeting;
 }
 
-// ── Phone number normalization ──────────────────────────────────────────
-
-export function normalizePhone(phone: string): string {
-  // Preserve leading '+' for international E.164 numbers
-  const hasPlus = phone.trim().startsWith("+");
-  // remove all non-digits
-  const digits = phone.replace(/[^0-9]/g, '');
-  return hasPlus ? `+${digits}` : digits;
-}
-
-// ── Order ID extraction ────────────────────────────────────────────────
-
-export function extractOrderIds(
-  ctx: ExternalCrmContext | null | undefined,
-  limit = 10,
-): string[] {
-  if (!ctx) return [];
-  const ids = new Set<string>();
-
-  // 1. Try parsing ctx.recentOrders if it contains JSON or serialized data
-  if (ctx.recentOrders) {
-    // If it's a JSON array or list of JSON objects, try parsing them
-    try {
-      // Split by semicolon (which is used in stringifyValue for arrays)
-      const parts = ctx.recentOrders.split("; ");
-      for (const part of parts) {
-        try {
-          const parsed = JSON.parse(part);
-          if (parsed && typeof parsed === "object") {
-            // Check common order ID fields
-            const idVal = parsed.orderId || parsed.id || parsed.order_id || parsed.orderNo || parsed.orderNumber;
-            if (idVal) {
-              ids.add(String(idVal));
-              continue;
-            }
-          }
-        } catch {
-          // Not a JSON object, proceed to regex
-        }
-      }
-    } catch {
-      // Ignore parsing errors
-    }
-
-    // Match patterns in string. We should support quotes, e.g. "orderId":"25214" or "order_id": 25214
-    const orderIdPattern = /(?:order[_\s]*(?:id|no|number)?|id|#)[:\s#"]*(\d{4,})/gi;
-    let match: RegExpExecArray | null;
-    orderIdPattern.lastIndex = 0;
-    while ((match = orderIdPattern.exec(ctx.recentOrders)) !== null) {
-      ids.add(match[1]);
-    }
-  }
-
-  // 2. Also check rawData for order-related fields
-  if (ctx.rawData) {
-    const checkValueForIds = (val: any) => {
-      if (val && typeof val === "object") {
-        if (Array.isArray(val)) {
-          for (const item of val) checkValueForIds(item);
-        } else {
-          const idVal = val.orderId || val.id || val.order_id || val.orderNo || val.orderNumber;
-          if (idVal) {
-            ids.add(String(idVal));
-          } else {
-            // Recurse into object keys
-            for (const [k, v] of Object.entries(val)) {
-              if (k.toLowerCase().includes("order") || k.toLowerCase() === "id") {
-                if (typeof v === "number" || typeof v === "string") {
-                  if (/^\d{4,}$/.test(String(v))) ids.add(String(v));
-                }
-              }
-            }
-          }
-        }
-      }
-    };
-
-    checkValueForIds(ctx.rawData);
-
-    // Fallback search in rawData values if still nothing
-    if (ids.size === 0) {
-      for (const [key, val] of Object.entries(ctx.rawData)) {
-        if (key.startsWith("_")) continue;
-        const keyLower = key.toLowerCase();
-        if (keyLower.includes("order") || keyLower.includes("recent")) {
-          const valStr = typeof val === "object" ? JSON.stringify(val) : String(val);
-          const orderIdPattern = /(?:order[_\s]*(?:id|no|number)?|id|#)[:\s#"]*(\d{4,})/gi;
-          let match: RegExpExecArray | null;
-          while ((match = orderIdPattern.exec(valStr)) !== null) {
-            ids.add(match[1]);
-          }
-        }
-      }
-    }
-  }
-
-  return Array.from(ids).slice(0, limit);
-}
-
 // ── Main entry point ───────────────────────────────────────────────────
 
 export async function fetchExternalCrmData(
@@ -412,31 +296,26 @@ export async function fetchExternalCrmData(
     const config = await getCachedConfig(userId);
     if (!config || !config.isEnabled) return null;
 
-    const normalizedPhone = normalizePhone(phone);
-
-    const cached = getCachedData(userId, normalizedPhone);
+    const cached = getCachedData(userId, phone);
     if (cached) {
-      logger.debug({ userId, phone: normalizedPhone }, "External CRM data served from cache");
+      logger.debug({ userId, phone }, "External CRM data served from cache");
       return cached;
     }
 
-    const responseBody = await callExternalCrm(config, normalizedPhone);
+    const responseBody = await callExternalCrm(config, phone);
     if (responseBody == null) return null;
-
-    logger.info({ userId, phone: normalizedPhone, responseBody }, "Raw external CRM response body fetched");
 
     const ctx = mapResponse(responseBody, config);
 
-    setCachedData(userId, normalizedPhone, ctx, config.cacheTtlSeconds);
-    logger.info({ userId, phone: normalizedPhone, hasName: !!ctx.customerName }, "External CRM data fetched successfully");
+    setCachedData(userId, phone, ctx, config.cacheTtlSeconds);
+    logger.info({ userId, phone, hasName: !!ctx.customerName }, "External CRM data fetched successfully");
 
     return ctx;
   } catch (err: any) {
-    const normalizedPhone = normalizePhone(phone);
     if (err.name === "AbortError") {
-      logger.warn({ userId, phone: normalizedPhone }, "External CRM lookup timed out");
+      logger.warn({ userId, phone }, "External CRM lookup timed out");
     } else {
-      logger.error({ err, userId, phone: normalizedPhone }, "External CRM lookup failed");
+      logger.error({ err, userId, phone }, "External CRM lookup failed");
     }
     return null;
   }
@@ -455,8 +334,7 @@ export async function testExternalCrmLookup(
       return { success: false, error: "No external CRM configuration found" };
     }
 
-    const normalizedPhone = normalizePhone(phone);
-    const responseBody = await callExternalCrm(config, normalizedPhone);
+    const responseBody = await callExternalCrm(config, phone);
     if (responseBody == null) {
       return { success: false, error: "CRM returned empty or non-OK response" };
     }
