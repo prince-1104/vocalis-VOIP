@@ -306,21 +306,11 @@ export function resolveCrmOpeningGreeting(
 // ── Phone number normalization ──────────────────────────────────────────
 
 export function normalizePhone(phone: string): string {
+  // Preserve leading '+' for international E.164 numbers
+  const hasPlus = phone.trim().startsWith("+");
   // remove all non-digits
-  let cleaned = phone.replace(/[^0-9]/g, '');
-  // strip country code 91 if it's 12 digits
-  if (cleaned.startsWith("91") && cleaned.length === 12) {
-    cleaned = cleaned.substring(2);
-  }
-  // strip country code 1 if it's 11 digits
-  if (cleaned.startsWith("1") && cleaned.length === 11) {
-    cleaned = cleaned.substring(1);
-  }
-  // strip leading 0 if it's 11 digits
-  if (cleaned.startsWith("0") && cleaned.length === 11) {
-    cleaned = cleaned.substring(1);
-  }
-  return cleaned;
+  const digits = phone.replace(/[^0-9]/g, '');
+  return hasPlus ? `+${digits}` : digits;
 }
 
 // ── Order ID extraction ────────────────────────────────────────────────
