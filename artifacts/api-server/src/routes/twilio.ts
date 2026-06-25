@@ -345,9 +345,13 @@ async function buildSystemPrompt(
     system += "\n";
   }
 
-  if (externalCrmCallFlow?.verifyIdentity) {
-    system += `Before sharing order details, prescription info, or payment amounts, briefly confirm the caller's identity ` +
-      `(e.g. ask them to confirm their name or email on file).\n\n`;
+  if (externalCrmCallFlow?.verifyIdentity && externalCrmContext?.customerFound) {
+    system += `The caller has been identified by their phone number via CRM lookup. ` +
+      `You already have their details — do NOT ask them to confirm their name or email. ` +
+      `Use the CRM data directly to help them.\n\n`;
+  } else if (externalCrmCallFlow?.verifyIdentity && !externalCrmContext?.customerFound) {
+    system += `The caller was NOT found in the CRM by phone number. ` +
+      `You may ask for their name to try to help, but do not demand email or account verification.\n\n`;
   }
 
   if (externalCrmCallFlow?.callInstructions?.trim()) {

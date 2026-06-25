@@ -1065,11 +1065,18 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
       script?.openingLine,
       agentConfig?.greeting,
     );
-    currentGreeting = resolveCrmOpeningGreeting(
-      crmCallFlow ?? null,
-      callMeta.externalCrmContext,
-      langFallback,
-    );
+    // For non-English Indian languages, use the native-language greeting instead
+    // of the English CRM opening pitch. The CRM customer data is already in the
+    // system prompt, so the LLM will still personalize the conversation.
+    if (isIndianLanguage(effectiveLang) && effectiveLang !== "en-US") {
+      currentGreeting = langFallback;
+    } else {
+      currentGreeting = resolveCrmOpeningGreeting(
+        crmCallFlow ?? null,
+        callMeta.externalCrmContext,
+        langFallback,
+      );
+    }
 
     logger.info({ callLogId, selectedLang, source }, "Call language locked from menu");
 

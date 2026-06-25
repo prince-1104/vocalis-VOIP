@@ -254,7 +254,7 @@ export function applyPitchTemplate(
   if (!template) return template;
 
   const vars: Record<string, string> = {
-    customerName: ctx?.customerName || "there",
+    customerName: ctx?.customerName || "",
     email: ctx?.email || "",
     accountId: ctx?.accountId || "",
     recentOrders: ctx?.recentOrders || "",
@@ -267,7 +267,12 @@ export function applyPitchTemplate(
     }
   }
 
-  return template.replace(/\{\{(\w+)\}\}/g, (_, key: string) => vars[key] ?? "");
+  let result = template.replace(/\{\{(\w+)\}\}/g, (_, key: string) => vars[key] ?? "");
+  // Clean up awkward spacing from empty template variables:
+  // "Hi , This is..." → "Hi, This is..."
+  // "Hi  there" → "Hi there"
+  result = result.replace(/\s+,/g, ",").replace(/\s{2,}/g, " ").trim();
+  return result;
 }
 
 export function resolveCrmOpeningGreeting(
