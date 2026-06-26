@@ -1811,7 +1811,7 @@ router.post("/widget/chat", async (req, res) => {
         audioMimeType: "audio/mpeg",
         crmSessionToken: crmSessionTokenOut ?? null,
         crmPendingToken: crmPendingTokenOut ?? null,
-        crmClearSession: !!pendingResult.completed,
+        crmClearSession: false,
       });
       return;
     }
@@ -2711,20 +2711,19 @@ router.get("/widget/loader.js", async (req, res) => {
         var reply = res.data.reply || "I\u2019m sorry, I didn\u2019t understand that.";
         addMsg(reply, "bot", false);
         history.push({role:"assistant", content:reply});
-        if (res.data.crmSessionToken) crmSessionToken = res.data.crmSessionToken;
-        if (res.data.crmPendingToken) crmPendingToken = res.data.crmPendingToken;
-        if (res.data.crmClearSession) {
+        if (res.data.crmSessionToken) {
+          crmSessionToken = res.data.crmSessionToken;
+          crmPendingToken = "";
+          chatUnlocked = true;
+          crmStep = "verified";
+          input.placeholder = "Type or speak\\u2026";
+        } else if (res.data.crmClearSession) {
           crmSessionToken = "";
           chatUnlocked = false;
           crmStep = "order";
           input.placeholder = "Enter your order ID\\u2026";
         }
-        if (res.data.crmSessionToken && !res.data.crmPendingToken) {
-          crmPendingToken = "";
-          chatUnlocked = true;
-          crmStep = "verified";
-          input.placeholder = "Type or speak\\u2026";
-        }
+        if (res.data.crmPendingToken) crmPendingToken = res.data.crmPendingToken;
         if (res.data.detectedLanguage) sessionLang = res.data.detectedLanguage;
         if (isVoice) {
           // Server pre-generated TTS chunks in parallel — play them directly

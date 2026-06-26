@@ -134,16 +134,15 @@ function ChatTestPanel({
       });
       if (!res.ok) throw new Error(`API error: ${res.status}`);
       const data = await res.json();
-      if (data.crmSessionToken) setCrmSessionToken(data.crmSessionToken);
-      if (data.crmPendingToken) setCrmPendingToken(data.crmPendingToken);
-      if (data.crmClearSession) {
+      if (data.crmSessionToken) {
+        setCrmSessionToken(data.crmSessionToken);
+        setCrmPendingToken("");
+        setCrmStep("verified");
+      } else if (data.crmClearSession) {
         setCrmSessionToken("");
         setCrmStep("order");
       }
-      if (data.crmSessionToken && !data.crmPendingToken) {
-        setCrmPendingToken("");
-        setCrmStep("verified");
-      }
+      if (data.crmPendingToken) setCrmPendingToken(data.crmPendingToken);
 
       const botMsg: ChatMessage = {
         id: `bot-${Date.now()}`,
