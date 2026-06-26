@@ -68,7 +68,7 @@ router.put("/agents", async (req, res) => {
     phoneNumber, twilioAccountSid, twilioAuthToken,
     telephonyProvider, telephonyProviderName, telephonyApiKey, telephonyApiSecret, telephonyAppId,
     greeting, personality, maxCallDuration, voicemailMessage, businessHoursOnly, aiModel,
-    widgetEnabled, widgetCampaignId, widgetVoiceEnabled,
+    widgetEnabled, widgetCampaignId, widgetVoiceEnabled, widgetExternalCrmEnabled,
     languageMenuConfig,
   } = req.body;
 
@@ -87,6 +87,7 @@ router.put("/agents", async (req, res) => {
   if (widgetEnabled !== undefined) updateData.widgetEnabled = widgetEnabled;
   if (widgetCampaignId !== undefined) updateData.widgetCampaignId = widgetCampaignId === null ? null : Number(widgetCampaignId);
   if (widgetVoiceEnabled !== undefined) updateData.widgetVoiceEnabled = widgetVoiceEnabled;
+  if (widgetExternalCrmEnabled !== undefined) updateData.widgetExternalCrmEnabled = widgetExternalCrmEnabled;
   if (languageMenuConfig !== undefined) updateData.languageMenuConfig = languageMenuConfig;
 
   // Defensive fallback: if a specific premium AI model is chosen, but language is somehow set to "auto"

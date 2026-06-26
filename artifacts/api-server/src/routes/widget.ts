@@ -1,9 +1,21 @@
 import { Router, type IRouter } from "express";
-import { db, agentConfigsTable, callLogsTable, trainingDataTable, callingScriptsTable } from "@workspace/db";
+import { db, agentConfigsTable, callLogsTable, trainingDataTable, callingScriptsTable, externalCrmConfigsTable } from "@workspace/db";
 import { eq, and } from "drizzle-orm";
 import { openai } from "@workspace/integrations-openai-ai-server";
 import { randomUUID } from "crypto";
 import { logLLMCost, logTTSCost, resolveTenantIdForOwner } from "../lib/cost-logger";
+import {
+  appendCrmContextToWidgetPrompt,
+} from "../lib/widget-crm-orders";
+import {
+  createWidgetCrmSessionToken,
+  isWidgetCrmActive,
+  resolveWidgetCrmSessionForChat,
+  verifyWidgetCrmOrder,
+  verifyWidgetCrmPhone,
+  verifyWidgetCrmSessionToken,
+  type WidgetCrmSession,
+} from "../lib/widget-crm-session";
 
 const router: IRouter = Router();
 
@@ -1047,7 +1059,13 @@ function selectRelevantKBEntries(
 const trainingDataCache = new Map<number, { data: any[]; scripts: any[]; fetchedAt: number }>();
 const TRAINING_CACHE_TTL_MS = 60 * 1000;
 
-async function buildSystemPromptForWidget(userId: number, agentConfig: any, userMessage?: string, isVoice?: boolean): Promise<string> {
+async function buildSystemPromptForWidget(
+  userId: number,
+  agentConfig: any,
+  userMessage?: string,
+  isVoice?: boolean,
+  crmSession?: WidgetCrmSession | null,
+): Promise<string> {
   const maxEntries = isVoice ? KB_MAX_ENTRIES_VOICE : KB_MAX_ENTRIES;
   const maxChars = isVoice ? KB_ENTRY_MAX_CHARS_VOICE : KB_ENTRY_MAX_CHARS;
   let trainingDataRaw: any[] = [];
@@ -1118,6 +1136,16 @@ async function buildSystemPromptForWidget(userId: number, agentConfig: any, user
       system += `Key points: ${(script.pitchPoints as string[]).slice(0, 3).join(" | ")}\n`;
     }
   }
+
+  if (crmSession?.crmContext) {
+    system = appendCrmContextToWidgetPrompt(
+      system,
+      crmSession.crmContext,
+      crmSession.activeOrderId,
+      crmSession.customerName,
+    );
+  }
+
   return system;
 }
 
@@ -1239,13 +1267,71 @@ router.get("/widget/config/:apiKey", async (req, res) => {
     res.status(404).json({ error: "Widget not found or disabled" });
     return;
   }
+
+  const crmConfig = await db.query.externalCrmConfigsTable.findFirst({
+    where: eq(externalCrmConfigsTable.userId, agent.userId),
+  });
+  const crmConnected = !!(crmConfig?.isEnabled && crmConfig.lookupUrl);
+  const widgetCrmEnabled = !!(agent as any).widgetExternalCrmEnabled && crmConnected;
+
   res.json({
     agentName: agent.agentName,
     greeting: agent.greeting || `Hi! I'm ${agent.agentName}. How can I help you today?`,
     language: agent.language || "en-US",
     personality: agent.personality,
     voiceEnabled: !!(agent as any).widgetVoiceEnabled,
+    crmAuthRequired: widgetCrmEnabled,
+    crmName: crmConfig?.name ?? null,
+    crmConnected,
+    widgetExternalCrmEnabled: !!(agent as any).widgetExternalCrmEnabled,
   });
+});
+
+// ── Widget CRM verification (phone + order ID) ───────────────────────────
+router.post("/widget/crm/verify-phone", async (req, res) => {
+  const { apiKey, phone } = req.body as { apiKey?: string; phone?: string };
+  if (!apiKey || !phone) {
+    res.status(400).json({ error: "apiKey and phone are required" });
+    return;
+  }
+
+  const agent = await getAgentByWidgetKey(apiKey);
+  if (!agent) {
+    res.status(404).json({ error: "Widget not found or disabled" });
+    return;
+  }
+
+  const active = await isWidgetCrmActive(agent.userId, !!(agent as any).widgetExternalCrmEnabled);
+  if (!active) {
+    res.status(403).json({ error: "External CRM is not enabled for this widget" });
+    return;
+  }
+
+  const result = await verifyWidgetCrmPhone(agent.userId, phone);
+  res.json(result);
+});
+
+router.post("/widget/crm/verify-order", async (req, res) => {
+  const { apiKey, phone, orderId } = req.body as { apiKey?: string; phone?: string; orderId?: string };
+  if (!apiKey || !phone || !orderId) {
+    res.status(400).json({ error: "apiKey, phone, and orderId are required" });
+    return;
+  }
+
+  const agent = await getAgentByWidgetKey(apiKey);
+  if (!agent) {
+    res.status(404).json({ error: "Widget not found or disabled" });
+    return;
+  }
+
+  const active = await isWidgetCrmActive(agent.userId, !!(agent as any).widgetExternalCrmEnabled);
+  if (!active) {
+    res.status(403).json({ error: "External CRM is not enabled for this widget" });
+    return;
+  }
+
+  const result = await verifyWidgetCrmOrder(agent.userId, phone, orderId);
+  res.json(result);
 });
 
 // ── Twilio Client SDK: Voice Widget ─────────────────────────────────────
@@ -1661,13 +1747,14 @@ function videoSuggestionLine(language: string, link: string): string {
 
 router.post("/widget/chat", async (req, res) => {
   const requestStart = Date.now();
-  const { apiKey, message, history, includeAudio, isVoiceRequest, sessionLanguage } = req.body as {
+  const { apiKey, message, history, includeAudio, isVoiceRequest, sessionLanguage, crmSessionToken } = req.body as {
     apiKey: string;
     message: string;
     history?: { role: string; content: string }[];
     includeAudio?: boolean;
     isVoiceRequest?: boolean;
     sessionLanguage?: string;
+    crmSessionToken?: string;
   };
 
   if (!apiKey || !message) {
@@ -1679,6 +1766,30 @@ router.post("/widget/chat", async (req, res) => {
   if (!agent) {
     res.status(404).json({ error: "Widget not found or disabled" });
     return;
+  }
+
+  const widgetCrmRequired = await isWidgetCrmActive(agent.userId, !!(agent as any).widgetExternalCrmEnabled);
+  let crmSession: WidgetCrmSession | null = null;
+  let crmSessionTokenOut: string | undefined;
+
+  if (widgetCrmRequired) {
+    if (!crmSessionToken) {
+      res.status(403).json({
+        error: "CRM verification required",
+        reply: "Please verify your phone number and order ID before we can continue.",
+        crmAuthRequired: true,
+      });
+      return;
+    }
+    crmSession = verifyWidgetCrmSessionToken(crmSessionToken);
+    if (!crmSession || crmSession.userId !== agent.userId) {
+      res.status(403).json({
+        error: "Invalid or expired session",
+        reply: "Your session has expired. Please verify your phone number and order ID again.",
+        crmAuthRequired: true,
+      });
+      return;
+    }
   }
 
   const safeHistory = Array.isArray(history) ? history : [];
@@ -1724,11 +1835,34 @@ router.post("/widget/chat", async (req, res) => {
   let llmInputTokens = 0;
   let llmOutputTokens = 0;
 
+  // Handle order switching within verified CRM session
+  if (crmSession) {
+    const orderSwitch = await resolveWidgetCrmSessionForChat(agent.userId, crmSession, message);
+    if (orderSwitch.switchMessage && !orderSwitch.switchedOrder) {
+      reply = orderSwitch.switchMessage;
+      modelUsed = "crm-guard";
+    } else if (orderSwitch.switchedOrder) {
+      crmSession = orderSwitch.session;
+      crmSessionTokenOut = createWidgetCrmSessionToken({
+        userId: crmSession.userId,
+        phone: crmSession.phone,
+        customerName: crmSession.customerName,
+        activeOrderId: crmSession.activeOrderId,
+        orderIds: crmSession.orderIds,
+        orders: crmSession.orders,
+        crmContext: crmSession.crmContext,
+      });
+      reply = orderSwitch.switchMessage ?? `I've switched to order #${crmSession.activeOrderId}. How can I help?`;
+      modelUsed = "crm-switch";
+    }
+  }
+
   // ── Voice fast-path: direct KB match skips LLM entirely ────────────────
   // For voice, try to match the user's question against FAQ/objection entries
   // in the training data. If found, return the pre-written answer directly
   // without calling the LLM — this cuts voice latency by ~2-3 seconds.
-  if (isVoiceRequest) {
+  // Skip when CRM session is active — order-specific CRM context takes priority.
+  if (isVoiceRequest && !crmSession) {
     const directAnswer = await findDirectKBAnswer(agent.userId, message);
     if (directAnswer) {
       reply = directAnswer.answer;
@@ -1741,7 +1875,7 @@ router.post("/widget/chat", async (req, res) => {
     systemPrompt = await buildSystemPromptForWidget(agent.userId, {
       ...agent,
       language: effectiveLanguage,
-    }, message, isVoiceRequest);
+    }, message, isVoiceRequest, crmSession);
     try {
       const generation = await generateWidgetReply(
         systemPrompt,
@@ -1765,7 +1899,7 @@ router.post("/widget/chat", async (req, res) => {
   db.insert(callLogsTable).values({
     userId: agent.userId,
     direction: "widget",
-    phone: "web-widget",
+    phone: crmSession?.phone ?? "web-widget",
     outcome: "answered",
     aiModel: modelUsed,
     startedAt: new Date(),
@@ -1882,6 +2016,7 @@ router.post("/widget/chat", async (req, res) => {
       provider,
       video: suggestedVideo,
       audioMimeType,
+      crmSessionToken: crmSessionTokenOut,
     });
     return;
   }
@@ -1925,6 +2060,7 @@ router.post("/widget/chat", async (req, res) => {
     provider,
     video: suggestedVideo,
     audioMimeType,
+    crmSessionToken: crmSessionTokenOut,
   });
 });
 
@@ -2004,6 +2140,11 @@ router.get("/widget/loader.js", async (req, res) => {
   var speaking = false;
   var recognition = null;
   var micBlocked = false;
+  var crmAuthRequired = false;
+  var crmStep = "none";
+  var crmPhone = "";
+  var crmSessionToken = "";
+  var chatUnlocked = true;
   var SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   var hasSpeechAPI = !!SpeechRecognition;
   var INDIC_RANGES = [
@@ -2477,6 +2618,10 @@ router.get("/widget/loader.js", async (req, res) => {
 
   function sendMessage(msg, isVoice) {
     if (!msg) return;
+    if (crmAuthRequired && !chatUnlocked) {
+      handleCrmInput(msg);
+      return;
+    }
     input.value = "";
     addMsg(msg, "user", isVoice);
     history.push({role:"user", content:msg});
@@ -2486,17 +2631,19 @@ router.get("/widget/loader.js", async (req, res) => {
       var quickGuess = detectLangFromText(msg);
       if (quickGuess) sessionLang = quickGuess;
     }
+    var chatBody = {
+      apiKey: API_KEY,
+      message: msg,
+      history: history.slice(-6),
+      includeAudio: false,
+      isVoiceRequest: isVoice,
+      sessionLanguage: sessionLang
+    };
+    if (crmSessionToken) chatBody.crmSessionToken = crmSessionToken;
     fetch(BASE_URL + "/api/widget/chat", {
       method: "POST",
       headers: {"Content-Type":"application/json"},
-      body: JSON.stringify({
-        apiKey: API_KEY,
-        message: msg,
-        history: history.slice(-6),
-        includeAudio: false,
-        isVoiceRequest: isVoice,
-        sessionLanguage: sessionLang
-      })
+      body: JSON.stringify(chatBody)
     }).then(function(r){
       return r.json().then(function(data) { return { ok: r.ok, status: r.status, data: data }; });
     }).then(function(res){
@@ -2509,6 +2656,7 @@ router.get("/widget/loader.js", async (req, res) => {
         var reply = res.data.reply || "I\u2019m sorry, I didn\u2019t understand that.";
         addMsg(reply, "bot", false);
         history.push({role:"assistant", content:reply});
+        if (res.data.crmSessionToken) crmSessionToken = res.data.crmSessionToken;
         if (res.data.detectedLanguage) sessionLang = res.data.detectedLanguage;
         if (isVoice) {
           // Server pre-generated TTS chunks in parallel — play them directly
@@ -2540,6 +2688,103 @@ router.get("/widget/loader.js", async (req, res) => {
     }).finally(function(){
       if (mic) mic.disabled = false;
     });
+  }
+
+  function handleCrmInput(msg) {
+    input.value = "";
+    addMsg(msg, "user", false);
+    setTyping(true);
+    if (mic) mic.disabled = true;
+
+    if (crmStep === "phone") {
+      crmPhone = msg;
+      fetch(BASE_URL + "/api/widget/crm/verify-phone", {
+        method: "POST",
+        headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({ apiKey: API_KEY, phone: msg })
+      }).then(function(r){ return r.json().then(function(d){ return { ok: r.ok, data: d }; }); })
+      .then(function(res){
+        setTyping(false);
+        var botMsg = (res.data && res.data.message) || "Could not verify phone number.";
+        addMsg(botMsg, "bot", false);
+        if (res.ok && res.data && res.data.success) {
+          crmStep = "order";
+          input.placeholder = "Enter your order ID\\u2026";
+        }
+      }).catch(function(){
+        setTyping(false);
+        addMsg("Could not verify your phone number. Please try again.", "bot", false);
+      }).finally(function(){ if (mic) mic.disabled = false; });
+      return;
+    }
+
+    if (crmStep === "order") {
+      fetch(BASE_URL + "/api/widget/crm/verify-order", {
+        method: "POST",
+        headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({ apiKey: API_KEY, phone: crmPhone || msg, orderId: msg })
+      }).then(function(r){ return r.json().then(function(d){ return { ok: r.ok, data: d }; }); })
+      .then(function(res){
+        setTyping(false);
+        var botMsg = (res.data && res.data.message) || "Could not verify order.";
+        if (res.ok && res.data && res.data.success) {
+          crmSessionToken = res.data.sessionToken || "";
+          chatUnlocked = true;
+          crmStep = "verified";
+          input.placeholder = "Type or speak\\u2026";
+          botMsg = res.data.greeting || botMsg;
+          history.push({role:"assistant", content:botMsg});
+        }
+        addMsg(botMsg, "bot", false);
+      }).catch(function(){
+        setTyping(false);
+        addMsg("Could not verify your order. Please try again.", "bot", false);
+      }).finally(function(){ if (mic) mic.disabled = false; });
+    }
+  }
+
+  function startCrmVerification(crmName) {
+    crmAuthRequired = true;
+    chatUnlocked = false;
+    crmStep = "phone";
+    input.placeholder = "Enter your registered phone number\\u2026";
+    var label = crmName ? (" (" + crmName + ")") : "";
+    addMsg("Welcome! To help you with your order, please enter your registered phone number" + label + ".", "bot", false);
+  }
+
+  function showStandardGreeting(cfg) {
+    var greeting = cfg.greeting || ("Hi! I\\u2019m " + agentName + ". How can I help you today?");
+    if (agentLang === "auto") {
+      var langWrapper = el("div", {class: "dw-msg bot", style: "display:flex;flex-direction:column;gap:8px;"});
+      langWrapper.textContent = "Please select your preferred language to begin:";
+      var btnRow = el("div", {style: "display:flex;flex-wrap:wrap;gap:6px;margin-top:4px;"});
+      var langs = [
+        { label: "English", code: "en-US" },
+        { label: "हिंदी", code: "hi-IN" },
+        { label: "ಕನ್ನಡ", code: "kn-IN" },
+        { label: "Other", code: "auto" }
+      ];
+      langs.forEach(function(l) {
+        var btn = el("button", {style: "background:#7c3aed;color:#fff;border:none;border-radius:12px;padding:6px 12px;font-size:12px;cursor:pointer;"});
+        btn.textContent = l.label;
+        btn.onclick = function() {
+          sessionLang = l.code;
+          langWrapper.style.display = "none";
+          if (l.label === "Other") {
+            addMsg("You can type or speak the language you prefer (e.g., 'Speak in Tamil').", "bot", false);
+          }
+          addMsg(greeting, "bot", false);
+          history.push({role:"assistant", content:greeting});
+        };
+        btnRow.appendChild(btn);
+      });
+      langWrapper.appendChild(btnRow);
+      msgs.appendChild(langWrapper);
+      msgs.scrollTop = msgs.scrollHeight;
+    } else {
+      addMsg(greeting, "bot", false);
+      history.push({role:"assistant", content:greeting});
+    }
   }
 
   function stopListening() {
@@ -2633,41 +2878,10 @@ router.get("/widget/loader.js", async (req, res) => {
         var modeEl2 = document.getElementById("_dw-mode");
         if (modeEl2) modeEl2.textContent = "Text";
       }
-      var greeting = cfg.greeting || ("Hi! I\u2019m " + agentName + ". How can I help you today?");
-      
-      if (agentLang === "auto") {
-        var langWrapper = el("div", {class: "dw-msg bot", style: "display:flex;flex-direction:column;gap:8px;"});
-        langWrapper.textContent = "Please select your preferred language to begin:";
-        
-        var btnRow = el("div", {style: "display:flex;flex-wrap:wrap;gap:6px;margin-top:4px;"});
-        var langs = [
-          { label: "English", code: "en-US" },
-          { label: "हिंदी", code: "hi-IN" },
-          { label: "ಕನ್ನಡ", code: "kn-IN" },
-          { label: "Other", code: "auto" }
-        ];
-        
-        langs.forEach(function(l) {
-          var btn = el("button", {style: "background:#7c3aed;color:#fff;border:none;border-radius:12px;padding:6px 12px;font-size:12px;cursor:pointer;"});
-          btn.textContent = l.label;
-          btn.onclick = function() {
-            sessionLang = l.code;
-            langWrapper.style.display = "none";
-            if (l.label === "Other") {
-              addMsg("You can type or speak the language you prefer (e.g., 'Speak in Tamil').", "bot", false);
-            }
-            addMsg(greeting, "bot", false);
-            history.push({role:"assistant", content:greeting});
-          };
-          btnRow.appendChild(btn);
-        });
-        
-        langWrapper.appendChild(btnRow);
-        msgs.appendChild(langWrapper);
-        msgs.scrollTop = msgs.scrollHeight;
+      if (cfg.crmAuthRequired) {
+        startCrmVerification(cfg.crmName);
       } else {
-        addMsg(greeting, "bot", false);
-        history.push({role:"assistant", content:greeting});
+        showStandardGreeting(cfg);
       }
     })
     .catch(function(){

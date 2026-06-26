@@ -8,7 +8,7 @@ import { getStoredToken } from "@/hooks/use-auth";
 import {
   Globe, Copy, CheckCircle2, RefreshCw, ToggleLeft, ToggleRight,
   Code2, Megaphone, Activity, Info, ExternalLink, Zap,
-  Send, MessageSquare, Bot, Loader2, Trash2, Phone
+  Send, MessageSquare, Bot, Loader2, Trash2, Phone, Database, Link2
 } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { getGetAgentQueryKey } from "@workspace/api-client-react";
@@ -51,12 +51,46 @@ const QUICK_PROMPTS = [
   "How do I get started?",
 ];
 
-function ChatTestPanel({ apiKey, agentName }: { apiKey: string; agentName: string }) {
+function ChatTestPanel({
+  apiKey,
+  agentName,
+  widgetExternalCrmEnabled,
+  crmConnected,
+  crmName,
+}: {
+  apiKey: string;
+  agentName: string;
+  widgetExternalCrmEnabled: boolean;
+  crmConnected: boolean;
+  crmName: string | null;
+}) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
+  const [crmStep, setCrmStep] = useState<"phone" | "order" | "verified" | "none">("none");
+  const [crmPhone, setCrmPhone] = useState("");
+  const [crmSessionToken, setCrmSessionToken] = useState("");
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  const crmAuthRequired = widgetExternalCrmEnabled && crmConnected;
+  const chatUnlocked = !crmAuthRequired || crmStep === "verified";
+
+  useEffect(() => {
+    if (!crmAuthRequired) {
+      setCrmStep("none");
+      return;
+    }
+    setCrmStep("phone");
+    setCrmPhone("");
+    setCrmSessionToken("");
+    setMessages([{
+      id: "crm-welcome",
+      role: "assistant",
+      content: `Welcome! To help you with your order, please enter your registered phone number${crmName ? ` (${crmName})` : ""}.`,
+      timestamp: new Date(),
+    }]);
+  }, [crmAuthRequired, crmName, apiKey]);
 
   const scrollToBottom = () => {
     const el = messagesContainerRef.current;
@@ -71,6 +105,11 @@ function ChatTestPanel({ apiKey, agentName }: { apiKey: string; agentName: strin
     const msg = (text || input).trim();
     if (!msg || sending || !apiKey) return;
 
+    if (crmAuthRequired && !chatUnlocked) {
+      await handleCrmInput(msg);
+      return;
+    }
+
     const userMsg: ChatMessage = {
       id: `user-${Date.now()}`,
       role: "user",
@@ -83,13 +122,16 @@ function ChatTestPanel({ apiKey, agentName }: { apiKey: string; agentName: strin
 
     try {
       const history = messages.map(m => ({ role: m.role, content: m.content }));
+      const body: Record<string, unknown> = { apiKey, message: msg, history };
+      if (crmSessionToken) body.crmSessionToken = crmSessionToken;
       const res = await fetch(`${window.location.origin}/api/widget/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ apiKey, message: msg, history }),
+        body: JSON.stringify(body),
       });
       if (!res.ok) throw new Error(`API error: ${res.status}`);
       const data = await res.json();
+      if (data.crmSessionToken) setCrmSessionToken(data.crmSessionToken);
 
       const botMsg: ChatMessage = {
         id: `bot-${Date.now()}`,
@@ -114,8 +156,80 @@ function ChatTestPanel({ apiKey, agentName }: { apiKey: string; agentName: strin
     }
   };
 
+  const handleCrmInput = async (msg: string) => {
+    const userMsg: ChatMessage = {
+      id: `user-${Date.now()}`,
+      role: "user",
+      content: msg,
+      timestamp: new Date(),
+    };
+    setMessages(prev => [...prev, userMsg]);
+    setInput("");
+    setSending(true);
+
+    try {
+      if (crmStep === "phone") {
+        setCrmPhone(msg);
+        const res = await fetch(`${window.location.origin}/api/widget/crm/verify-phone`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ apiKey, phone: msg }),
+        });
+        const data = await res.json();
+        setMessages(prev => [...prev, {
+          id: `bot-${Date.now()}`,
+          role: "assistant",
+          content: data.message || "Could not verify phone number.",
+          timestamp: new Date(),
+        }]);
+        if (res.ok && data.success) setCrmStep("order");
+        return;
+      }
+
+      if (crmStep === "order") {
+        const res = await fetch(`${window.location.origin}/api/widget/crm/verify-order`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ apiKey, phone: crmPhone, orderId: msg }),
+        });
+        const data = await res.json();
+        if (res.ok && data.success) {
+          setCrmSessionToken(data.sessionToken || "");
+          setCrmStep("verified");
+        }
+        setMessages(prev => [...prev, {
+          id: `bot-${Date.now()}`,
+          role: "assistant",
+          content: data.greeting || data.message || "Could not verify order.",
+          timestamp: new Date(),
+        }]);
+      }
+    } catch {
+      setMessages(prev => [...prev, {
+        id: `err-${Date.now()}`,
+        role: "assistant",
+        content: "Verification failed. Please try again.",
+        timestamp: new Date(),
+      }]);
+    } finally {
+      setSending(false);
+      inputRef.current?.focus();
+    }
+  };
+
   const clearChat = () => {
     setMessages([]);
+    setCrmStep(crmAuthRequired ? "phone" : "none");
+    setCrmPhone("");
+    setCrmSessionToken("");
+    if (crmAuthRequired) {
+      setMessages([{
+        id: "crm-welcome-reset",
+        role: "assistant",
+        content: `Welcome! To help you with your order, please enter your registered phone number${crmName ? ` (${crmName})` : ""}.`,
+        timestamp: new Date(),
+      }]);
+    }
     inputRef.current?.focus();
   };
 
@@ -147,7 +261,7 @@ function ChatTestPanel({ apiKey, agentName }: { apiKey: string; agentName: strin
       </div>
 
       <div ref={messagesContainerRef} className="flex-1 overflow-y-auto px-4 py-3 space-y-4" style={{ minHeight: 0 }}>
-        {messages.length === 0 && (
+        {messages.length === 0 && !crmAuthRequired && (
           <div className="flex flex-col items-center justify-center h-full gap-5">
             <div className="relative">
               <div className="w-16 h-16 rounded-full bg-gradient-to-br from-violet-500/30 to-indigo-500/30 flex items-center justify-center">
@@ -230,7 +344,13 @@ function ChatTestPanel({ apiKey, agentName }: { apiKey: string; agentName: strin
           value={input}
           onChange={e => setInput(e.target.value)}
           onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); } }}
-          placeholder="Type a message…"
+          placeholder={
+            crmStep === "phone"
+              ? "Enter your registered phone number…"
+              : crmStep === "order"
+                ? "Enter your order ID…"
+                : "Type a message…"
+          }
           disabled={sending}
           className="flex-1 bg-white/[0.05] border border-white/[0.08] rounded-xl px-3.5 py-2.5 text-sm text-foreground placeholder:text-muted-foreground/40 outline-none focus:ring-1 focus:ring-violet-500/40 focus:border-violet-500/30 transition-all disabled:opacity-50"
         />
@@ -252,14 +372,28 @@ export default function WidgetSettings() {
   const updateAgent = useUpdateAgentMutation();
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const [crmConfig, setCrmConfig] = useState<{ name: string; isEnabled: boolean } | null>(null);
+
+  useEffect(() => {
+    const token = getStoredToken();
+    if (!token) return;
+    fetch(`${window.location.origin}/api/external-crm/config`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then(r => r.json())
+      .then(data => setCrmConfig(data.config ?? null))
+      .catch(() => setCrmConfig(null));
+  }, []);
 
   const agentAny = agent as any;
   const widgetApiKey: string = agentAny?.widgetApiKey || "";
   const widgetEnabled: boolean = agentAny?.widgetEnabled ?? false;
   const widgetCampaignId: number | null = agentAny?.widgetCampaignId ?? null;
   const widgetVoiceEnabled: boolean = agentAny?.widgetVoiceEnabled ?? false;
+  const widgetExternalCrmEnabled: boolean = agentAny?.widgetExternalCrmEnabled ?? false;
   const twilioTwimlAppSid: string | null = agentAny?.twilioTwimlAppSid ?? null;
   const hasTwilioCreds = !!(agentAny?.twilioAccountSid && agentAny?.twilioAuthToken);
+  const crmConnected = !!(crmConfig?.isEnabled && crmConfig?.name);
 
   const [campaignId, setCampaignId] = useState<string>("");
   const [generatingKey, setGeneratingKey] = useState(false);
@@ -307,6 +441,23 @@ export default function WidgetSettings() {
       toast({ title: `Voice calling ${!widgetVoiceEnabled ? "enabled" : "disabled"}` });
     } catch {
       toast({ title: "Failed to update voice calling", variant: "destructive" });
+    }
+  }
+
+  async function toggleWidgetCrm() {
+    if (!crmConnected && !widgetExternalCrmEnabled) {
+      toast({
+        title: "External CRM not configured",
+        description: "Set up your CRM connection in External CRM settings first.",
+        variant: "destructive",
+      });
+      return;
+    }
+    try {
+      await updateAgent.mutateAsync({ widgetExternalCrmEnabled: !widgetExternalCrmEnabled } as any);
+      toast({ title: `Widget CRM integration ${!widgetExternalCrmEnabled ? "enabled" : "disabled"}` });
+    } catch {
+      toast({ title: "Failed to update CRM integration", variant: "destructive" });
     }
   }
 
@@ -412,6 +563,56 @@ export default function WidgetSettings() {
             <Card className="glass-panel border-white/5">
               <CardHeader>
                 <CardTitle className="flex items-center gap-2">
+                  <Database className="w-5 h-5 text-primary" /> External CRM
+                </CardTitle>
+                <CardDescription>
+                  Require customers to verify their phone number and order ID before chatting. Uses the same CRM data as voice calls.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <div className="flex items-center justify-between bg-white/5 border border-white/10 rounded-xl p-4">
+                  <div className="space-y-1">
+                    <p className="font-medium text-foreground">
+                      {widgetExternalCrmEnabled && crmConnected ? "CRM verification enabled" : "CRM verification disabled"}
+                    </p>
+                    <p className="text-sm text-muted-foreground">
+                      {crmConnected
+                        ? `Connected to ${crmConfig?.name}. Visitors verify phone + order ID before chat.`
+                        : "No external CRM configured yet."}
+                    </p>
+                  </div>
+                  <button
+                    onClick={toggleWidgetCrm}
+                    disabled={updateAgent.isPending || !crmConnected}
+                    className="shrink-0 disabled:opacity-50 hover:opacity-80 transition-opacity"
+                  >
+                    {widgetExternalCrmEnabled && crmConnected
+                      ? <ToggleRight className="w-12 h-12 text-primary" />
+                      : <ToggleLeft className="w-12 h-12 text-muted-foreground" />}
+                  </button>
+                </div>
+                {widgetExternalCrmEnabled && crmConnected && (
+                  <div className="flex items-start gap-2 bg-green-500/10 border border-green-500/20 rounded-lg p-2.5">
+                    <CheckCircle2 className="w-4 h-4 text-green-400 mt-0.5 shrink-0" />
+                    <p className="text-xs text-green-300">
+                      Widget will ask for phone number, verify orders from CRM, then greet with personalized order context.
+                    </p>
+                  </div>
+                )}
+                {!crmConnected && (
+                  <div className="flex items-start gap-2 bg-amber-500/10 border border-amber-500/20 rounded-lg p-2.5">
+                    <Info className="w-4 h-4 text-amber-400 mt-0.5 shrink-0" />
+                    <p className="text-xs text-amber-300 flex items-center gap-1">
+                      Configure your CRM in <a href="/external-crm" className="text-primary hover:underline inline-flex items-center gap-0.5"><Link2 className="w-3 h-3" /> External CRM</a> first.
+                    </p>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            <Card className="glass-panel border-white/5">
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
                   <Megaphone className="w-5 h-5 text-primary" /> Campaign Assignment
                 </CardTitle>
                 <CardDescription>Route widget conversations to a campaign for unified tracking.</CardDescription>
@@ -448,7 +649,13 @@ export default function WidgetSettings() {
               <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-3 flex items-center gap-1.5">
                 <Zap className="w-3 h-3 text-amber-400" /> Live Preview
               </p>
-              <ChatTestPanel apiKey={widgetApiKey} agentName={agentAny?.agentName || "Agent"} />
+              <ChatTestPanel
+                apiKey={widgetApiKey}
+                agentName={agentAny?.agentName || "Agent"}
+                widgetExternalCrmEnabled={widgetExternalCrmEnabled}
+                crmConnected={crmConnected}
+                crmName={crmConfig?.name ?? null}
+              />
             </div>
           </div>
         </div>

@@ -120,6 +120,7 @@ export async function syncDatabase() {
       'ALTER TABLE "external_crm_configs" ADD COLUMN IF NOT EXISTS "ending_note_lead_seconds" integer DEFAULT 2 NOT NULL;',
       'ALTER TABLE "external_crm_configs" ADD COLUMN IF NOT EXISTS "call_instructions" text;',
       'ALTER TABLE "external_crm_configs" ADD COLUMN IF NOT EXISTS "verify_identity" boolean DEFAULT false NOT NULL;',
+      'ALTER TABLE "agent_configs" ADD COLUMN IF NOT EXISTS "widget_external_crm_enabled" boolean DEFAULT false NOT NULL;',
     ];
 
     for (const q of alterQueries) {
