@@ -4,6 +4,7 @@ import {
 } from "./external-crm-lookup";
 import {
   buildOrderScopedContext,
+  extractOrderIdFromInput,
   extractOrderIdFromMessage,
   fetchCrmCustomerWithOrders,
   normalizeOrderId,
@@ -111,22 +112,13 @@ export async function verifyWidgetCrmPhone(
   }
 
   const orderIds = customer.orders.map(o => normalizeOrderId(o.orderId));
-  const name = customer.customerName || "there";
 
-  if (orderIds.length === 1) {
-    return {
-      success: true,
-      customerName: customer.customerName,
-      orderIds,
-      message: `Hi ${name}! We found 1 order on your account (Order #${orderIds[0]}). Please confirm your order ID to continue.`,
-    };
-  }
-
+  // Do NOT reveal order count or order IDs before order verification
   return {
     success: true,
     customerName: customer.customerName,
     orderIds,
-    message: `Hi ${name}! We found ${orderIds.length} orders on your account. Please enter your order ID to continue.`,
+    message: "Your phone number is verified. Please enter your order ID to continue.",
   };
 }
 
@@ -143,10 +135,11 @@ export async function verifyWidgetCrmOrder(
   message: string;
 }> {
   const normalizedPhone = normalizePhoneNumber(phone);
-  const normalizedOrderId = normalizeOrderId(orderId);
+  const parsedOrderId = extractOrderIdFromInput(orderId);
+  const normalizedOrderId = parsedOrderId ?? normalizeOrderId(orderId);
 
-  if (!normalizedOrderId) {
-    return { success: false, message: "Please enter a valid order ID." };
+  if (!normalizedOrderId || !/^\d{4,}$/.test(normalizedOrderId)) {
+    return { success: false, message: "Please enter a valid order ID (e.g. 25215)." };
   }
 
   const customer = await fetchCrmCustomerWithOrders(userId, normalizedPhone);
@@ -156,18 +149,15 @@ export async function verifyWidgetCrmOrder(
 
   const order = customer.orders.find(o => normalizeOrderId(o.orderId) === normalizedOrderId);
   if (!order) {
-    const available = customer.orders.map(o => normalizeOrderId(o.orderId));
     return {
       success: false,
-      message: available.length > 0
-        ? `Order #${normalizedOrderId} was not found on your account. Your orders: ${available.map(id => `#${id}`).join(", ")}.`
-        : "No orders found for this phone number.",
+      message: `Order #${normalizedOrderId} was not found on your account. Please check the order ID and try again.`,
     };
   }
 
   const scopedContext = buildOrderScopedContext(customer.context, order, customer.orders);
   const orderIds = customer.orders.map(o => normalizeOrderId(o.orderId));
-  const customerName = customer.customerName || "there";
+  const displayName = customer.customerName?.trim() || "there";
 
   const sessionToken = createWidgetCrmSessionToken({
     userId,
@@ -179,7 +169,7 @@ export async function verifyWidgetCrmOrder(
     crmContext: scopedContext,
   });
 
-  const greeting = `Hello ${customerName}, how can I help you with your order #${normalizedOrderId}?`;
+  const greeting = `Hello ${displayName}, how can I help you with your order #${normalizedOrderId}?`;
 
   return {
     success: true,

@@ -30,16 +30,29 @@ export function normalizeOrderId(orderId: string): string {
   return String(orderId).trim().replace(/^#/, "").replace(/\s+/g, "");
 }
 
-export function extractOrderIdFromMessage(message: string): string | null {
-  const trimmed = message.trim();
-  // Explicit patterns: "order 25173", "#25173", "order id 25173"
-  const explicit = trimmed.match(/(?:order\s*(?:id|#)?|#)\s*(\d{4,})/i);
-  if (explicit) return normalizeOrderId(explicit[1]);
+/** Extract a numeric order ID from free-form user input (e.g. "tell me about orderid 25215"). */
+export function extractOrderIdFromInput(input: string): string | null {
+  const trimmed = input.trim();
+  if (!trimmed) return null;
 
-  // Bare numeric ID (4+ digits) when message is short
-  if (/^\d{4,}$/.test(trimmed)) return normalizeOrderId(trimmed);
+  // Prefer explicit order-id patterns
+  const patterns = [
+    /(?:order\s*(?:id|#)?|orderid|order\s*no\.?|#)\s*(\d{4,})/i,
+    /\b(\d{4,})\b/,
+  ];
+  for (const re of patterns) {
+    const m = trimmed.match(re);
+    if (m?.[1]) return normalizeOrderId(m[1]);
+  }
+
+  // Bare numeric input
+  if (/^#?\d{4,}$/.test(trimmed)) return normalizeOrderId(trimmed);
 
   return null;
+}
+
+export function extractOrderIdFromMessage(message: string): string | null {
+  return extractOrderIdFromInput(message);
 }
 
 function resolveJsonPath(obj: unknown, path: string): unknown {
@@ -55,20 +68,49 @@ function resolveJsonPath(obj: unknown, path: string): unknown {
 function coerceOrder(raw: unknown): CrmOrder | null {
   if (!raw || typeof raw !== "object") return null;
   const obj = raw as Record<string, unknown>;
-  const orderId = obj.orderId ?? obj.order_id ?? obj.id;
+  const orderId = obj.orderId ?? obj.order_id ?? obj.id ?? obj.orderNo ?? obj.order_no;
   if (orderId == null) return null;
-  return {
+
+  const order: CrmOrder = {
     orderId: String(orderId),
     status: obj.status != null ? String(obj.status) : undefined,
-    products: obj.products != null ? String(obj.products) : undefined,
-    total: obj.total != null ? String(obj.total) : undefined,
-    paymentStatus: obj.paymentStatus != null ? String(obj.paymentStatus) : undefined,
-    rxStatus: obj.rxStatus != null ? String(obj.rxStatus) : undefined,
-    rxValidUntil: obj.rxValidUntil != null ? String(obj.rxValidUntil) : undefined,
-    doctor: obj.doctor != null ? String(obj.doctor) : undefined,
-    trackingId: obj.trackingId != null ? (obj.trackingId as string | null) : undefined,
-    placedAt: obj.placedAt != null ? String(obj.placedAt) : undefined,
+    products: (obj.products ?? obj.product ?? obj.items ?? obj.productName) != null
+      ? String(obj.products ?? obj.product ?? obj.items ?? obj.productName)
+      : undefined,
+    total: (obj.total ?? obj.amount ?? obj.orderTotal) != null
+      ? String(obj.total ?? obj.amount ?? obj.orderTotal)
+      : undefined,
+    paymentStatus: (obj.paymentStatus ?? obj.payment_status) != null
+      ? String(obj.paymentStatus ?? obj.payment_status)
+      : undefined,
+    rxStatus: (obj.rxStatus ?? obj.rx_status ?? obj.prescriptionStatus) != null
+      ? String(obj.rxStatus ?? obj.rx_status ?? obj.prescriptionStatus)
+      : undefined,
+    rxValidUntil: (obj.rxValidUntil ?? obj.rx_valid_until) != null
+      ? String(obj.rxValidUntil ?? obj.rx_valid_until)
+      : undefined,
+    doctor: (obj.doctor ?? obj.assignedDoctor ?? obj.assigned_doctor ?? obj.prescribingDoctor) != null
+      ? String(obj.doctor ?? obj.assignedDoctor ?? obj.assigned_doctor ?? obj.prescribingDoctor)
+      : undefined,
+    trackingId: (obj.trackingId ?? obj.tracking_id ?? obj.trackingNumber) != null
+      ? String(obj.trackingId ?? obj.tracking_id ?? obj.trackingNumber)
+      : undefined,
+    placedAt: (obj.placedAt ?? obj.placed_at ?? obj.orderDate ?? obj.createdAt) != null
+      ? String(obj.placedAt ?? obj.placed_at ?? obj.orderDate ?? obj.createdAt)
+      : undefined,
   };
+
+  // Preserve any extra CRM fields so the AI can answer about them
+  for (const [key, val] of Object.entries(obj)) {
+    if (key in order || val == null) continue;
+    if (typeof val === "object") {
+      order[key] = JSON.stringify(val);
+    } else {
+      order[key] = val;
+    }
+  }
+
+  return order;
 }
 
 function parseOrdersFromResponse(responseBody: unknown): CrmOrder[] {
@@ -98,6 +140,7 @@ async function callExternalCrmRaw(userId: number, phone: string): Promise<{
   found: boolean;
   customerName?: string;
   email?: string;
+  customerDoctor?: string;
 }> {
   const config = await db.query.externalCrmConfigsTable.findFirst({
     where: eq(externalCrmConfigsTable.userId, userId),
@@ -162,28 +205,73 @@ async function callExternalCrmRaw(userId: number, phone: string): Promise<{
   const foundVal = responseBody && typeof responseBody === "object"
     ? (responseBody as Record<string, unknown>).found
     : undefined;
-  const found = typeof foundVal === "boolean" ? foundVal : !!(context?.customerFound ?? context?.customerName);
+  const found = typeof foundVal === "boolean"
+    ? foundVal
+    : !!(context?.customerFound ?? context?.customerName) || parseOrdersFromResponse(responseBody).length > 0;
 
-  const mapping = config.responseMapping;
-  let customerName = context?.customerName;
-  let email = context?.email;
-  if (responseBody && mapping) {
-    const namePath = mapping.customerName ?? "customer.name";
-    const emailPath = mapping.email ?? "customer.email";
-    const nameVal = resolveJsonPath(responseBody, namePath);
-    const emailVal = resolveJsonPath(responseBody, emailPath);
-    if (nameVal) customerName = String(nameVal);
-    if (emailVal) email = String(emailVal);
-  } else if (responseBody) {
-    const cust = resolveJsonPath(responseBody, "customer");
-    if (cust && typeof cust === "object") {
-      const c = cust as Record<string, unknown>;
-      if (c.name) customerName = String(c.name);
-      if (c.email) email = String(c.email);
+  const extracted = extractCustomerFromResponse(responseBody, config.responseMapping);
+  const customerName = extracted.customerName ?? context?.customerName;
+  const email = extracted.email ?? context?.email;
+
+  return { responseBody, context, found, customerName, email, customerDoctor: extracted.doctor };
+}
+
+function extractCustomerFromResponse(
+  responseBody: unknown,
+  mapping?: { customerName?: string; email?: string } | null,
+): { customerName?: string; email?: string; doctor?: string } {
+  if (!responseBody || typeof responseBody !== "object") return {};
+
+  const namePaths = [
+    mapping?.customerName,
+    "customer.name",
+    "customer.fullName",
+    "customer.full_name",
+    "data.customer.name",
+    "name",
+  ].filter((p): p is string => !!p && p.trim().length > 0);
+
+  const emailPaths = [
+    mapping?.email,
+    "customer.email",
+    "data.customer.email",
+    "email",
+  ].filter((p): p is string => !!p && p.trim().length > 0);
+
+  const doctorPaths = [
+    "customer.doctor",
+    "customer.assignedDoctor",
+    "doctor",
+  ];
+
+  let customerName: string | undefined;
+  for (const path of namePaths) {
+    const val = resolveJsonPath(responseBody, path);
+    if (val != null && String(val).trim()) {
+      customerName = String(val).trim();
+      break;
     }
   }
 
-  return { responseBody, context, found, customerName, email };
+  let email: string | undefined;
+  for (const path of emailPaths) {
+    const val = resolveJsonPath(responseBody, path);
+    if (val != null && String(val).trim()) {
+      email = String(val).trim();
+      break;
+    }
+  }
+
+  let doctor: string | undefined;
+  for (const path of doctorPaths) {
+    const val = resolveJsonPath(responseBody, path);
+    if (val != null && String(val).trim()) {
+      doctor = String(val).trim();
+      break;
+    }
+  }
+
+  return { customerName, email, doctor };
 }
 
 export async function fetchCrmCustomerWithOrders(
@@ -193,31 +281,76 @@ export async function fetchCrmCustomerWithOrders(
   found: boolean;
   customerName?: string;
   email?: string;
+  customerDoctor?: string;
   orders: CrmOrder[];
   context: ExternalCrmContext;
 }> {
   const normalizedPhone = normalizePhoneNumber(phone);
-  const { responseBody, context, found, customerName, email } = await callExternalCrmRaw(userId, normalizedPhone);
+  const { responseBody, context, found, customerName, email, customerDoctor } = await callExternalCrmRaw(userId, normalizedPhone);
 
   let orders = parseOrdersFromResponse(responseBody);
   if (orders.length === 0 && context?.rawData) {
     orders = parseOrdersFromResponse(context.rawData);
+    // Also try recentOrders nested in raw truncated preview
+    if (orders.length === 0 && typeof context.rawData === "object") {
+      const raw = context.rawData as Record<string, unknown>;
+      if (Array.isArray(raw.recentOrders)) {
+        for (const item of raw.recentOrders) {
+          const o = coerceOrder(item);
+          if (o) orders.push(o);
+        }
+      }
+    }
   }
 
   const emptyContext: ExternalCrmContext = context ?? { fetchedAt: new Date().toISOString(), customerFound: false };
+  const hasOrders = orders.length > 0;
 
   return {
-    found: found && orders.length > 0,
+    found: (found || hasOrders) && hasOrders,
     customerName,
     email,
+    customerDoctor,
     orders,
     context: {
       ...emptyContext,
       customerName: customerName ?? emptyContext.customerName,
       email: email ?? emptyContext.email,
-      customerFound: found,
+      customerFound: found || hasOrders,
+      rawData: {
+        ...(typeof emptyContext.rawData === "object" ? emptyContext.rawData as object : {}),
+        ...(customerDoctor ? { accountDoctor: customerDoctor } : {}),
+      },
     },
   };
+}
+
+export function formatOrderForPrompt(order: CrmOrder): string {
+  const lines: string[] = [];
+  const labelMap: Record<string, string> = {
+    orderId: "Order ID",
+    status: "Status",
+    products: "Products / Items",
+    total: "Order Total",
+    paymentStatus: "Payment Status",
+    rxStatus: "Prescription Status",
+    rxValidUntil: "Prescription Valid Until",
+    doctor: "Assigned Doctor",
+    trackingId: "Tracking ID",
+    placedAt: "Placed Date",
+  };
+  for (const [key, label] of Object.entries(labelMap)) {
+    const val = order[key];
+    if (val != null && String(val).trim() !== "") {
+      lines.push(`  - ${label}: ${val}`);
+    }
+  }
+  // Any extra CRM fields
+  for (const [key, val] of Object.entries(order)) {
+    if (labelMap[key] || val == null || String(val).trim() === "") continue;
+    lines.push(`  - ${key}: ${typeof val === "object" ? JSON.stringify(val) : val}`);
+  }
+  return lines.join("\n");
 }
 
 export function buildOrderScopedContext(
@@ -225,17 +358,14 @@ export function buildOrderScopedContext(
   activeOrder: CrmOrder,
   allOrders: CrmOrder[],
 ): ExternalCrmContext {
-  const otherIds = allOrders
-    .map(o => normalizeOrderId(o.orderId))
-    .filter(id => id !== normalizeOrderId(activeOrder.orderId));
+  const formattedOrder = formatOrderForPrompt(activeOrder);
 
   return {
     ...baseContext,
-    recentOrders: JSON.stringify(activeOrder, null, 2),
+    recentOrders: formattedOrder,
     rawData: {
       activeOrder,
-      otherOrderIds: otherIds,
-      totalOrdersOnAccount: allOrders.length,
+      // Do NOT expose other order IDs to the AI — prevents leaking order lists in chat
     },
     fetchedAt: new Date().toISOString(),
   };
@@ -247,27 +377,23 @@ export function appendCrmContextToWidgetPrompt(
   activeOrderId: string,
   customerName?: string,
 ): string {
-  system += `CUSTOMER CONTEXT (verified via CRM — phone number authenticated):\n`;
-  if (customerName || crmContext.customerName) {
-    system += `• Customer Name: ${customerName || crmContext.customerName}\n`;
-  }
+  const name = customerName || crmContext.customerName;
+  system += `CUSTOMER CONTEXT (verified via CRM — phone number and order ID authenticated):\n`;
+  if (name) system += `• Customer Name: ${name}\n`;
   if (crmContext.email) system += `• Email: ${crmContext.email}\n`;
-  if (crmContext.recentOrders) {
-    system += `• Active Order (#${activeOrderId}) details:\n${crmContext.recentOrders}\n`;
-  }
   if (crmContext.rawData && typeof crmContext.rawData === "object") {
     const raw = crmContext.rawData as Record<string, unknown>;
-    if (Array.isArray(raw.otherOrderIds) && raw.otherOrderIds.length > 0) {
-      system += `• Other order IDs on this account (details NOT loaded): ${(raw.otherOrderIds as string[]).map(id => `#${id}`).join(", ")}\n`;
-    }
+    if (raw.accountDoctor) system += `• Account Doctor: ${raw.accountDoctor}\n`;
   }
-  system += `\nSECURITY RULES (MANDATORY):\n`;
-  system += `• The customer has been verified by phone number. ONLY discuss orders belonging to this verified account.\n`;
-  system += `• You are currently helping with order #${activeOrderId}. Answer questions about THIS order using the data above.\n`;
-  system += `• If the customer asks about a different order, ask for the order ID first. Only discuss orders that exist on their account.\n`;
-  system += `• NEVER reveal details of orders that don't belong to this verified phone number.\n`;
-  system += `• NEVER invent order information — only use data explicitly provided above.\n`;
-  system += `• Match order IDs EXACTLY. If an order ID is not in the account, say you cannot find it.\n\n`;
+  if (crmContext.recentOrders) {
+    system += `• Verified Order #${activeOrderId} — USE THIS DATA to answer questions:\n${crmContext.recentOrders}\n`;
+  }
+  system += `\nCRM DATA RULES (MANDATORY):\n`;
+  system += `• You HAVE the verified order details above. Answer questions about products/items, doctor, status, tracking, payment, and prescription USING THIS DATA.\n`;
+  system += `• NEVER say you "can't provide" or "don't have access to" information that is listed above.\n`;
+  system += `• If a specific field is missing from the data above, say that detail is not available in our system for this order.\n`;
+  system += `• You are helping with order #${activeOrderId} only. If the customer asks about a DIFFERENT order, ask them to provide that order ID first.\n`;
+  system += `• NEVER reveal other customers' data. NEVER invent order information.\n\n`;
   return system;
 }
 
