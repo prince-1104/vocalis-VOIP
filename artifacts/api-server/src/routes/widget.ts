@@ -9,10 +9,12 @@ import {
 } from "../lib/widget-crm-orders";
 import {
   createWidgetCrmSessionToken,
+  handlePendingPhoneChat,
   isWidgetCrmActive,
   resolveWidgetCrmSessionForChat,
   verifyWidgetCrmOrder,
   verifyWidgetCrmPhone,
+  verifyWidgetCrmPendingToken,
   verifyWidgetCrmSessionToken,
   type WidgetCrmSession,
 } from "../lib/widget-crm-session";
@@ -1747,7 +1749,7 @@ function videoSuggestionLine(language: string, link: string): string {
 
 router.post("/widget/chat", async (req, res) => {
   const requestStart = Date.now();
-  const { apiKey, message, history, includeAudio, isVoiceRequest, sessionLanguage, crmSessionToken } = req.body as {
+  const { apiKey, message, history, includeAudio, isVoiceRequest, sessionLanguage, crmSessionToken, crmPendingToken } = req.body as {
     apiKey: string;
     message: string;
     history?: { role: string; content: string }[];
@@ -1755,6 +1757,7 @@ router.post("/widget/chat", async (req, res) => {
     isVoiceRequest?: boolean;
     sessionLanguage?: string;
     crmSessionToken?: string;
+    crmPendingToken?: string;
   };
 
   if (!apiKey || !message) {
@@ -1771,8 +1774,48 @@ router.post("/widget/chat", async (req, res) => {
   const widgetCrmRequired = await isWidgetCrmActive(agent.userId, !!(agent as any).widgetExternalCrmEnabled);
   let crmSession: WidgetCrmSession | null = null;
   let crmSessionTokenOut: string | undefined;
+  let crmPendingTokenOut: string | undefined;
 
   if (widgetCrmRequired) {
+    // Pending flow: phone verified, waiting for order ID
+    if (crmPendingToken && !crmSessionToken) {
+      const pending = verifyWidgetCrmPendingToken(crmPendingToken);
+      if (!pending || pending.userId !== agent.userId) {
+        res.status(403).json({
+          error: "Invalid or expired pending session",
+          reply: "Your verification has expired. Please enter your phone number again.",
+          crmAuthRequired: true,
+        });
+        return;
+      }
+      const pendingResult = await handlePendingPhoneChat(agent.userId, pending, message);
+      if (pendingResult.completed && pendingResult.sessionToken) {
+        crmSession = verifyWidgetCrmSessionToken(pendingResult.sessionToken);
+        crmSessionTokenOut = pendingResult.sessionToken;
+      } else {
+        crmPendingTokenOut = pendingResult.pendingToken;
+      }
+      const pendingReply = pendingResult.message;
+      const pendingModel = pendingResult.completed ? "crm-verify" : "crm-pending";
+      res.json({
+        reply: pendingReply,
+        agentName: agent.agentName,
+        language: agent.language || "en-US",
+        detectedLanguage: agent.language || "en-US",
+        configuredLanguage: agent.language,
+        modelUsed: pendingModel,
+        audio: null,
+        audioChunks: null,
+        provider: null,
+        video: null,
+        audioMimeType: "audio/mpeg",
+        crmSessionToken: crmSessionTokenOut ?? null,
+        crmPendingToken: crmPendingTokenOut ?? null,
+        crmClearSession: !!pendingResult.completed,
+      });
+      return;
+    }
+
     if (!crmSessionToken) {
       res.status(403).json({
         error: "CRM verification required",
@@ -1835,13 +1878,19 @@ router.post("/widget/chat", async (req, res) => {
   let llmInputTokens = 0;
   let llmOutputTokens = 0;
 
-  // Handle order switching within verified CRM session
+  // Handle phone switch / order switch within verified CRM session
   if (crmSession) {
     const orderSwitch = await resolveWidgetCrmSessionForChat(agent.userId, crmSession, message);
-    if (orderSwitch.switchMessage && !orderSwitch.switchedOrder) {
+    if (orderSwitch.clearSession && orderSwitch.switchedPhone) {
+      reply = orderSwitch.switchMessage ?? "Please enter the order ID for this phone number.";
+      modelUsed = "crm-phone-switch";
+      crmSession = null;
+      crmSessionTokenOut = undefined;
+      crmPendingTokenOut = orderSwitch.pendingToken;
+    } else if (orderSwitch.switchMessage && !orderSwitch.switchedOrder) {
       reply = orderSwitch.switchMessage;
       modelUsed = "crm-guard";
-    } else if (orderSwitch.switchedOrder) {
+    } else if (orderSwitch.switchedOrder && orderSwitch.session) {
       crmSession = orderSwitch.session;
       crmSessionTokenOut = createWidgetCrmSessionToken({
         userId: crmSession.userId,
@@ -2016,7 +2065,9 @@ router.post("/widget/chat", async (req, res) => {
       provider,
       video: suggestedVideo,
       audioMimeType,
-      crmSessionToken: crmSessionTokenOut,
+      crmSessionToken: crmSessionTokenOut ?? null,
+      crmPendingToken: crmPendingTokenOut ?? null,
+      crmClearSession: !!crmPendingTokenOut,
     });
     return;
   }
@@ -2060,7 +2111,9 @@ router.post("/widget/chat", async (req, res) => {
     provider,
     video: suggestedVideo,
     audioMimeType,
-    crmSessionToken: crmSessionTokenOut,
+    crmSessionToken: crmSessionTokenOut ?? null,
+    crmPendingToken: crmPendingTokenOut ?? null,
+    crmClearSession: !!crmPendingTokenOut,
   });
 });
 
@@ -2144,6 +2197,7 @@ router.get("/widget/loader.js", async (req, res) => {
   var crmStep = "none";
   var crmPhone = "";
   var crmSessionToken = "";
+  var crmPendingToken = "";
   var chatUnlocked = true;
   var SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   var hasSpeechAPI = !!SpeechRecognition;
@@ -2618,7 +2672,7 @@ router.get("/widget/loader.js", async (req, res) => {
 
   function sendMessage(msg, isVoice) {
     if (!msg) return;
-    if (crmAuthRequired && !chatUnlocked) {
+    if (crmAuthRequired && !chatUnlocked && !crmPendingToken) {
       handleCrmInput(msg);
       return;
     }
@@ -2640,6 +2694,7 @@ router.get("/widget/loader.js", async (req, res) => {
       sessionLanguage: sessionLang
     };
     if (crmSessionToken) chatBody.crmSessionToken = crmSessionToken;
+    if (crmPendingToken) chatBody.crmPendingToken = crmPendingToken;
     fetch(BASE_URL + "/api/widget/chat", {
       method: "POST",
       headers: {"Content-Type":"application/json"},
@@ -2657,6 +2712,19 @@ router.get("/widget/loader.js", async (req, res) => {
         addMsg(reply, "bot", false);
         history.push({role:"assistant", content:reply});
         if (res.data.crmSessionToken) crmSessionToken = res.data.crmSessionToken;
+        if (res.data.crmPendingToken) crmPendingToken = res.data.crmPendingToken;
+        if (res.data.crmClearSession) {
+          crmSessionToken = "";
+          chatUnlocked = false;
+          crmStep = "order";
+          input.placeholder = "Enter your order ID\\u2026";
+        }
+        if (res.data.crmSessionToken && !res.data.crmPendingToken) {
+          crmPendingToken = "";
+          chatUnlocked = true;
+          crmStep = "verified";
+          input.placeholder = "Type or speak\\u2026";
+        }
         if (res.data.detectedLanguage) sessionLang = res.data.detectedLanguage;
         if (isVoice) {
           // Server pre-generated TTS chunks in parallel — play them directly
@@ -2729,6 +2797,7 @@ router.get("/widget/loader.js", async (req, res) => {
         var botMsg = (res.data && res.data.message) || "Could not verify order.";
         if (res.ok && res.data && res.data.success) {
           crmSessionToken = res.data.sessionToken || "";
+          crmPendingToken = "";
           chatUnlocked = true;
           crmStep = "verified";
           input.placeholder = "Type or speak\\u2026";

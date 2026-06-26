@@ -6,13 +6,16 @@ import {
   buildOrderScopedContext,
   extractOrderIdFromInput,
   extractOrderIdFromMessage,
+  extractPhoneFromMessage,
   fetchCrmCustomerWithOrders,
+  maskPhoneForDisplay,
   normalizeOrderId,
   normalizePhoneNumber,
   type CrmOrder,
 } from "./widget-crm-orders";
 
 const SESSION_TTL_MS = 60 * 60 * 1000; // 1 hour
+const PENDING_TTL_MS = 15 * 60 * 1000; // 15 min — waiting for order ID after phone verify
 
 export interface WidgetCrmSession {
   userId: number;
@@ -26,6 +29,25 @@ export interface WidgetCrmSession {
   expiresAt: number;
 }
 
+export interface WidgetCrmPendingSession {
+  userId: number;
+  phone: string;
+  customerName?: string;
+  orderIds: string[];
+  orders: CrmOrder[];
+  createdAt: number;
+  expiresAt: number;
+}
+
+export type CrmChatResolution = {
+  session: WidgetCrmSession | null;
+  switchedOrder: boolean;
+  switchedPhone: boolean;
+  switchMessage?: string;
+  pendingToken?: string;
+  clearSession?: boolean;
+};
+
 function getSigningSecret(): string {
   const secret = process.env.JWT_SECRET;
   if (!secret) throw new Error("JWT_SECRET is required for widget CRM sessions");
@@ -34,6 +56,93 @@ function getSigningSecret(): string {
 
 function signPayload(payload: string): string {
   return crypto.createHmac("sha256", getSigningSecret()).update(payload).digest("base64url");
+}
+
+export function createWidgetCrmPendingToken(
+  session: Omit<WidgetCrmPendingSession, "createdAt" | "expiresAt">,
+): string {
+  const createdAt = Date.now();
+  const expiresAt = createdAt + PENDING_TTL_MS;
+  const body = { ...session, createdAt, expiresAt, kind: "pending" as const };
+  const encoded = Buffer.from(JSON.stringify(body)).toString("base64url");
+  const sig = signPayload(encoded);
+  return `${encoded}.${sig}`;
+}
+
+export function verifyWidgetCrmPendingToken(token: string): WidgetCrmPendingSession | null {
+  try {
+    const [encoded, sig] = token.split(".");
+    if (!encoded || !sig) return null;
+    const expected = signPayload(encoded);
+    const sigBuf = Buffer.from(sig);
+    const expBuf = Buffer.from(expected);
+    if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) return null;
+    const parsed = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
+    if (parsed.kind !== "pending") return null;
+    if (!parsed.expiresAt || Date.now() > parsed.expiresAt) return null;
+    if (!parsed.userId || !parsed.phone) return null;
+    return parsed as WidgetCrmPendingSession;
+  } catch {
+    return null;
+  }
+}
+
+export async function handlePendingPhoneChat(
+  userId: number,
+  pending: WidgetCrmPendingSession,
+  message: string,
+): Promise<{
+  completed: boolean;
+  message: string;
+  sessionToken?: string;
+  pendingToken?: string;
+}> {
+  const newPhone = extractPhoneFromMessage(message, pending.phone);
+  if (newPhone && newPhone !== normalizePhoneNumber(pending.phone)) {
+    const verification = await verifyWidgetCrmPhone(userId, newPhone);
+    if (!verification.success) {
+      return { completed: false, message: verification.message, pendingToken: createWidgetCrmPendingToken(pending) };
+    }
+    const customer = await fetchCrmCustomerWithOrders(userId, newPhone);
+    const refreshed: WidgetCrmPendingSession = {
+      userId,
+      phone: normalizePhoneNumber(newPhone),
+      customerName: customer.customerName,
+      orderIds: customer.orders.map(o => normalizeOrderId(o.orderId)),
+      orders: customer.orders,
+      createdAt: Date.now(),
+      expiresAt: Date.now() + PENDING_TTL_MS,
+    };
+    return {
+      completed: false,
+      message: `I've verified phone number ${maskPhoneForDisplay(newPhone)}. Please enter the order ID for this number.`,
+      pendingToken: createWidgetCrmPendingToken(refreshed),
+    };
+  }
+
+  const orderId = extractOrderIdFromInput(message);
+  if (!orderId) {
+    return {
+      completed: false,
+      message: `Please enter the order ID for phone number ${maskPhoneForDisplay(pending.phone)}.`,
+      pendingToken: createWidgetCrmPendingToken(pending),
+    };
+  }
+
+  const result = await verifyWidgetCrmOrder(userId, pending.phone, orderId);
+  if (!result.success) {
+    return {
+      completed: false,
+      message: result.message,
+      pendingToken: createWidgetCrmPendingToken(pending),
+    };
+  }
+
+  return {
+    completed: true,
+    message: result.greeting ?? result.message,
+    sessionToken: result.sessionToken,
+  };
 }
 
 export function createWidgetCrmSessionToken(session: Omit<WidgetCrmSession, "createdAt" | "expiresAt">): string {
@@ -138,8 +247,8 @@ export async function verifyWidgetCrmOrder(
   const parsedOrderId = extractOrderIdFromInput(orderId);
   const normalizedOrderId = parsedOrderId ?? normalizeOrderId(orderId);
 
-  if (!normalizedOrderId || !/^\d{4,}$/.test(normalizedOrderId)) {
-    return { success: false, message: "Please enter a valid order ID (e.g. 25215)." };
+  if (!normalizedOrderId || !/^\d{4,9}$/.test(normalizedOrderId)) {
+    return { success: false, message: "Please enter a valid order ID (e.g. 25215). Phone numbers cannot be used as order IDs." };
   }
 
   const customer = await fetchCrmCustomerWithOrders(userId, normalizedPhone);
@@ -185,28 +294,54 @@ export async function resolveWidgetCrmSessionForChat(
   userId: number,
   session: WidgetCrmSession,
   userMessage: string,
-): Promise<{ session: WidgetCrmSession; switchedOrder: boolean; switchMessage?: string }> {
+): Promise<CrmChatResolution> {
+  const newPhone = extractPhoneFromMessage(userMessage, session.phone);
+  if (newPhone && newPhone !== normalizePhoneNumber(session.phone)) {
+    const verification = await verifyWidgetCrmPhone(userId, newPhone);
+    if (!verification.success) {
+      return { session, switchedOrder: false, switchedPhone: true, switchMessage: verification.message };
+    }
+    const customer = await fetchCrmCustomerWithOrders(userId, newPhone);
+    const pendingToken = createWidgetCrmPendingToken({
+      userId,
+      phone: newPhone,
+      customerName: customer.customerName,
+      orderIds: customer.orders.map(o => normalizeOrderId(o.orderId)),
+      orders: customer.orders,
+    });
+    return {
+      session: null,
+      switchedOrder: false,
+      switchedPhone: true,
+      clearSession: true,
+      pendingToken,
+      switchMessage: `I've verified phone number ${maskPhoneForDisplay(newPhone)}. Please enter the order ID for this number.`,
+    };
+  }
+
   const extractedId = extractOrderIdFromMessage(userMessage);
   if (!extractedId || extractedId === session.activeOrderId) {
-    return { session, switchedOrder: false };
+    return { session, switchedOrder: false, switchedPhone: false };
   }
 
   if (!session.orderIds.includes(extractedId)) {
     return {
       session,
       switchedOrder: false,
-      switchMessage: `I couldn't find order #${extractedId} on your account. Please provide an order ID linked to your registered phone number.`,
+      switchedPhone: false,
+      switchMessage: `I couldn't find order #${extractedId} on the account linked to ${maskPhoneForDisplay(session.phone)}. Please provide a valid order ID for this phone number, or share a different registered phone number.`,
     };
   }
 
   const refreshed = refreshSessionOrderScope(session, extractedId);
   if (!refreshed) {
-    return { session, switchedOrder: false };
+    return { session, switchedOrder: false, switchedPhone: false };
   }
 
   return {
     session: refreshed,
     switchedOrder: true,
+    switchedPhone: false,
     switchMessage: `Sure! I've pulled up order #${extractedId}. What would you like to know about it?`,
   };
 }

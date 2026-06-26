@@ -35,20 +35,75 @@ export function extractOrderIdFromInput(input: string): string | null {
   const trimmed = input.trim();
   if (!trimmed) return null;
 
-  // Prefer explicit order-id patterns
-  const patterns = [
-    /(?:order\s*(?:id|#)?|orderid|order\s*no\.?|#)\s*(\d{4,})/i,
-    /\b(\d{4,})\b/,
-  ];
-  for (const re of patterns) {
-    const m = trimmed.match(re);
-    if (m?.[1]) return normalizeOrderId(m[1]);
+  // Never treat a phone number as an order ID
+  if (extractPhoneFromMessage(trimmed)) return null;
+
+  // Explicit order-id patterns
+  const explicitOrder = trimmed.match(/(?:order\s*(?:id|#)?|orderid|order\s*no\.?|#)\s*(\d{4,})/i);
+  if (explicitOrder) {
+    const id = normalizeOrderId(explicitOrder[1]);
+    if (id.length < 10) return id;
   }
 
-  // Bare numeric input
-  if (/^#?\d{4,}$/.test(trimmed)) return normalizeOrderId(trimmed);
+  // Bare short numeric input (typical order ID: 4–9 digits)
+  if (/^#?\d{4,9}$/.test(trimmed)) return normalizeOrderId(trimmed);
+
+  // Embedded 4–9 digit number (not a 10-digit phone)
+  const shortNum = trimmed.match(/\b(\d{4,9})\b/);
+  if (shortNum) return normalizeOrderId(shortNum[1]);
 
   return null;
+}
+
+/** Detect a phone number in natural language (e.g. "detail for this no 8328258683"). */
+export function extractPhoneFromMessage(message: string, currentPhone?: string): string | null {
+  const trimmed = message.trim();
+  if (!trimmed) return null;
+
+  const currentNorm = currentPhone ? normalizePhoneNumber(currentPhone) : null;
+
+  const phoneIntent =
+    /\b(phone|mobile|number|contact|whatsapp|call)\b/i.test(trimmed) ||
+    /\b(?:this|another|different|other|new)\s+(?:no|number|phone|mobile)\b/i.test(trimmed) ||
+    /detail(?:s)?\s+for\s+(?:this\s+)?(?:no|number|phone)/i.test(trimmed) ||
+    /(?:no|number|phone|mobile)\s*[.:]?\s*\d/i.test(trimmed);
+
+  const candidates: string[] = [];
+  const patterns = [
+    /(?:\+?91[\s-]?)?([6-9]\d{9})\b/g,
+    /\b(\d{10})\b/g,
+    /(?:phone|mobile|number|no\.?|contact)\s*[.:]?\s*([+\d][\d\s\-]{8,14}\d)/gi,
+  ];
+
+  for (const re of patterns) {
+    let m: RegExpExecArray | null;
+    const regex = new RegExp(re.source, re.flags);
+    while ((m = regex.exec(trimmed)) !== null) {
+      const normalized = normalizePhoneNumber(m[1] ?? m[0]);
+      if (normalized.length === 10) candidates.push(normalized);
+    }
+  }
+
+  if (candidates.length === 0) return null;
+
+  for (const phone of candidates) {
+    if (phoneIntent) return phone;
+    if (currentNorm && phone !== currentNorm) return phone;
+  }
+
+  // Bare 10-digit message with no other text
+  const bareDigits = trimmed.replace(/\D/g, "");
+  if (/^[\d\s+\-().]+$/.test(trimmed) && bareDigits.length === 10) {
+    return normalizePhoneNumber(bareDigits);
+  }
+
+  return null;
+}
+
+export function maskPhoneForDisplay(phone: string): string {
+  const n = normalizePhoneNumber(phone);
+  if (n.length !== 10) return phone;
+  return `${n.slice(0, 2)}****${n.slice(6)}`;
 }
 
 export function extractOrderIdFromMessage(message: string): string | null {

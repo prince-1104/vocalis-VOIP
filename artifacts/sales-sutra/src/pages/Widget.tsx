@@ -70,11 +70,12 @@ function ChatTestPanel({
   const [crmStep, setCrmStep] = useState<"phone" | "order" | "verified" | "none">("none");
   const [crmPhone, setCrmPhone] = useState("");
   const [crmSessionToken, setCrmSessionToken] = useState("");
+  const [crmPendingToken, setCrmPendingToken] = useState("");
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const crmAuthRequired = widgetExternalCrmEnabled && crmConnected;
-  const chatUnlocked = !crmAuthRequired || crmStep === "verified";
+  const chatUnlocked = !crmAuthRequired || crmStep === "verified" || !!crmPendingToken;
 
   useEffect(() => {
     if (!crmAuthRequired) {
@@ -84,6 +85,7 @@ function ChatTestPanel({
     setCrmStep("phone");
     setCrmPhone("");
     setCrmSessionToken("");
+    setCrmPendingToken("");
     setMessages([{
       id: "crm-welcome",
       role: "assistant",
@@ -105,7 +107,7 @@ function ChatTestPanel({
     const msg = (text || input).trim();
     if (!msg || sending || !apiKey) return;
 
-    if (crmAuthRequired && !chatUnlocked) {
+    if (crmAuthRequired && !chatUnlocked && !crmPendingToken) {
       await handleCrmInput(msg);
       return;
     }
@@ -124,6 +126,7 @@ function ChatTestPanel({
       const history = messages.map(m => ({ role: m.role, content: m.content }));
       const body: Record<string, unknown> = { apiKey, message: msg, history };
       if (crmSessionToken) body.crmSessionToken = crmSessionToken;
+      if (crmPendingToken) body.crmPendingToken = crmPendingToken;
       const res = await fetch(`${window.location.origin}/api/widget/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -132,6 +135,15 @@ function ChatTestPanel({
       if (!res.ok) throw new Error(`API error: ${res.status}`);
       const data = await res.json();
       if (data.crmSessionToken) setCrmSessionToken(data.crmSessionToken);
+      if (data.crmPendingToken) setCrmPendingToken(data.crmPendingToken);
+      if (data.crmClearSession) {
+        setCrmSessionToken("");
+        setCrmStep("order");
+      }
+      if (data.crmSessionToken && !data.crmPendingToken) {
+        setCrmPendingToken("");
+        setCrmStep("verified");
+      }
 
       const botMsg: ChatMessage = {
         id: `bot-${Date.now()}`,
@@ -195,6 +207,7 @@ function ChatTestPanel({
         const data = await res.json();
         if (res.ok && data.success) {
           setCrmSessionToken(data.sessionToken || "");
+          setCrmPendingToken("");
           setCrmStep("verified");
         }
         setMessages(prev => [...prev, {
@@ -222,6 +235,7 @@ function ChatTestPanel({
     setCrmStep(crmAuthRequired ? "phone" : "none");
     setCrmPhone("");
     setCrmSessionToken("");
+    setCrmPendingToken("");
     if (crmAuthRequired) {
       setMessages([{
         id: "crm-welcome-reset",
@@ -347,7 +361,7 @@ function ChatTestPanel({
           placeholder={
             crmStep === "phone"
               ? "Enter your registered phone number…"
-              : crmStep === "order"
+              : crmStep === "order" || crmPendingToken
                 ? "Enter your order ID…"
                 : "Type a message…"
           }
