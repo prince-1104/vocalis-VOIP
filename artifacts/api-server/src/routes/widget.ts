@@ -18,6 +18,10 @@ import {
   verifyWidgetCrmSessionToken,
   type WidgetCrmSession,
 } from "../lib/widget-crm-session";
+import {
+  fireWidgetChatSessionStarted,
+  fireWidgetChatTurn,
+} from "../lib/widget-crm-chat-sync";
 
 const router: IRouter = Router();
 
@@ -1333,6 +1337,10 @@ router.post("/widget/crm/verify-order", async (req, res) => {
   }
 
   const result = await verifyWidgetCrmOrder(agent.userId, phone, orderId);
+  if (result.success && result.sessionToken) {
+    const session = verifyWidgetCrmSessionToken(result.sessionToken);
+    if (session) fireWidgetChatSessionStarted(agent.userId, session);
+  }
   res.json(result);
 });
 
@@ -1792,6 +1800,7 @@ router.post("/widget/chat", async (req, res) => {
       if (pendingResult.completed && pendingResult.sessionToken) {
         crmSession = verifyWidgetCrmSessionToken(pendingResult.sessionToken);
         crmSessionTokenOut = pendingResult.sessionToken;
+        if (crmSession) fireWidgetChatSessionStarted(agent.userId, crmSession);
       } else {
         crmPendingTokenOut = pendingResult.pendingToken;
       }
@@ -1894,6 +1903,7 @@ router.post("/widget/chat", async (req, res) => {
       crmSession = orderSwitch.session;
       crmSessionTokenOut = createWidgetCrmSessionToken({
         userId: crmSession.userId,
+        sessionId: crmSession.sessionId,
         phone: crmSession.phone,
         customerName: crmSession.customerName,
         activeOrderId: crmSession.activeOrderId,
@@ -1903,6 +1913,7 @@ router.post("/widget/chat", async (req, res) => {
       });
       reply = orderSwitch.switchMessage ?? `I've switched to order #${crmSession.activeOrderId}. How can I help?`;
       modelUsed = "crm-switch";
+      fireWidgetChatTurn(agent.userId, crmSession, message, reply, "widget.chat.order_switched");
     }
   }
 
@@ -1981,6 +1992,14 @@ router.post("/widget/chat", async (req, res) => {
       context: "widget-chat",
     });
   }).catch((e) => console.error("[widget] cost logging error:", e));
+
+  // Sync verified CRM widget chat to external CRM (fire-and-forget)
+  if (crmSession?.sessionId && reply && message) {
+    const skipSync = ["crm-guard", "crm-pending", "crm-phone-switch"].includes(modelUsed);
+    if (!skipSync) {
+      fireWidgetChatTurn(agent.userId, crmSession, message, reply);
+    }
+  }
 
   const language = effectiveLanguage;
   let audio: string | null = null;

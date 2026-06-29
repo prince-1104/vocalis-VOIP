@@ -44,6 +44,10 @@ export const externalCrmConfigsTable = pgTable("external_crm_configs", {
   callInstructions: text("call_instructions"),
   verifyIdentity: boolean("verify_identity").notNull().default(false),
 
+  // Widget chat transcript sync back to CRM
+  widgetChatWebhookUrl: text("widget_chat_webhook_url"),
+  widgetChatSyncEnabled: boolean("widget_chat_sync_enabled").notNull().default(false),
+
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 }, (table) => [

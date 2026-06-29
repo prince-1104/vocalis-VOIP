@@ -52,6 +52,8 @@ interface CrmConfig {
   endingNoteLeadSeconds?: number;
   callInstructions?: string | null;
   verifyIdentity?: boolean;
+  widgetChatWebhookUrl?: string | null;
+  widgetChatSyncEnabled?: boolean;
 }
 
 const AUTH_TYPES = [
@@ -103,6 +105,8 @@ export default function ExternalCrm() {
   const [endingNoteLeadSeconds, setEndingNoteLeadSeconds] = useState(2);
   const [callInstructions, setCallInstructions] = useState("");
   const [verifyIdentity, setVerifyIdentity] = useState(false);
+  const [widgetChatWebhookUrl, setWidgetChatWebhookUrl] = useState("");
+  const [widgetChatSyncEnabled, setWidgetChatSyncEnabled] = useState(false);
 
   const [testPhone, setTestPhone] = useState("");
   const [testResult, setTestResult] = useState<any>(null);
@@ -147,6 +151,8 @@ export default function ExternalCrm() {
         setEndingNoteLeadSeconds(c.endingNoteLeadSeconds ?? 2);
         setCallInstructions(c.callInstructions || "");
         setVerifyIdentity(c.verifyIdentity ?? false);
+        setWidgetChatWebhookUrl(c.widgetChatWebhookUrl || "");
+        setWidgetChatSyncEnabled(c.widgetChatSyncEnabled ?? false);
       }
     } catch (err: any) {
       toast({ title: "Failed to load CRM config", description: err.message, variant: "destructive" });
@@ -196,6 +202,8 @@ export default function ExternalCrm() {
           endingNoteLeadSeconds: Math.max(0, endingNoteLeadSeconds),
           callInstructions: callInstructions.trim() || null,
           verifyIdentity,
+          widgetChatWebhookUrl: widgetChatWebhookUrl.trim() || null,
+          widgetChatSyncEnabled,
         }),
       });
 
@@ -497,6 +505,42 @@ export default function ExternalCrm() {
             />
             Verify caller identity before sharing order or prescription details
           </label>
+        </CardContent>
+      </Card>
+
+      {/* Widget Chat Sync */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-lg">
+            <MessageSquare className="w-5 h-5" />
+            Widget Chat Sync
+          </CardTitle>
+          <CardDescription>
+            Push verified widget chat conversations (phone + order ID) to your CRM with full transcript and timestamps.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <label className="text-sm font-medium flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={widgetChatSyncEnabled}
+              onChange={e => setWidgetChatSyncEnabled(e.target.checked)}
+              className="rounded border-white/20"
+            />
+            Sync widget chat transcripts to CRM
+          </label>
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium">Chat Webhook URL</label>
+            <Input
+              value={widgetChatWebhookUrl}
+              onChange={e => setWidgetChatWebhookUrl(e.target.value)}
+              placeholder="https://admin.yourcrm.com/api/dialog/widget-chat"
+              disabled={!widgetChatSyncEnabled}
+            />
+            <p className="text-xs text-muted-foreground">
+              Dialog POSTs chat events here when a customer verifies phone + order ID. Uses the same auth settings above.
+            </p>
+          </div>
         </CardContent>
       </Card>
 

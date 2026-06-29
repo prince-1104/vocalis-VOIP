@@ -43,6 +43,8 @@ router.get("/external-crm/config", async (req, res) => {
       endingNoteLeadSeconds: config.endingNoteLeadSeconds,
       callInstructions: config.callInstructions,
       verifyIdentity: config.verifyIdentity,
+      widgetChatWebhookUrl: config.widgetChatWebhookUrl,
+      widgetChatSyncEnabled: config.widgetChatSyncEnabled,
       createdAt: config.createdAt,
       updatedAt: config.updatedAt,
     },
@@ -75,6 +77,8 @@ router.put("/external-crm/config", async (req, res) => {
     endingNoteLeadSeconds,
     callInstructions,
     verifyIdentity,
+    widgetChatWebhookUrl,
+    widgetChatSyncEnabled,
   } = req.body;
 
   if (!lookupUrl || !name) {
@@ -115,6 +119,8 @@ router.put("/external-crm/config", async (req, res) => {
     endingNoteLeadSeconds: Math.max(0, Number(endingNoteLeadSeconds) ?? 2),
     callInstructions: callInstructions?.trim() || null,
     verifyIdentity: verifyIdentity === true,
+    widgetChatWebhookUrl: widgetChatWebhookUrl?.trim() || null,
+    widgetChatSyncEnabled: widgetChatSyncEnabled === true,
     updatedAt: new Date(),
   };
 

@@ -121,7 +121,33 @@ export async function syncDatabase() {
       'ALTER TABLE "external_crm_configs" ADD COLUMN IF NOT EXISTS "call_instructions" text;',
       'ALTER TABLE "external_crm_configs" ADD COLUMN IF NOT EXISTS "verify_identity" boolean DEFAULT false NOT NULL;',
       'ALTER TABLE "agent_configs" ADD COLUMN IF NOT EXISTS "widget_external_crm_enabled" boolean DEFAULT false NOT NULL;',
+      'ALTER TABLE "external_crm_configs" ADD COLUMN IF NOT EXISTS "widget_chat_webhook_url" text;',
+      'ALTER TABLE "external_crm_configs" ADD COLUMN IF NOT EXISTS "widget_chat_sync_enabled" boolean DEFAULT false NOT NULL;',
     ];
+
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS "widget_chat_sessions" (
+        "id" serial PRIMARY KEY NOT NULL,
+        "user_id" integer NOT NULL REFERENCES "users"("id") ON DELETE CASCADE,
+        "session_id" text NOT NULL UNIQUE,
+        "phone" text NOT NULL,
+        "order_id" text NOT NULL,
+        "customer_name" text,
+        "transcript" jsonb DEFAULT '[]'::jsonb NOT NULL,
+        "last_synced_at" timestamp,
+        "started_at" timestamp DEFAULT now() NOT NULL,
+        "updated_at" timestamp DEFAULT now() NOT NULL
+      );
+    `);
+
+    await db.execute(sql`
+      CREATE INDEX IF NOT EXISTS "widget_chat_sessions_user_phone_idx"
+      ON "widget_chat_sessions" ("user_id", "phone");
+    `);
+    await db.execute(sql`
+      CREATE INDEX IF NOT EXISTS "widget_chat_sessions_user_order_idx"
+      ON "widget_chat_sessions" ("user_id", "order_id");
+    `);
 
     for (const q of alterQueries) {
       try {

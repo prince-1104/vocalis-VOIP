@@ -51,6 +51,7 @@ Thumbs.db
 
 # Local dev notes
 start.md
+pricing.md
 .env
 
 # Seed scripts & KB (contain credentials / tenant-specific data)

@@ -1,4 +1,5 @@
 import crypto from "crypto";
+import { randomUUID } from "crypto";
 import {
   type ExternalCrmContext,
 } from "./external-crm-lookup";
@@ -19,6 +20,7 @@ const PENDING_TTL_MS = 15 * 60 * 1000; // 15 min — waiting for order ID after 
 
 export interface WidgetCrmSession {
   userId: number;
+  sessionId: string;
   phone: string;
   customerName?: string;
   activeOrderId: string;
@@ -175,6 +177,13 @@ export function verifyWidgetCrmSessionToken(token: string): WidgetCrmSession | n
     const parsed = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as WidgetCrmSession;
     if (!parsed.expiresAt || Date.now() > parsed.expiresAt) return null;
     if (!parsed.userId || !parsed.phone || !parsed.activeOrderId) return null;
+    if (!parsed.sessionId) {
+      parsed.sessionId = crypto
+        .createHash("sha256")
+        .update(`${parsed.userId}:${parsed.phone}:${parsed.activeOrderId}`)
+        .digest("hex")
+        .slice(0, 32);
+    }
     return parsed;
   } catch {
     return null;
@@ -270,6 +279,7 @@ export async function verifyWidgetCrmOrder(
 
   const sessionToken = createWidgetCrmSessionToken({
     userId,
+    sessionId: randomUUID(),
     phone: normalizedPhone,
     customerName: customer.customerName,
     activeOrderId: normalizedOrderId,

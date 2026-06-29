@@ -12,3 +12,4 @@ export * from "./costs";
 export * from "./crm";
 export * from "./intent-training";
 export * from "./external-crm";
+export * from "./widget-chat-sessions";

@@ -203,3 +203,113 @@ Once the endpoint is live, share these with us:
 3. **Confirm the JSON response** matches the structure above (test with a real phone number)
 
 We will configure it on Dialog's External CRM settings page and test with real phone numbers before going live on calls.
+
+---
+
+## Widget Chat Transcript Sync (POST webhook)
+
+When customers chat via the Dialog Web Widget (after verifying phone + order ID), Dialog can push the full conversation to your CRM in real time.
+
+### Configure on Dialog
+
+1. Go to **External CRM** → **Widget Chat Sync**
+2. Enable **Sync widget chat transcripts to CRM**
+3. Set **Chat Webhook URL** (e.g. `https://admin.rastafariwellness.com/api/dialog/widget-chat`)
+4. Uses the **same Bearer token** as customer lookup
+
+### Endpoint to Build on Your CRM
+
+```
+POST /api/dialog/widget-chat
+Authorization: Bearer YOUR_TOKEN_HERE
+Content-Type: application/json
+```
+
+### Events
+
+| Event | When |
+|-------|------|
+| `widget.chat.started` | Customer verified phone + order ID, chat session opened |
+| `widget.chat.message` | Each user message + bot reply (full transcript included) |
+| `widget.chat.order_switched` | Customer switched to a different order on same phone |
+
+### Payload
+
+```json
+{
+  "event": "widget.chat.message",
+  "timestamp": "2026-06-26T13:45:00.000Z",
+  "session": {
+    "id": "a1b2c3d4e5f6...",
+    "phone": "9782427020",
+    "orderId": "25215",
+    "customerName": "Prasad Test"
+  },
+  "transcript": [
+    {
+      "role": "user",
+      "content": "Where is my order?",
+      "timestamp": "2026-06-26T13:44:58.000Z"
+    },
+    {
+      "role": "assistant",
+      "content": "Your order #25215 is currently processing...",
+      "timestamp": "2026-06-26T13:45:00.000Z"
+    }
+  ]
+}
+```
+
+### What to Store in CRM
+
+Create a `dialog_widget_chats` table (or equivalent):
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `session_id` | string | Unique per phone+order chat session |
+| `phone` | string | Customer phone (10 digits) |
+| `order_id` | string | Verified order ID |
+| `customer_name` | string | From lookup API |
+| `transcript` | JSON | Full message array |
+| `started_at` | datetime | First event timestamp |
+| `updated_at` | datetime | Last message timestamp |
+
+### CRM UI Suggestions
+
+1. **Orders list** — add a 💬 icon when a widget chat exists for that order
+2. **Order detail page** — show "Widget Chat" panel with transcript (user/bot bubbles + timestamps)
+3. **Customers page** — list all widget chat sessions by phone number
+4. **Dashboard** — optional count of widget chats today
+
+### Security
+
+- Validate Bearer token (same as customer-lookup)
+- Only store sessions for verified phone+order pairs (Dialog sends these only after verification)
+- Do not expose one customer's chat to another
+
+### Implementation Pseudocode
+
+```javascript
+// POST /api/dialog/widget-chat
+async function handleWidgetChat(req, res) {
+  if (!validateBearerToken(req)) return res.status(401).json({ error: "Unauthorized" });
+
+  const { event, session, transcript, timestamp } = req.body;
+  if (!session?.phone || !session?.orderId) {
+    return res.status(400).json({ error: "session.phone and session.orderId required" });
+  }
+
+  await db.upsert("dialog_widget_chats", {
+    session_id: session.id,
+    phone: normalizePhone(session.phone),
+    order_id: session.orderId,
+    customer_name: session.customerName,
+    transcript: JSON.stringify(transcript),
+    updated_at: timestamp,
+  }, { onConflict: "session_id" });
+
+  // Optionally link to orders table: UPDATE orders SET has_widget_chat = true WHERE order_id = session.orderId
+
+  return res.status(200).json({ success: true });
+}
+```
