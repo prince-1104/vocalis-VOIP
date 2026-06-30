@@ -16,7 +16,38 @@ export interface CrmOrder {
   doctor?: string;
   trackingId?: string | null;
   placedAt?: string;
+  cancellationReason?: string;
   [key: string]: unknown;
+}
+
+const CANCELLATION_REASON_KEYS = [
+  "cancellationReason",
+  "cancellation_reason",
+  "cancelReason",
+  "cancel_reason",
+  "cancelledBecause",
+  "cancelled_because",
+  "cancelledReason",
+  "cancelled_reason",
+  "denialReason",
+  "denial_reason",
+  "deniedReason",
+  "denied_reason",
+  "rejectionReason",
+  "rejection_reason",
+  "cancelNote",
+  "cancel_note",
+  "cancellationNote",
+  "cancellation_note",
+  "reason",
+] as const;
+
+function extractCancellationReason(obj: Record<string, unknown>): string | undefined {
+  for (const key of CANCELLATION_REASON_KEYS) {
+    const val = obj[key];
+    if (val != null && String(val).trim()) return String(val).trim();
+  }
+  return undefined;
 }
 
 export function normalizePhoneNumber(phone: string): string {
@@ -126,9 +157,12 @@ function coerceOrder(raw: unknown): CrmOrder | null {
   const orderId = obj.orderId ?? obj.order_id ?? obj.id ?? obj.orderNo ?? obj.order_no;
   if (orderId == null) return null;
 
+  const cancellationReason = extractCancellationReason(obj);
+
   const order: CrmOrder = {
     orderId: String(orderId),
     status: obj.status != null ? String(obj.status) : undefined,
+    cancellationReason,
     products: (obj.products ?? obj.product ?? obj.items ?? obj.productName) != null
       ? String(obj.products ?? obj.product ?? obj.items ?? obj.productName)
       : undefined,
@@ -157,7 +191,7 @@ function coerceOrder(raw: unknown): CrmOrder | null {
 
   // Preserve any extra CRM fields so the AI can answer about them
   for (const [key, val] of Object.entries(obj)) {
-    if (key in order || val == null) continue;
+    if (key in order || CANCELLATION_REASON_KEYS.includes(key as typeof CANCELLATION_REASON_KEYS[number]) || val == null) continue;
     if (typeof val === "object") {
       order[key] = JSON.stringify(val);
     } else {
@@ -385,6 +419,7 @@ export function formatOrderForPrompt(order: CrmOrder): string {
   const labelMap: Record<string, string> = {
     orderId: "Order ID",
     status: "Status",
+    cancellationReason: "Cancellation / Denial Reason",
     products: "Products / Items",
     total: "Order Total",
     paymentStatus: "Payment Status",
@@ -444,8 +479,10 @@ export function appendCrmContextToWidgetPrompt(
     system += `• Verified Order #${activeOrderId} — USE THIS DATA to answer questions:\n${crmContext.recentOrders}\n`;
   }
   system += `\nCRM DATA RULES (MANDATORY):\n`;
-  system += `• You HAVE the verified order details above. Answer questions about products/items, doctor, status, tracking, payment, and prescription USING THIS DATA.\n`;
+  system += `• You HAVE the verified order details above. Answer questions about products/items, doctor, status, tracking, payment, prescription, and cancellation/denial reasons USING THIS DATA.\n`;
   system += `• NEVER say you "can't provide" or "don't have access to" information that is listed above.\n`;
+  system += `• If the order Status is denied, cancelled, or rejected and "Cancellation / Denial Reason" is listed above, you MUST explain that reason when the customer asks why (e.g. underage, prescription issue, payment failed).\n`;
+  system += `• NEVER say the denial/cancellation reason is unspecified when "Cancellation / Denial Reason" appears in the verified order data above.\n`;
   system += `• If a specific field is missing from the data above, say that detail is not available in our system for this order.\n`;
   system += `• You are helping with order #${activeOrderId} only. If the customer asks about a DIFFERENT order, ask them to provide that order ID first.\n`;
   system += `• NEVER reveal other customers' data. NEVER invent order information.\n\n`;

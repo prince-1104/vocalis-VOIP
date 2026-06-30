@@ -59,6 +59,18 @@ GET /api/dialog/customer-lookup?phone=9004688178
       "placedAt": "2026-06-23"
     },
     {
+      "orderId": "25213",
+      "status": "Denied",
+      "cancellationReason": "underage",
+      "products": "Paan Relax & Reset Gummies",
+      "total": "2899.00",
+      "paymentStatus": "Pending",
+      "rxStatus": "Rx exists",
+      "doctor": "Dr. Sankalp Khullar",
+      "trackingId": null,
+      "placedAt": "2026-06-20"
+    },
+    {
       "orderId": "25100",
       "status": "Delivered",
       "products": "Mango Relax & Reset Gummies 5% - Pack of 5",
@@ -123,6 +135,7 @@ These are the fields Dialog's AI agent will use during phone calls:
 | `customer.doctor` | Answer "who is my doctor?" |
 | `recentOrders[].orderId` | Reference specific orders ("Your order #25173...") |
 | `recentOrders[].status` | Answer "where is my order?" |
+| `recentOrders[].cancellationReason` | Answer "why was my order denied/cancelled?" (e.g. `underage`, `prescription expired`) — **required when status is Denied/Cancelled** |
 | `recentOrders[].products` | Answer "what did I order?" |
 | `recentOrders[].total` | Answer payment questions |
 | `recentOrders[].paymentStatus` | Answer "is my payment done?" |
