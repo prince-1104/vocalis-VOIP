@@ -250,6 +250,61 @@ function CampaignTransferSettings({
   );
 }
 
+/** Server default; calls start only inside this local window (validated server-side). */
+const DEFAULT_CALLING_WINDOW = { startTime: "09:00", endTime: "17:00", timezone: "Asia/Kolkata" };
+const COMMON_TIMEZONES = [
+  "Asia/Kolkata", "Asia/Dubai", "Asia/Singapore", "Europe/London", "Europe/Berlin",
+  "America/New_York", "America/Chicago", "America/Los_Angeles", "Australia/Sydney", "UTC",
+];
+
+type CallingWindow = typeof DEFAULT_CALLING_WINDOW;
+
+function CallingWindowFields({ value, onChange }: { value: CallingWindow; onChange: (next: CallingWindow) => void }) {
+  const set = (patch: Partial<CallingWindow>) =>
+    onChange({ startTime: value.startTime, endTime: value.endTime, timezone: value.timezone, ...patch });
+  return (
+    <div className="space-y-2">
+      <label className="text-sm font-medium flex items-center gap-2">
+        <Clock className="w-4 h-4" /> Calling Hours
+      </label>
+      <div className="grid grid-cols-2 gap-4">
+        <Input
+          type="time"
+          required
+          aria-label="Calling hours start"
+          value={value.startTime}
+          onChange={e => set({ startTime: e.target.value })}
+          className="bg-background/50 border-white/10"
+        />
+        <Input
+          type="time"
+          required
+          aria-label="Calling hours end"
+          value={value.endTime}
+          onChange={e => set({ endTime: e.target.value })}
+          className="bg-background/50 border-white/10"
+        />
+      </div>
+      <Input
+        list="campaign-timezones"
+        required
+        aria-label="Calling hours time zone"
+        placeholder="Asia/Kolkata"
+        value={value.timezone}
+        onChange={e => set({ timezone: e.target.value.trim() })}
+        className="bg-background/50 border-white/10"
+      />
+      <datalist id="campaign-timezones">
+        {COMMON_TIMEZONES.map(zone => <option key={zone} value={zone} />)}
+      </datalist>
+      <p className="text-xs text-muted-foreground">
+        Calls start only between these local times in this time zone (IANA name, e.g. Asia/Kolkata), every day.
+        No new call starts in the last 5 minutes of the window.
+      </p>
+    </div>
+  );
+}
+
 export default function Campaigns() {
   const { data: campaigns, isLoading, refetch, isFetching } = useCampaignsList();
 
@@ -295,6 +350,7 @@ export default function Campaigns() {
     isAutomatic: false,
     maxRetries: 0,
     retryIntervalMinutes: 10,
+    ...DEFAULT_CALLING_WINDOW,
     contactIds: [] as number[],
     transferConfig: defaultTransferConfig(),
   });
@@ -308,6 +364,7 @@ export default function Campaigns() {
     isAutomatic: false,
     maxRetries: 0,
     retryIntervalMinutes: 10,
+    ...DEFAULT_CALLING_WINDOW,
     contactIds: [] as number[],
     transferConfig: defaultTransferConfig(),
   });
@@ -367,6 +424,9 @@ export default function Campaigns() {
       isAutomatic: campaign.isAutomatic || false,
       maxRetries: campaign.maxRetries || 0,
       retryIntervalMinutes: campaign.retryIntervalMinutes || 10,
+      startTime: campaign.startTime || DEFAULT_CALLING_WINDOW.startTime,
+      endTime: campaign.endTime || DEFAULT_CALLING_WINDOW.endTime,
+      timezone: campaign.timezone || DEFAULT_CALLING_WINDOW.timezone,
       contactIds: campaign.contactIds || [],
       transferConfig: transferConfigFromCampaign(campaign.transferConfig),
     });
@@ -416,7 +476,7 @@ export default function Campaigns() {
       setIsDialogOpen(false);
       setFormData({
         name: "", description: "", scriptId: 0, maxConcurrentCalls: 1, dialParallel: false,
-        isAutomatic: false, maxRetries: 0, retryIntervalMinutes: 10, contactIds: [],
+        isAutomatic: false, maxRetries: 0, retryIntervalMinutes: 10, ...DEFAULT_CALLING_WINDOW, contactIds: [],
         transferConfig: defaultTransferConfig(),
       });
     } catch (err: any) {
@@ -480,7 +540,12 @@ export default function Campaigns() {
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || "Failed to dial");
-      if (result.done) {
+      if (result.deferred) {
+        const opens = result.nextWindowAt ? ` Next window opens ${new Date(result.nextWindowAt).toLocaleString()}.` : "";
+        toast({ title: "Outside calling hours", description: `${result.message}${opens}` });
+      } else if (result.waiting || result.dialFailed) {
+        toast({ title: "No call placed", description: result.error || result.message });
+      } else if (result.done) {
         toast({ title: "Campaign complete", description: result.message });
       } else {
         const name = result.contact 
@@ -611,6 +676,10 @@ export default function Campaigns() {
                   />
                 </div>
               </div>
+              <CallingWindowFields
+                value={formData}
+                onChange={window => setFormData({ ...formData, ...window })}
+              />
               <CampaignTransferSettings
                 value={formData.transferConfig}
                 onChange={tc => setFormData({ ...formData, transferConfig: tc })}
@@ -930,6 +999,10 @@ export default function Campaigns() {
                   />
                 </div>
               </div>
+              <CallingWindowFields
+                value={editFormData}
+                onChange={window => setEditFormData({ ...editFormData, ...window })}
+              />
               <CampaignTransferSettings
                 value={editFormData.transferConfig}
                 onChange={tc => setEditFormData({ ...editFormData, transferConfig: tc })}

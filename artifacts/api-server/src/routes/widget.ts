@@ -1,27 +1,55 @@
+import { mediaPublicUrl } from "../lib/media-session";
+import { logger } from "../lib/logger";
+import { twilioAuthTokenFor } from "../lib/tenant-credentials";
+import { extractProviderCode, providerHttpError } from "../lib/log-redaction";
 import { Router, type IRouter } from "express";
-import { db, agentConfigsTable, callLogsTable, trainingDataTable, callingScriptsTable, externalCrmConfigsTable } from "@workspace/db";
+import { db, agentConfigsTable, callLogsTable, trainingDataTable, callingScriptsTable, externalCrmConfigsTable, type WidgetCustomerSession } from "@workspace/db";
 import { eq, and } from "drizzle-orm";
 import { openai } from "@workspace/integrations-openai-ai-server";
 import { randomUUID } from "crypto";
-import { logLLMCost, logTTSCost, resolveTenantIdForOwner } from "../lib/cost-logger";
+import { classifyProviderFailure, estimateTokens } from "../lib/billing/usage-ledger";
+import { recordLlmCall, reportedUsage } from "../lib/billing/llm-usage";
+import { createRequestMeter, type RequestMeter } from "../lib/billing/request-meter";
+import { assertBudgetAvailable, SpendLimitError, spendLimitHttpStatus } from "../lib/billing/spend-budget";
+import type { AiWorkEstimate } from "../lib/billing/estimates";
 import {
   appendCrmContextToWidgetPrompt,
 } from "../lib/widget-crm-orders";
 import {
-  createWidgetCrmSessionToken,
-  handlePendingPhoneChat,
-  isWidgetCrmActive,
+  ORDER_NOT_FOUND_MESSAGE,
+  greetingFor,
+  loadSessionOrder,
+  resolveVerifiedOrder,
   resolveWidgetCrmSessionForChat,
-  verifyWidgetCrmOrder,
-  verifyWidgetCrmPhone,
-  verifyWidgetCrmPendingToken,
-  verifyWidgetCrmSessionToken,
   type WidgetCrmSession,
 } from "../lib/widget-crm-session";
+import { getWidgetVerification } from "../lib/widget-verification";
+import { resolveActiveWidgetPolicy } from "../lib/widget-verification-policy";
+import {
+  POLICIES,
+  enforceWidgetTenantBudget,
+  widgetChatRateLimit,
+  widgetConfigRateLimit,
+  widgetCustomerSessionRateLimit,
+  widgetTtsRateLimit,
+  widgetVerificationRateLimits,
+  widgetVoiceTokenRateLimit,
+} from "../lib/rate-limit-policies";
+import { clientAddress } from "../lib/rate-limit";
 import {
   fireWidgetChatSessionStarted,
   fireWidgetChatTurn,
+  loadWidgetChatHistory,
 } from "../lib/widget-crm-chat-sync";
+import {
+  WIDGET_CHAT_LIMITS,
+  WIDGET_CHAT_REJECTED_MESSAGE,
+  assertServerAuthoredMessages,
+  buildWidgetModelMessages,
+  parseWidgetChatRequest,
+  widgetChatSecurityPolicy,
+  type WidgetChatTurn,
+} from "../lib/widget-chat-security";
 
 const router: IRouter = Router();
 
@@ -157,8 +185,7 @@ async function generateSarvamWidgetTTS(text: string, lang: string): Promise<stri
   });
 
   if (!res.ok) {
-    const errorText = await res.text();
-    throw new Error(`Sarvam widget TTS error ${res.status}: ${errorText}`);
+    throw providerHttpError("Sarvam widget TTS", res.status, await res.text().catch(() => ""));
   }
 
   const data = await res.json() as any;
@@ -175,19 +202,52 @@ async function generateOpenAIWidgetTTS(text: string, voice: string): Promise<str
   return Buffer.from(arrayBuffer).toString("base64");
 }
 
+const WIDGET_LIMIT_MESSAGE = "This assistant is temporarily unavailable. Please try again later.";
+/** Allowance for the widget system prompt (agent instructions and knowledge base) when sizing a hold. */
+const WIDGET_PROMPT_TOKENS = 6000;
+
+/** Upper-bound hold for one chat request: reply plus arbiter and rewrite calls, and speech when requested. */
+function widgetChatEstimate(message: string, history: { content: string }[], withSpeech: boolean): AiWorkEstimate {
+  return {
+    llmModels: ["gpt-4o-mini", "deepseek-chat", "sarvam-m"],
+    inputTokens: WIDGET_PROMPT_TOKENS + estimateTokens(message, ...history.map((h) => h.content)),
+    maxOutputTokens: 250,
+    extraLlmCalls: 2,
+    ttsProviders: withSpeech ? ["sarvam", "openai"] : [],
+  };
+}
+
+function recordWidgetTts(meter: RequestMeter, provider: "sarvam" | "openai", characters: number, failure?: unknown) {
+  meter.usage.record({
+    category: "tts",
+    provider,
+    model: provider === "sarvam" ? "bulbul:v3" : "tts-1",
+    measurement: "actual",
+    unit: "characters",
+    quantity: characters,
+    outcome: failure === undefined ? "charged" : classifyProviderFailure(failure),
+  });
+}
+
+/** Throws SpendLimitError (before any provider request) when the budget refuses the work. */
 async function synthesizeWidgetTTS(
   text: string,
   voice: string,
   language: string,
+  meter: RequestMeter,
 ): Promise<{ audio: string | null; provider: "sarvam" | "openai" | null; mimeType: string }> {
+  await meter.ensureBudget();
   // Voice policy: ALWAYS female + Indian accent. Route every supported
   // language (including English) through Sarvam Bulbul v3 first.
-  if (isSarvamSupportedTTS(language)) {
+  if (isSarvamSupportedTTS(language) && SARVAM_API_KEY) {
+    const sent = normalizeTTSPronunciation(text, language).length;
     try {
       const sarvamAudio = await generateSarvamWidgetTTS(text, language);
+      recordWidgetTts(meter, "sarvam", sent);
       if (sarvamAudio) return { audio: sarvamAudio, provider: "sarvam", mimeType: "audio/wav" };
     } catch (sarvamErr) {
-      console.error("[widget/tts] Sarvam TTS failed, falling back to OpenAI:", sarvamErr);
+      recordWidgetTts(meter, "sarvam", sent, sarvamErr);
+      logger.error({ err: sarvamErr, provider: "sarvam", language }, "Widget Sarvam TTS failed, falling back to OpenAI");
     }
   }
 
@@ -195,9 +255,11 @@ async function synthesizeWidgetTTS(
   try {
     const fallbackVoice = ["nova", "shimmer", "coral", "sage"].includes(voice) ? voice : "nova";
     const openAiAudio = await generateOpenAIWidgetTTS(text, fallbackVoice);
+    recordWidgetTts(meter, "openai", text.length);
     return { audio: openAiAudio, provider: "openai", mimeType: "audio/mpeg" };
   } catch (openAiErr) {
-    console.error("[widget/tts] OpenAI TTS error:", openAiErr);
+    recordWidgetTts(meter, "openai", text.length, openAiErr);
+    logger.error({ err: openAiErr, provider: "openai" }, "Widget OpenAI TTS failed");
     return { audio: null, provider: null, mimeType: "audio/mpeg" };
   }
 }
@@ -421,7 +483,9 @@ async function llmResolveLanguage(
   message: string,
   history: { role: string; content: string }[],
   sessionLanguage: string | null,
+  meter: RequestMeter,
 ): Promise<LangCode | null> {
+  await meter.ensureBudget();
   try {
     const recent = history
       .slice(-4)
@@ -443,6 +507,7 @@ async function llmResolveLanguage(
       "Output the code only. No quotes. No explanation.",
     ].filter(Boolean).join("\n");
     const userBlock = `${recent ? recent + "\n" : ""}USER (latest): ${message.slice(0, 500)}`;
+    const llmCall = { provider: "openai", model: "gpt-4o-mini", promptTexts: [sys, userBlock], maxOutputTokens: 6, key: "language-arbiter" };
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       max_completion_tokens: 6,
@@ -451,13 +516,17 @@ async function llmResolveLanguage(
         { role: "system", content: sys },
         { role: "user", content: userBlock },
       ],
+    }).catch((err: unknown) => {
+      recordLlmCall(meter.usage, { ...llmCall, usage: null, failure: err });
+      throw err;
     });
+    recordLlmCall(meter.usage, { ...llmCall, usage: reportedUsage(completion.usage), outputText: completion.choices[0]?.message?.content });
     const raw = (completion.choices[0]?.message?.content || "").trim();
     const code = raw.replace(/[^a-zA-Z-]/g, "");
     const found = ALL_LANG_CODES.find(c => c.toLowerCase() === code.toLowerCase());
     return found ?? null;
   } catch (err) {
-    console.error("[widget/lang] LLM resolve failed:", err);
+    logger.error({ err, provider: "openai" }, "Widget language resolution failed");
     return null;
   }
 }
@@ -475,7 +544,8 @@ async function resolveEffectiveWidgetLanguage(
   configuredLanguage: string | null | undefined,
   message: string,
   history: { role: string; content: string }[],
-  sessionLanguage?: string | null,
+  sessionLanguage: string | null | undefined,
+  meter: RequestMeter,
 ): Promise<{ lang: LangCode; source: string }> {
   if (configuredLanguage && configuredLanguage !== "auto") {
     const cfg = ALL_LANG_CODES.find(c => c === configuredLanguage);
@@ -520,7 +590,12 @@ async function resolveEffectiveWidgetLanguage(
     (romanized && romanized.score === 1 && eng.words === 0); // Whisper phonetic artifact
     
   if (conflictingSignals) {
-    const arbiter = await llmResolveLanguage(message, history, sessionLanguage ?? null);
+    // The arbiter is optional: over the budget the heuristics below decide.
+    const arbiter = await llmResolveLanguage(message, history, sessionLanguage ?? null, meter)
+      .catch((err: unknown) => {
+        if (err instanceof SpendLimitError) return null;
+        throw err;
+      });
     if (arbiter) return { lang: arbiter, source: "llm-arbiter" };
   }
 
@@ -600,6 +675,7 @@ function isIndicReplyRomanized(reply: string, language: string): boolean {
 async function rewriteToNativeScript(
   reply: string,
   language: string,
+  meter: RequestMeter,
 ): Promise<string | null> {
   const langInfo: Record<string, { name: string; script: string; example: string }> = {
     "hi-IN": { name: "Hindi", script: "Devanagari (देवनागरी)", example: "नमस्ते! मैं आपकी मदद कर सकता हूं।" },
@@ -610,26 +686,30 @@ async function rewriteToNativeScript(
   };
   const info = langInfo[language];
   if (!info) return null;
+  await meter.ensureBudget();
   try {
+    const system = `You are a transliteration assistant. Rewrite the user's text in NATIVE ${info.script}. Preserve the meaning and tone EXACTLY — do not add, remove or summarise. Keep brand names like BBMP, e-Khata, ePID, PID and URLs in their original Latin form. Output only the rewritten text. Example: ${info.example}`;
+    const llmCall = { provider: "openai", model: "gpt-4o-mini", promptTexts: [system, reply], maxOutputTokens: 200, key: "native-rewrite" };
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       max_completion_tokens: 200,
       temperature: 0.2,
       messages: [
-        {
-          role: "system",
-          content: `You are a transliteration assistant. Rewrite the user's text in NATIVE ${info.script}. Preserve the meaning and tone EXACTLY — do not add, remove or summarise. Keep brand names like BBMP, e-Khata, ePID, PID and URLs in their original Latin form. Output only the rewritten text. Example: ${info.example}`,
-        },
+        { role: "system", content: system },
         { role: "user", content: reply },
       ],
+    }).catch((err: unknown) => {
+      recordLlmCall(meter.usage, { ...llmCall, usage: null, failure: err });
+      throw err;
     });
+    recordLlmCall(meter.usage, { ...llmCall, usage: reportedUsage(completion.usage), outputText: completion.choices[0]?.message?.content });
     const rewritten = completion.choices[0]?.message?.content?.trim();
     if (!rewritten) return null;
     // Sanity check — make sure the rewrite is actually in native script now.
     if (isIndicReplyRomanized(rewritten, language)) return null;
     return rewritten;
   } catch (err) {
-    console.error("[widget/chat] rewrite-to-native failed:", err);
+    logger.error({ err, provider: "openai", language }, "Widget native-script rewrite failed");
     return null;
   }
 }
@@ -637,49 +717,14 @@ async function rewriteToNativeScript(
 async function ensureNativeScript(
   reply: string,
   language: string,
+  meter: RequestMeter,
 ): Promise<{ reply: string; rewrote: boolean }> {
   if (!isIndianLanguage(language)) return { reply, rewrote: false };
   if (!isIndicReplyRomanized(reply, language)) return { reply, rewrote: false };
-  console.warn(`[widget/chat] romanized output detected for ${language}, rewriting…`);
-  const rewritten = await rewriteToNativeScript(reply, language);
+  logger.warn({ language }, "Widget romanized output detected, rewriting");
+  const rewritten = await rewriteToNativeScript(reply, language, meter);
   if (rewritten) return { reply: rewritten, rewrote: true };
   return { reply, rewrote: false };
-}
-
-// Some providers (Sarvam-M, several OpenAI-compatible Indic endpoints) are
-// strict about message ordering:
-//   1. EXACTLY ONE system message at the very top.
-//   2. The first non-system message MUST be from "user" (Sarvam returns 400:
-//      "First message must be from user (or after system message)").
-//   3. user/assistant turns should alternate.
-// We merge extra system instructions into the leading system message, then
-// drop any leading assistant turns (typically the bot's greeting) so the
-// first message after system is from the user.
-function normalizeMessagesForSingleSystem(messages: any[]): any[] {
-  const systemParts: string[] = [];
-  let rest: any[] = [];
-  for (const m of messages) {
-    if (m && m.role === "system" && typeof m.content === "string") {
-      systemParts.push(m.content);
-    } else if (m && m.role) {
-      rest.push(m);
-    }
-  }
-  while (rest.length > 0 && rest[0].role !== "user") {
-    rest = rest.slice(1);
-  }
-  // Collapse any consecutive same-role turns by keeping the latest, which
-  // protects against history corruption (e.g. two assistant turns in a row).
-  const cleaned: any[] = [];
-  for (const m of rest) {
-    if (cleaned.length > 0 && cleaned[cleaned.length - 1].role === m.role) {
-      cleaned[cleaned.length - 1] = m;
-    } else {
-      cleaned.push(m);
-    }
-  }
-  if (systemParts.length === 0) return cleaned;
-  return [{ role: "system", content: systemParts.join("\n\n") }, ...cleaned];
 }
 
 // Lightweight in-process circuit breaker for upstream providers. Once a
@@ -697,25 +742,39 @@ function isProviderTripped(name: string): string | null {
 }
 function tripProvider(name: string, reason: string, cooldownMs: number) {
   providerBreakers[name] = { until: Date.now() + cooldownMs, reason };
-  console.warn(`[widget/chat] circuit-break ${name} for ${cooldownMs}ms: ${reason}`);
+  logger.warn({ provider: name, cooldownMs, reason }, "Widget provider circuit opened");
 }
 
 interface LLMResult {
   content: string;
-  inputTokens: number;
-  outputTokens: number;
+}
+
+type WidgetModelMessages = ReturnType<typeof buildWidgetModelMessages>;
+
+/** Records a widget LLM request; HTTP errors carry their status so they count as not billed. */
+function widgetLlmRecorder(meter: RequestMeter, provider: string, model: string, messages: WidgetModelMessages, maxOutputTokens: number) {
+  const base = { provider, model, promptTexts: messages.map((m) => String(m.content)), maxOutputTokens };
+  return {
+    success: (usage: unknown, outputText: string | null | undefined) =>
+      recordLlmCall(meter.usage, { ...base, usage: reportedUsage(usage), outputText }),
+    failure: (failure: unknown) => recordLlmCall(meter.usage, { ...base, usage: null, failure }),
+  };
 }
 
 async function callDeepSeekChat(
-  messages: any[],
+  messages: WidgetModelMessages,
+  meter: RequestMeter,
   maxTokens: number = 250,
 ): Promise<LLMResult | null> {
   if (!DEEPSEEK_API_KEY) return null;
+  assertServerAuthoredMessages(messages);
   const tripped = isProviderTripped("deepseek");
   if (tripped) {
-    console.log(`[widget/chat] DeepSeek skipped (circuit open: ${tripped})`);
+    logger.info({ provider: "deepseek", reason: tripped }, "Widget provider skipped (circuit open)");
     return null;
   }
+  await meter.ensureBudget();
+  const record = widgetLlmRecorder(meter, "deepseek", "deepseek-chat", messages, maxTokens);
   try {
     const res = await fetch("https://api.deepseek.com/chat/completions", {
       method: "POST",
@@ -725,17 +784,18 @@ async function callDeepSeekChat(
       },
       body: JSON.stringify({
         model: "deepseek-chat",
-        messages: normalizeMessagesForSingleSystem(messages),
+        messages,
         max_tokens: maxTokens,
         temperature: 0.4,
       }),
     });
     if (!res.ok) {
-      const body = await res.text();
-      console.error(`[widget/chat] DeepSeek failed: ${res.status} ${body}`);
+      record.failure({ status: res.status });
+      const providerCode = extractProviderCode(await res.text().catch(() => ""));
+      logger.error({ provider: "deepseek", status: res.status, providerCode }, "Widget DeepSeek request failed");
       // Insufficient balance / auth → don't hammer the provider for 10 minutes
       if (res.status === 401 || res.status === 402 || res.status === 403) {
-        tripProvider("deepseek", `${res.status} ${body.slice(0, 120)}`, 10 * 60 * 1000);
+        tripProvider("deepseek", `${res.status} ${providerCode ?? ""}`.trim(), 10 * 60 * 1000);
       } else if (res.status === 429) {
         tripProvider("deepseek", "rate-limit", 60 * 1000);
       }
@@ -743,27 +803,29 @@ async function callDeepSeekChat(
     }
     const data = await res.json() as any;
     const content: string | null = data.choices?.[0]?.message?.content ?? null;
+    record.success(data.usage, content);
     if (!content) return null;
-    return {
-      content,
-      inputTokens: data.usage?.prompt_tokens ?? 0,
-      outputTokens: data.usage?.completion_tokens ?? 0,
-    };
+    return { content };
   } catch (err) {
-    console.error("[widget/chat] DeepSeek exception:", err);
+    record.failure(err);
+    logger.error({ err, provider: "deepseek" }, "Widget DeepSeek request threw");
     return null;
   }
 }
 
 async function callSarvamChat(
-  messages: any[],
+  messages: WidgetModelMessages,
+  meter: RequestMeter,
 ): Promise<LLMResult | null> {
   if (!SARVAM_API_KEY) return null;
+  assertServerAuthoredMessages(messages);
   const tripped = isProviderTripped("sarvam-m");
   if (tripped) {
-    console.log(`[widget/chat] Sarvam-M skipped (circuit open: ${tripped})`);
+    logger.info({ provider: "sarvam-m", reason: tripped }, "Widget provider skipped (circuit open)");
     return null;
   }
+  await meter.ensureBudget();
+  const record = widgetLlmRecorder(meter, "sarvam", "sarvam-m", messages, 250);
   try {
     const res = await fetch("https://api.sarvam.ai/v1/chat/completions", {
       method: "POST",
@@ -773,15 +835,16 @@ async function callSarvamChat(
       },
       body: JSON.stringify({
         model: "sarvam-m",
-        messages: normalizeMessagesForSingleSystem(messages),
+        messages,
         max_completion_tokens: 250,
       }),
     });
     if (!res.ok) {
-      const body = await res.text();
-      console.error(`[widget/chat] Sarvam-M failed: ${res.status} ${body}`);
+      record.failure({ status: res.status });
+      const providerCode = extractProviderCode(await res.text().catch(() => ""));
+      logger.error({ provider: "sarvam-m", status: res.status, providerCode }, "Widget Sarvam-M request failed");
       if (res.status === 401 || res.status === 402 || res.status === 403) {
-        tripProvider("sarvam-m", `${res.status} ${body.slice(0, 120)}`, 10 * 60 * 1000);
+        tripProvider("sarvam-m", `${res.status} ${providerCode ?? ""}`.trim(), 10 * 60 * 1000);
       } else if (res.status === 429) {
         tripProvider("sarvam-m", "rate-limit", 60 * 1000);
       }
@@ -789,14 +852,12 @@ async function callSarvamChat(
     }
     const data = await res.json() as any;
     const content: string | null = data.choices?.[0]?.message?.content ?? null;
+    record.success(data.usage, content);
     if (!content) return null;
-    return {
-      content,
-      inputTokens: data.usage?.prompt_tokens ?? 0,
-      outputTokens: data.usage?.completion_tokens ?? 0,
-    };
+    return { content };
   } catch (err) {
-    console.error("[widget/chat] Sarvam-M exception:", err);
+    record.failure(err);
+    logger.error({ err, provider: "sarvam-m" }, "Widget Sarvam-M request threw");
     return null;
   }
 }
@@ -808,17 +869,15 @@ async function callSarvamChat(
 //   ta/te/mr → Sarvam-M    → Sarvam Bulbul TTS (native scripts)
 async function generateWidgetReply(
   systemPrompt: string,
-  history: { role: string; content: string }[],
+  history: WidgetChatTurn[],
   message: string,
   language: string,
-  isVoiceRequest?: boolean,
-): Promise<{ reply: string; modelUsed: string; inputTokens: number; outputTokens: number }> {
+  isVoiceRequest: boolean | undefined,
+  meter: RequestMeter,
+): Promise<{ reply: string; modelUsed: string }> {
   const normalizedLanguage = language || "en-US";
-  const messages: any[] = [
-    { role: "system", content: systemPrompt },
-    ...history.map(h => ({ role: h.role, content: h.content })),
-    { role: "user", content: message },
-  ];
+  const messages = buildWidgetModelMessages([systemPrompt], history, message);
+  assertServerAuthoredMessages(messages);
 
   const NATIVE_LANG_NAMES: Record<string, { name: string; script: string }> = {
     "hi-IN": { name: "Hindi", script: "Devanagari (देवनागरी)" },
@@ -835,13 +894,13 @@ async function generateWidgetReply(
     const brevity = isVoiceRequest ? " Answer in 1-2 short spoken sentences ONLY. NEVER read out phone numbers, email addresses, social media handles, URLs, or app store links — just say 'you can find contact details on the website'. Be warm and natural." : " Keep your answer brief and conversational — 2-3 sentences max.";
     const styleSystem = `Reply ONLY in natural ${langInfo.name} written in NATIVE ${langInfo.script}. Output MUST be in ${langInfo.script}. NEVER romanize. NEVER use Latin/English letters except for brand names like "BBMP", "e-Khata", "ePID" or URLs. If you cannot produce native script, output nothing. Provide the answer from the knowledge base — include key details. The user's input may mix scripts or use transliteration — understand their intent and ANSWER the question. NEVER reply with a clarification question if the intent is clear.${brevity}`;
     const llmMaxTokens = isVoiceRequest ? 100 : 150;
-    const result = await callDeepSeekChat([{ role: "system", content: styleSystem }, ...messages], llmMaxTokens);
+    const result = await callDeepSeekChat(buildWidgetModelMessages([styleSystem, systemPrompt], history, message), meter, llmMaxTokens);
     if (result) {
       const normalized = normalizeIndicReply(result.content, normalizedLanguage);
       // DeepSeek V3 reliably produces native script — skip the expensive
       // ensureNativeScript check (~600ms gpt-4o-mini call) for both voice
       // and text paths. Only Sarvam-M or GPT fallbacks might need the check.
-      return { reply: normalized, modelUsed: "deepseek-chat", inputTokens: result.inputTokens, outputTokens: result.outputTokens };
+      return { reply: normalized, modelUsed: "deepseek-chat" };
     }
   }
 
@@ -849,38 +908,39 @@ async function generateWidgetReply(
   if (langInfo && SARVAM_API_KEY) {
     const brevity = isVoiceRequest ? " Answer in 1-2 short spoken sentences ONLY. NEVER read out phone numbers, email addresses, social media handles, URLs, or app store links — just say 'you can find contact details on the website'. Be warm and natural." : " Keep your answer brief and conversational — 2-3 sentences max.";
     const styleSystem = `Reply ONLY in natural ${langInfo.name} written in NATIVE ${langInfo.script}. Output MUST be in ${langInfo.script}. NEVER romanize. NEVER use Latin/English letters except for brand names like "BBMP", "e-Khata", "ePID" or URLs. If you cannot produce native script, output nothing. Provide the answer from the knowledge base — include key details. The user's input may be transliterated — understand the intent and ANSWER the question directly. NEVER respond with a clarification request when the user has already asked something specific.${brevity}`;
-    const result = await callSarvamChat([{ role: "system", content: styleSystem }, ...messages]);
+    const result = await callSarvamChat(buildWidgetModelMessages([styleSystem, systemPrompt], history, message), meter);
     if (result) {
       const normalized = normalizeIndicReply(result.content, normalizedLanguage);
-      if (isVoiceRequest) return { reply: normalized, modelUsed: "sarvam-m", inputTokens: result.inputTokens, outputTokens: result.outputTokens };
-      const fixed = await ensureNativeScript(normalized, normalizedLanguage);
-      return { reply: fixed.reply, modelUsed: fixed.rewrote ? "sarvam-m+rewrite" : "sarvam-m", inputTokens: result.inputTokens, outputTokens: result.outputTokens };
+      if (isVoiceRequest) return { reply: normalized, modelUsed: "sarvam-m" };
+      const fixed = await ensureNativeScript(normalized, normalizedLanguage, meter);
+      return { reply: fixed.reply, modelUsed: fixed.rewrote ? "sarvam-m+rewrite" : "sarvam-m" };
     }
   }
 
   // --- English (or any fallback): gpt-4o-mini (fast & multilingual) ---
   let reply = "";
   let modelUsed = "gpt-4o-mini";
-  let inputTokens = 0;
-  let outputTokens = 0;
+  const maxTokens = isVoiceRequest ? 100 : 150;
+  await meter.ensureBudget();
+  const record = widgetLlmRecorder(meter, "openai", "gpt-4o-mini", messages, maxTokens);
   try {
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
-      max_completion_tokens: isVoiceRequest ? 100 : 150,
+      max_completion_tokens: maxTokens,
       messages,
+    }).catch((err: unknown) => {
+      record.failure(err);
+      throw err;
     });
+    record.success(completion.usage, completion.choices[0]?.message?.content);
     reply = completion.choices[0]?.message?.content || "I'm sorry, I couldn't process that. Could you try again?";
-    inputTokens = completion.usage?.prompt_tokens ?? 0;
-    outputTokens = completion.usage?.completion_tokens ?? 0;
   } catch (err: any) {
-    console.warn(`[widget/chat] OpenAI failed, falling back to DeepSeek: ${err.message}`);
+    logger.warn({ err, provider: "openai" }, "Widget OpenAI chat failed, falling back to DeepSeek");
     if (DEEPSEEK_API_KEY) {
-      const dsResult = await callDeepSeekChat(messages);
+      const dsResult = await callDeepSeekChat(messages, meter);
       if (dsResult) {
         reply = dsResult.content;
         modelUsed = "deepseek-chat";
-        inputTokens = dsResult.inputTokens;
-        outputTokens = dsResult.outputTokens;
       } else {
         throw err;
       }
@@ -895,10 +955,10 @@ async function generateWidgetReply(
   // ensureNativeScript safety net when the language is non-English to keep
   // the English fast-path latency-free.
   if (!isIndianLanguage(normalizedLanguage) || isVoiceRequest) {
-    return { reply: normalized, modelUsed, inputTokens, outputTokens };
+    return { reply: normalized, modelUsed };
   }
-  const fixed = await ensureNativeScript(normalized, normalizedLanguage);
-  return { reply: fixed.reply, modelUsed: fixed.rewrote ? `${modelUsed}+rewrite` : modelUsed, inputTokens, outputTokens };
+  const fixed = await ensureNativeScript(normalized, normalizedLanguage, meter);
+  return { reply: fixed.reply, modelUsed: fixed.rewrote ? `${modelUsed}+rewrite` : modelUsed };
 }
 
 // ── Agent config cache (60s TTL) ─────────────────────────────────────────
@@ -1143,6 +1203,8 @@ async function buildSystemPromptForWidget(
     }
   }
 
+  system += `\n${widgetChatSecurityPolicy(Boolean(crmSession?.crmContext))}\n\n`;
+
   if (crmSession?.crmContext) {
     system = appendCrmContextToWidgetPrompt(
       system,
@@ -1267,7 +1329,7 @@ async function findDirectKBAnswer(
   return null;
 }
 
-router.get("/widget/config/:apiKey", async (req, res) => {
+router.get("/widget/config/:apiKey", widgetConfigRateLimit, async (req, res) => {
   const agent = await getAgentByWidgetKey(req.params.apiKey);
   if (!agent) {
     res.status(404).json({ error: "Widget not found or disabled" });
@@ -1278,7 +1340,7 @@ router.get("/widget/config/:apiKey", async (req, res) => {
     where: eq(externalCrmConfigsTable.userId, agent.userId),
   });
   const crmConnected = !!(crmConfig?.isEnabled && crmConfig.lookupUrl);
-  const widgetCrmEnabled = !!(agent as any).widgetExternalCrmEnabled && crmConnected;
+  const policy = await resolveActiveWidgetPolicy(agent as any);
 
   res.json({
     agentName: agent.agentName,
@@ -1286,63 +1348,199 @@ router.get("/widget/config/:apiKey", async (req, res) => {
     language: agent.language || "en-US",
     personality: agent.personality,
     voiceEnabled: !!(agent as any).widgetVoiceEnabled,
-    crmAuthRequired: widgetCrmEnabled,
+    crmAuthRequired: !!policy,
+    crmVerification: policy ? publicFactor(policy) : null,
     crmName: crmConfig?.name ?? null,
     crmConnected,
     widgetExternalCrmEnabled: !!(agent as any).widgetExternalCrmEnabled,
   });
 });
 
-// ── Widget CRM verification (phone + order ID) ───────────────────────────
-router.post("/widget/crm/verify-phone", async (req, res) => {
-  const { apiKey, phone } = req.body as { apiKey?: string; phone?: string };
-  if (!apiKey || !phone) {
-    res.status(400).json({ error: "apiKey and phone are required" });
-    return;
-  }
+// ── Widget CRM customer verification ─────────────────────────────────────
+// The embed key only identifies the widget. Customer data requires the
+// factor chosen by the tenant's server-side policy, checked against the
+// tenant's CRM. Every failure body below is fixed so it cannot reveal
+// whether a phone number, order or date of birth exists or matched.
+const CRM_MESSAGES = {
+  started: "If this number is registered with us, you'll receive a 6-digit verification code shortly. Please enter it here.",
+  unavailable: "Customer verification is not available right now. Please try again later.",
+  invalidPhone: "Please enter a valid 10-digit phone number.",
+  rateLimited: "Too many verification requests. Please try again later.",
+  failed: "That code is invalid or has expired. Please try again or request a new code.",
+  factorFailed: "We couldn't verify those details. Please check them and try again, or start over.",
+  verified: "Thanks, you're verified. Please enter your order ID to continue.",
+  resent: "If this number is registered with us, a new code is on its way.",
+  required: "Please verify your details before we can continue.",
+  disabled: "Customer account access is not enabled for this chat.",
+  legacy: "Please verify your details using the current verification flow.",
+} as const;
 
-  const agent = await getAgentByWidgetKey(apiKey);
-  if (!agent) {
-    res.status(404).json({ error: "Widget not found or disabled" });
-    return;
-  }
-
-  const active = await isWidgetCrmActive(agent.userId, !!(agent as any).widgetExternalCrmEnabled);
-  if (!active) {
-    res.status(403).json({ error: "External CRM is not enabled for this widget" });
-    return;
-  }
-
-  const result = await verifyWidgetCrmPhone(agent.userId, phone);
-  res.json(result);
+const verificationLimits = widgetVerificationRateLimits((res, retryAfterSeconds) => {
+  res
+    .set("Retry-After", String(retryAfterSeconds))
+    .status(429)
+    .json({ success: false, error: "rate_limited", message: CRM_MESSAGES.rateLimited });
 });
 
-router.post("/widget/crm/verify-order", async (req, res) => {
-  const { apiKey, phone, orderId } = req.body as { apiKey?: string; phone?: string; orderId?: string };
-  if (!apiKey || !phone || !orderId) {
-    res.status(400).json({ error: "apiKey, phone, and orderId are required" });
-    return;
-  }
+type ActivePolicy = NonNullable<Awaited<ReturnType<typeof resolveActiveWidgetPolicy>>>;
 
+/** Describes the factor the widget must collect; contains no customer data. */
+function publicFactor(policy: ActivePolicy) {
+  if (policy.method === "sms_otp") return { method: policy.method, factor: "code", length: 6 };
+  if (policy.method === "date_of_birth") return { method: policy.method, factor: "date_of_birth", format: "DD/MM/YYYY" };
+  return { method: policy.method, factor: "order_digits", length: policy.method === "order_suffix_6" ? 6 : 4 };
+}
+
+function factorPrompt(policy: ActivePolicy): string {
+  const factor = publicFactor(policy);
+  if (factor.factor === "code") return CRM_MESSAGES.started;
+  if (factor.factor === "date_of_birth")
+    return "Please enter your date of birth (DD/MM/YYYY) to verify your account.";
+  return `Please enter the last ${factor.length} digits of your order ID to verify your account.`;
+}
+
+async function widgetCrmAgent(req: any, res: any) {
+  const apiKey = req.body?.apiKey;
+  if (typeof apiKey !== "string" || !apiKey) {
+    res.status(400).json({ success: false, error: "apiKey is required" });
+    return null;
+  }
   const agent = await getAgentByWidgetKey(apiKey);
   if (!agent) {
-    res.status(404).json({ error: "Widget not found or disabled" });
-    return;
+    res.status(404).json({ success: false, error: "Widget not found or disabled" });
+    return null;
   }
+  const policy = await resolveActiveWidgetPolicy(agent as any);
+  if (!policy) {
+    res.status(403).json({ success: false, error: "customer_access_disabled", message: CRM_MESSAGES.disabled });
+    return null;
+  }
+  return { agent, apiKey, policy };
+}
 
-  const active = await isWidgetCrmActive(agent.userId, !!(agent as any).widgetExternalCrmEnabled);
-  if (!active) {
-    res.status(403).json({ error: "External CRM is not enabled for this widget" });
-    return;
+router.post("/widget/crm/verification/start", verificationLimits.start, async (req, res) => {
+  const ctx = await widgetCrmAgent(req, res);
+  if (!ctx) return;
+  const result = await getWidgetVerification().start({
+    agent: ctx.agent,
+    apiKey: ctx.apiKey,
+    phone: req.body?.phone,
+    source: clientAddress(req),
+    policy: ctx.policy,
+  });
+  if (result.ok) {
+    res.json({
+      success: true,
+      challengeId: result.challengeId,
+      ...publicFactor(ctx.policy),
+      message: factorPrompt(ctx.policy),
+    });
+  } else if (result.reason === "invalid") {
+    res.status(400).json({ success: false, error: "invalid_phone", message: CRM_MESSAGES.invalidPhone });
+  } else if (result.reason === "rate_limited") {
+    res.status(429).json({ success: false, error: "rate_limited", message: CRM_MESSAGES.rateLimited });
+  } else {
+    res.status(503).json({ success: false, error: "verification_unavailable", message: CRM_MESSAGES.unavailable });
   }
-
-  const result = await verifyWidgetCrmOrder(agent.userId, phone, orderId);
-  if (result.success && result.sessionToken) {
-    const session = verifyWidgetCrmSessionToken(result.sessionToken);
-    if (session) fireWidgetChatSessionStarted(agent.userId, session);
-  }
-  res.json(result);
 });
+
+router.post("/widget/crm/verification/resend", verificationLimits.resend, async (req, res) => {
+  const ctx = await widgetCrmAgent(req, res);
+  if (!ctx) return;
+  const result = await getWidgetVerification().resend({
+    agent: ctx.agent,
+    apiKey: ctx.apiKey,
+    challengeId: req.body?.challengeId,
+    policy: ctx.policy,
+  });
+  if (result.ok) {
+    res.json({ success: true, message: CRM_MESSAGES.resent });
+  } else if (result.reason === "rate_limited") {
+    res.status(429).json({ success: false, error: "rate_limited", message: CRM_MESSAGES.rateLimited });
+  } else {
+    res.status(400).json({ success: false, error: "verification_failed", message: CRM_MESSAGES.failed });
+  }
+});
+
+router.post("/widget/crm/verification/verify", verificationLimits.factor, async (req, res) => {
+  const ctx = await widgetCrmAgent(req, res);
+  if (!ctx) return;
+  const verification = getWidgetVerification();
+  const result = await verification.verify({
+    agent: ctx.agent,
+    apiKey: ctx.apiKey,
+    challengeId: req.body?.challengeId,
+    policy: ctx.policy,
+    code: req.body?.code,
+    orderDigits: req.body?.orderDigits,
+    dateOfBirth: req.body?.dateOfBirth,
+  });
+  const failed = ctx.policy.method === "sms_otp" ? CRM_MESSAGES.failed : CRM_MESSAGES.factorFailed;
+  if (!result.ok) {
+    res.status(400).json({ success: false, error: "verification_failed", message: failed });
+    return;
+  }
+  if (!result.activeOrderId) {
+    res.json({ success: true, sessionToken: result.token, orderSelected: false, message: CRM_MESSAGES.verified });
+    return;
+  }
+  // Order-digit methods bind the session to the single matched order.
+  const verified = await verification.authorize(result.token, ctx.agent, ctx.apiKey, ctx.policy);
+  const session = verified ? await loadSessionOrder(verified) : null;
+  if (!verified || !session) {
+    if (verified) await verification.revoke(verified);
+    res.status(400).json({ success: false, error: "verification_failed", message: failed });
+    return;
+  }
+  fireWidgetChatSessionStarted(ctx.agent.userId, session);
+  const greeting = greetingFor(session);
+  res.json({
+    success: true,
+    sessionToken: result.token,
+    orderSelected: true,
+    orderId: session.activeOrderId,
+    greeting,
+    message: greeting,
+  });
+});
+
+router.post("/widget/crm/select-order", widgetCustomerSessionRateLimit, async (req, res) => {
+  const ctx = await widgetCrmAgent(req, res);
+  if (!ctx) return;
+  const verification = getWidgetVerification();
+  const verified = await verification.authorize(req.body?.sessionToken, ctx.agent, ctx.apiKey, ctx.policy);
+  if (!verified) {
+    res.status(401).json({ success: false, error: "verification_required", message: CRM_MESSAGES.required, crmAuthRequired: true });
+    return;
+  }
+  const orderInput = req.body?.orderId;
+  const session = typeof orderInput === "string" && orderInput.length <= 64
+    ? await resolveVerifiedOrder(verified, orderInput)
+    : null;
+  if (!session || !(await verification.setActiveOrder(verified, session.activeOrderId))) {
+    res.status(404).json({ success: false, error: "order_not_found", message: ORDER_NOT_FOUND_MESSAGE });
+    return;
+  }
+  fireWidgetChatSessionStarted(ctx.agent.userId, session);
+  const greeting = greetingFor(session);
+  res.json({ success: true, orderId: session.activeOrderId, greeting, message: greeting });
+});
+
+router.post("/widget/crm/session/end", widgetCustomerSessionRateLimit, async (req, res) => {
+  const ctx = await widgetCrmAgent(req, res);
+  if (!ctx) return;
+  const verification = getWidgetVerification();
+  const verified = await verification.authorize(req.body?.sessionToken, ctx.agent, ctx.apiKey, ctx.policy);
+  if (verified) await verification.revoke(verified);
+  res.json({ success: true });
+});
+
+// Retired endpoints: phone or phone + order ID never establish identity.
+for (const retired of ["/widget/crm/verify-phone", "/widget/crm/verify-order"]) {
+  router.post(retired, (_req, res) => {
+    res.status(410).json({ success: false, verificationRequired: true, message: CRM_MESSAGES.legacy });
+  });
+}
 
 // ── Twilio Client SDK: Voice Widget ─────────────────────────────────────
 // Enables browser-based voice calling through the web widget using Twilio's
@@ -1365,10 +1563,11 @@ async function ensureTwimlApp(
     return (agent as any).twilioTwimlAppSid;
   }
 
-  if (!agent.twilioAccountSid || !agent.twilioAuthToken) return null;
+  const authToken = agent.twilioAccountSid ? twilioAuthTokenFor(agent) : null;
+  if (!agent.twilioAccountSid || !authToken) return null;
 
   try {
-    const client = twilio(agent.twilioAccountSid, agent.twilioAuthToken);
+    const client = twilio(agent.twilioAccountSid, authToken);
 
     // Check if a Dialog TwiML app already exists (prevents duplicates on re-enable)
     const existingApps = await client.applications.list({ friendlyName: "Dialog Voice Widget", limit: 1 });
@@ -1378,13 +1577,13 @@ async function ensureTwimlApp(
       appSid = existingApps[0].sid;
       // Update the voice URL in case the server URL changed
       await client.applications(appSid).update({
-        voiceUrl: `${baseUrl}/api/twilio/widget-voice`,
+        voiceUrl: mediaPublicUrl("/api/twilio/widget-voice"),
         voiceMethod: "POST",
       });
     } else {
       const app = await client.applications.create({
         friendlyName: "Dialog Voice Widget",
-        voiceUrl: `${baseUrl}/api/twilio/widget-voice`,
+        voiceUrl: mediaPublicUrl("/api/twilio/widget-voice"),
         voiceMethod: "POST",
       });
       appSid = app.sid;
@@ -1398,16 +1597,16 @@ async function ensureTwimlApp(
     // Invalidate cache
     agentConfigCache.delete(agent.widgetApiKey);
 
-    console.log(`[widget/voice] Auto-provisioned TwiML App ${appSid} for user ${agent.userId}`);
+    logger.info({ event: "widget_twiml_app_provisioned", userId: agent.userId, appSid }, "Widget TwiML app provisioned");
     return appSid;
   } catch (err) {
-    console.error("[widget/voice] Failed to provision TwiML App:", err);
+    logger.error({ err, userId: agent.userId }, "Widget TwiML app provisioning failed");
     return null;
   }
 }
 
 // Generate a Twilio Access Token for the browser-based voice widget
-router.post("/widget/voice-token", async (req, res) => {
+router.post("/widget/voice-token", widgetVoiceTokenRateLimit, async (req, res) => {
   const { apiKey } = req.body;
 
   if (!apiKey) {
@@ -1420,13 +1619,25 @@ router.post("/widget/voice-token", async (req, res) => {
     res.status(404).json({ error: "Widget not found or disabled" });
     return;
   }
+  if (!(await enforceWidgetTenantBudget(req, res, POLICIES.widgetVoiceTokenTenant, agent.userId))) return;
 
   if (!(agent as any).widgetVoiceEnabled) {
     res.status(403).json({ error: "Voice calling is not enabled for this widget" });
     return;
   }
 
-  if (!agent.twilioAccountSid || !agent.twilioAuthToken) {
+  // The token itself is free; the call it starts is held and enforced again
+  // when Twilio connects it (/twilio/widget-voice).
+  try {
+    await assertBudgetAvailable(agent.userId);
+  } catch (err) {
+    if (!(err instanceof SpendLimitError)) throw err;
+    res.status(spendLimitHttpStatus(err)).json({ error: err.message, code: err.code });
+    return;
+  }
+
+  const authToken = agent.twilioAccountSid ? twilioAuthTokenFor(agent) : null;
+  if (!agent.twilioAccountSid || !authToken) {
     res.status(400).json({ error: "Twilio credentials not configured" });
     return;
   }
@@ -1455,7 +1666,7 @@ router.post("/widget/voice-token", async (req, res) => {
       // the API Key SID and Auth Token as the secret for development.
       // In production, tenants should create a proper API Key in Twilio Console.
       agent.twilioAccountSid,
-      agent.twilioAuthToken,
+      authToken,
       { identity, ttl: 3600 },
     );
 
@@ -1465,14 +1676,14 @@ router.post("/widget/voice-token", async (req, res) => {
     });
     token.addGrant(voiceGrant);
 
-    console.log(`[widget/voice] Token issued for user ${agent.userId}, identity=${identity}`);
+    logger.info({ event: "widget_voice_token_issued", userId: agent.userId }, "Widget voice token issued");
 
     res.json({
       token: token.toJwt(),
       identity,
     });
   } catch (err: any) {
-    console.error("[widget/voice] Token generation failed:", err);
+    logger.error({ err }, "Widget voice token generation failed");
     res.status(500).json({ error: `Token generation failed: ${err.message}` });
   }
 });
@@ -1755,101 +1966,68 @@ function videoSuggestionLine(language: string, link: string): string {
   }
 }
 
-router.post("/widget/chat", async (req, res) => {
+router.post("/widget/chat", widgetChatRateLimit, async (req, res) => {
   const requestStart = Date.now();
-  const { apiKey, message, history, includeAudio, isVoiceRequest, sessionLanguage, crmSessionToken, crmPendingToken } = req.body as {
-    apiKey: string;
-    message: string;
-    history?: { role: string; content: string }[];
-    includeAudio?: boolean;
-    isVoiceRequest?: boolean;
-    sessionLanguage?: string;
-    crmSessionToken?: string;
-    crmPendingToken?: string;
-  };
-
-  if (!apiKey || !message) {
-    res.status(400).json({ error: "apiKey and message are required" });
+  const parsed = parseWidgetChatRequest(req.body, ALL_LANG_CODES);
+  if (!parsed.ok) {
+    logger.warn({ event: "widget_chat_rejected", reason: parsed.reason }, "Widget chat request rejected");
+    res.status(400).json({ error: WIDGET_CHAT_REJECTED_MESSAGE, reason: parsed.reason });
     return;
   }
+  const { apiKey, message, history, includeAudio, isVoiceRequest, sessionLanguage, crmSessionToken } = parsed.value;
 
   const agent = await getAgentByWidgetKey(apiKey);
   if (!agent) {
     res.status(404).json({ error: "Widget not found or disabled" });
     return;
   }
+  if (!(await enforceWidgetTenantBudget(req, res, POLICIES.widgetChatTenant, agent.userId))) return;
 
-  const widgetCrmRequired = await isWidgetCrmActive(agent.userId, !!(agent as any).widgetExternalCrmEnabled);
+  const meter = createRequestMeter({
+    userId: agent.userId,
+    source: "widget-chat",
+    estimate: widgetChatEstimate(message, history, Boolean(isVoiceRequest || includeAudio)),
+  });
+  res.once("close", () => { void meter.finish(); });
+
+  // No active policy means general chat only: no CRM lookup, no customer data.
+  const crmPolicy = await resolveActiveWidgetPolicy(agent as any);
   let crmSession: WidgetCrmSession | null = null;
-  let crmSessionTokenOut: string | undefined;
-  let crmPendingTokenOut: string | undefined;
+  let verifiedCustomer: WidgetCustomerSession | null = null;
 
-  if (widgetCrmRequired) {
-    // Pending flow: phone verified, waiting for order ID
-    if (crmPendingToken && !crmSessionToken) {
-      const pending = verifyWidgetCrmPendingToken(crmPendingToken);
-      if (!pending || pending.userId !== agent.userId) {
-        res.status(403).json({
-          error: "Invalid or expired pending session",
-          reply: "Your verification has expired. Please enter your phone number again.",
-          crmAuthRequired: true,
-        });
-        return;
-      }
-      const pendingResult = await handlePendingPhoneChat(agent.userId, pending, message);
-      if (pendingResult.completed && pendingResult.sessionToken) {
-        crmSession = verifyWidgetCrmSessionToken(pendingResult.sessionToken);
-        crmSessionTokenOut = pendingResult.sessionToken;
-        if (crmSession) fireWidgetChatSessionStarted(agent.userId, crmSession);
-      } else {
-        crmPendingTokenOut = pendingResult.pendingToken;
-      }
-      const pendingReply = pendingResult.message;
-      const pendingModel = pendingResult.completed ? "crm-verify" : "crm-pending";
-      res.json({
-        reply: pendingReply,
-        agentName: agent.agentName,
-        language: agent.language || "en-US",
-        detectedLanguage: agent.language || "en-US",
-        configuredLanguage: agent.language,
-        modelUsed: pendingModel,
-        audio: null,
-        audioChunks: null,
-        provider: null,
-        video: null,
-        audioMimeType: "audio/mpeg",
-        crmSessionToken: crmSessionTokenOut ?? null,
-        crmPendingToken: crmPendingTokenOut ?? null,
-        crmClearSession: false,
-      });
-      return;
-    }
-
-    if (!crmSessionToken) {
+  if (crmPolicy) {
+    const verification = getWidgetVerification();
+    verifiedCustomer = await verification.authorize(crmSessionToken, agent, apiKey, crmPolicy);
+    if (!verifiedCustomer) {
       res.status(403).json({
         error: "CRM verification required",
-        reply: "Please verify your phone number and order ID before we can continue.",
+        reply: CRM_MESSAGES.required,
         crmAuthRequired: true,
       });
       return;
     }
-    crmSession = verifyWidgetCrmSessionToken(crmSessionToken);
-    if (!crmSession || crmSession.userId !== agent.userId) {
+    // Ownership is re-checked against the CRM on every turn.
+    crmSession = await loadSessionOrder(verifiedCustomer);
+    if (!crmSession) {
       res.status(403).json({
-        error: "Invalid or expired session",
-        reply: "Your session has expired. Please verify your phone number and order ID again.",
+        error: "Order selection required",
+        reply: "Please enter your order ID to continue.",
         crmAuthRequired: true,
+        crmOrderRequired: true,
       });
       return;
     }
   }
 
-  const safeHistory = Array.isArray(history) ? history : [];
-  const normalizedHistory = safeHistory.map((h: any) => ({
-    role: h?.role,
-    content: typeof h?.content === "string"
-      ? (h.role === "assistant" ? stripVideoSuggestionText(h.content) : h.content)
-      : "",
+  // A verified customer's model context comes from the transcript the server
+  // recorded for that session, so browser-supplied turns cannot assert
+  // verification, order ownership or completed actions alongside real data.
+  const turns: WidgetChatTurn[] = crmSession
+    ? await loadWidgetChatHistory(crmSession.userId, crmSession.sessionId, WIDGET_CHAT_LIMITS.modelHistoryEntries)
+    : history;
+  const normalizedHistory: WidgetChatTurn[] = turns.map((h) => ({
+    role: h.role,
+    content: h.role === "assistant" ? stripVideoSuggestionText(h.content) : h.content,
   }));
 
   // ── Optimization: preload video links AND warm training data cache ────
@@ -1877,6 +2055,7 @@ router.post("/widget/chat", async (req, res) => {
       message,
       normalizedHistory,
       sessionLanguage,
+      meter,
     ),
     trainingWarmup,
   ]);
@@ -1884,36 +2063,23 @@ router.post("/widget/chat", async (req, res) => {
   let reply = "";
   let modelUsed = "gpt-4o-mini";
   let systemPrompt = "";
-  let llmInputTokens = 0;
-  let llmOutputTokens = 0;
 
   // Handle phone switch / order switch within verified CRM session
-  if (crmSession) {
-    const orderSwitch = await resolveWidgetCrmSessionForChat(agent.userId, crmSession, message);
-    if (orderSwitch.clearSession && orderSwitch.switchedPhone) {
-      reply = orderSwitch.switchMessage ?? "Please enter the order ID for this phone number.";
-      modelUsed = "crm-phone-switch";
-      crmSession = null;
-      crmSessionTokenOut = undefined;
-      crmPendingTokenOut = orderSwitch.pendingToken;
-    } else if (orderSwitch.switchMessage && !orderSwitch.switchedOrder) {
+  if (crmSession && verifiedCustomer) {
+    const orderSwitch = resolveWidgetCrmSessionForChat(verifiedCustomer, crmSession, message);
+    if (orderSwitch.switchedOrder) {
+      if (await getWidgetVerification().setActiveOrder(verifiedCustomer, orderSwitch.session.activeOrderId)) {
+        crmSession = orderSwitch.session;
+        reply = orderSwitch.switchMessage ?? `I've switched to order #${crmSession.activeOrderId}. How can I help?`;
+        modelUsed = "crm-switch";
+        fireWidgetChatTurn(agent.userId, crmSession, message, reply, "widget.chat.order_switched");
+      } else {
+        reply = "Your session has ended. Please verify your phone number again.";
+        modelUsed = "crm-guard";
+      }
+    } else if (orderSwitch.switchMessage) {
       reply = orderSwitch.switchMessage;
       modelUsed = "crm-guard";
-    } else if (orderSwitch.switchedOrder && orderSwitch.session) {
-      crmSession = orderSwitch.session;
-      crmSessionTokenOut = createWidgetCrmSessionToken({
-        userId: crmSession.userId,
-        sessionId: crmSession.sessionId,
-        phone: crmSession.phone,
-        customerName: crmSession.customerName,
-        activeOrderId: crmSession.activeOrderId,
-        orderIds: crmSession.orderIds,
-        orders: crmSession.orders,
-        crmContext: crmSession.crmContext,
-      });
-      reply = orderSwitch.switchMessage ?? `I've switched to order #${crmSession.activeOrderId}. How can I help?`;
-      modelUsed = "crm-switch";
-      fireWidgetChatTurn(agent.userId, crmSession, message, reply, "widget.chat.order_switched");
     }
   }
 
@@ -1927,7 +2093,7 @@ router.post("/widget/chat", async (req, res) => {
     if (directAnswer) {
       reply = directAnswer.answer;
       modelUsed = "direct-kb";
-      console.log(`[widget/chat] VOICE FAST PATH: direct KB match (confidence=${directAnswer.confidence}, source=${directAnswer.source})`);
+      logger.info({ confidence: directAnswer.confidence, kbSource: directAnswer.source }, "Widget voice fast path: direct KB match");
     }
   }
 
@@ -1943,19 +2109,23 @@ router.post("/widget/chat", async (req, res) => {
         message,
         effectiveLanguage,
         isVoiceRequest,
+        meter,
       );
       reply = generation.reply;
       modelUsed = generation.modelUsed;
-      // Capture real token counts for accurate cost logging
-      llmInputTokens = generation.inputTokens;
-      llmOutputTokens = generation.outputTokens;
     } catch (err) {
-      console.error("Widget AI error:", err);
+      if (err instanceof SpendLimitError) {
+        logger.warn({ event: "widget_chat_spend_limit", code: err.code }, "Widget chat refused by spending limit");
+        res.status(spendLimitHttpStatus(err)).json({ error: err.message, code: err.code, reply: WIDGET_LIMIT_MESSAGE });
+        return;
+      }
+      logger.error({ err }, "Widget AI reply generation failed");
       reply = "Sorry, I'm having a moment. Please try again shortly.";
     }
   }
 
-  // ── Fire-and-forget: DB call log + cost logging (never block response) ─
+  // ── Fire-and-forget: DB call log (never block response) ─
+  // Costs live in the usage ledger; a widget chat row has no telephony cost of its own.
   db.insert(callLogsTable).values({
     userId: agent.userId,
     direction: "widget",
@@ -1965,37 +2135,11 @@ router.post("/widget/chat", async (req, res) => {
     startedAt: new Date(),
     endedAt: new Date(),
     duration: 0,
-    estimatedCostUsd: "0",
-    billedCostUsd: "0",
   }).catch(() => {});
-
-  // ── Fire-and-forget cost logging — use real token counts from API response ──
-  resolveTenantIdForOwner(agent.userId).then(tenantId => {
-    if (!tenantId) return;
-    const baseModel = modelUsed.replace(/\+rewrite$/, "");
-    // Fall back to character estimation only when real tokens were not captured
-    // (e.g. direct-kb fast path which skips LLM entirely)
-    let finalInputTokens = llmInputTokens;
-    let finalOutputTokens = llmOutputTokens;
-    if (finalInputTokens === 0 && finalOutputTokens === 0 && modelUsed !== "direct-kb") {
-      const charsPerToken = isIndianLanguage(effectiveLanguage) ? 3 : 4;
-      finalInputTokens = Math.ceil((message.length + (systemPrompt?.length ?? 0)) / charsPerToken);
-      finalOutputTokens = Math.ceil(reply.length / charsPerToken);
-    }
-    if (modelUsed === "direct-kb") return; // no LLM cost for KB fast-path
-    return logLLMCost({
-      tenantId,
-      userId: agent.userId,
-      provider: baseModel,
-      inputTokens: finalInputTokens,
-      outputTokens: finalOutputTokens,
-      context: "widget-chat",
-    });
-  }).catch((e) => console.error("[widget] cost logging error:", e));
 
   // Sync verified CRM widget chat to external CRM (fire-and-forget)
   if (crmSession?.sessionId && reply && message) {
-    const skipSync = ["crm-guard", "crm-pending", "crm-phone-switch"].includes(modelUsed);
+    const skipSync = modelUsed === "crm-guard";
     if (!skipSync) {
       fireWidgetChatTurn(agent.userId, crmSession, message, reply);
     }
@@ -2019,7 +2163,7 @@ router.post("/widget/chat", async (req, res) => {
           const ttsStart = Date.now();
           const chunkResults = await Promise.allSettled(
             ttsChunks.map(chunk =>
-              synthesizeWidgetTTS(chunk, agent.voice || "nova", language)
+              synthesizeWidgetTTS(chunk, agent.voice || "nova", language, meter)
             )
           );
           const chunks = chunkResults.map(r =>
@@ -2034,7 +2178,7 @@ router.post("/widget/chat", async (req, res) => {
               break;
             }
           }
-          console.log(`[widget/chat] parallel TTS: ${ttsChunks.length} chunks in ${Date.now() - ttsStart}ms`);
+          logger.info({ chunks: ttsChunks.length, ttsMs: Date.now() - ttsStart }, "Widget parallel TTS complete");
           return { chunks, provider: prov, mimeType: chunks[0]?.mimeType || "audio/wav" };
         })()
       : Promise.resolve(null);
@@ -2046,19 +2190,6 @@ router.post("/widget/chat", async (req, res) => {
       audioChunks = ttsResult.chunks;
       provider = ttsResult.provider;
       audioMimeType = ttsResult.mimeType;
-
-      // Fire-and-forget TTS cost logging
-      resolveTenantIdForOwner(agent.userId).then(tenantId => {
-        if (!tenantId) return;
-        const totalChars = ttsChunks.reduce((s, c) => s + c.length, 0);
-        return logTTSCost({
-          tenantId,
-          userId: agent.userId,
-          provider: provider === "openai" ? "openai" : "sarvam",
-          characters: totalChars,
-          context: "widget-tts-parallel",
-        });
-      }).catch((e) => console.error("[widget] TTS cost logging error:", e));
     }
 
     let suggestedVideo: { title: string; link: string } | null = null;
@@ -2070,7 +2201,18 @@ router.post("/widget/chat", async (req, res) => {
       }
     }
 
-    console.log(`[widget/chat] configured=${agent.language} effective=${language} source=${resolved.source} session=${sessionLanguage ?? "-"} model=${modelUsed} tts=${provider ?? "none"} voice=true chunks=${audioChunks?.length ?? 0} video=${suggestedVideo ? suggestedVideo.title : "none"} total=${Date.now() - requestStart}ms`);
+    logger.info({
+      configuredLanguage: agent.language,
+      language,
+      languageSource: resolved.source,
+      sessionLanguage: sessionLanguage ?? null,
+      model: modelUsed,
+      tts: provider ?? "none",
+      voice: true,
+      chunks: audioChunks?.length ?? 0,
+      hasVideo: Boolean(suggestedVideo),
+      totalMs: Date.now() - requestStart,
+    }, "Widget chat turn complete");
 
     res.json({
       reply,
@@ -2084,9 +2226,7 @@ router.post("/widget/chat", async (req, res) => {
       provider,
       video: suggestedVideo,
       audioMimeType,
-      crmSessionToken: crmSessionTokenOut ?? null,
-      crmPendingToken: crmPendingTokenOut ?? null,
-      crmClearSession: !!crmPendingTokenOut,
+      activeOrderId: crmSession?.activeOrderId ?? null,
     });
     return;
   }
@@ -2105,18 +2245,36 @@ router.post("/widget/chat", async (req, res) => {
       }
     }
   } catch (e) {
-    console.error("[widget/chat] video match error:", e);
+    logger.error({ err: e }, "Widget video match failed");
   }
 
   if (includeAudio) {
     const ttsText = stripVideoSuggestionText(reply) || reply;
-    const ttsResult = await synthesizeWidgetTTS(ttsText, agent.voice || "nova", language);
-    audio = ttsResult.audio;
-    provider = ttsResult.provider;
-    audioMimeType = ttsResult.mimeType;
+    // Over the budget the (possibly free) text reply is still returned, without audio.
+    const ttsResult = await synthesizeWidgetTTS(ttsText, agent.voice || "nova", language, meter)
+      .catch((err: unknown) => {
+        if (err instanceof SpendLimitError) return null;
+        throw err;
+      });
+    if (ttsResult) {
+      audio = ttsResult.audio;
+      provider = ttsResult.provider;
+      audioMimeType = ttsResult.mimeType;
+    }
   }
 
-  console.log(`[widget/chat] configured=${agent.language} effective=${language} source=${resolved.source} session=${sessionLanguage ?? "-"} model=${modelUsed} tts=${provider ?? "none"} voice=false chunks=0 video=${suggestedVideo ? suggestedVideo.title : "none"} total=${Date.now() - requestStart}ms`);
+  logger.info({
+    configuredLanguage: agent.language,
+    language,
+    languageSource: resolved.source,
+    sessionLanguage: sessionLanguage ?? null,
+    model: modelUsed,
+    tts: provider ?? "none",
+    voice: false,
+    chunks: 0,
+    hasVideo: Boolean(suggestedVideo),
+    totalMs: Date.now() - requestStart,
+  }, "Widget chat turn complete");
 
   res.json({
     reply,
@@ -2130,57 +2288,59 @@ router.post("/widget/chat", async (req, res) => {
     provider,
     video: suggestedVideo,
     audioMimeType,
-    crmSessionToken: crmSessionTokenOut ?? null,
-    crmPendingToken: crmPendingTokenOut ?? null,
-    crmClearSession: !!crmPendingTokenOut,
+    activeOrderId: crmSession?.activeOrderId ?? null,
   });
 });
 
 // Server-side TTS for the Web Widget using OpenAI TTS (Fast, multilingual, high-quality)
-router.post("/widget/tts", async (req, res) => {
+router.post("/widget/tts", widgetTtsRateLimit, async (req, res) => {
   const { text, apiKey, language: requestedLanguage } = req.body as { text?: string; language?: string; apiKey?: string };
-  if (!text) {
+  if (typeof text !== "string" || !text) {
     res.status(400).json({ error: "text is required" });
     return;
   }
   
-  let voice = "nova";
-  let language = requestedLanguage || "en-US";
-  if (apiKey) {
-    const agent = await getAgentByWidgetKey(apiKey);
-    if (agent?.voice) voice = agent.voice;
-    if ((!requestedLanguage || requestedLanguage === "auto") && agent?.language) {
-      language = agent.language;
-    }
+  // Paid synthesis is always attributed to a tenant; anonymous requests are refused.
+  if (typeof apiKey !== "string" || !apiKey) {
+    res.status(400).json({ error: "apiKey is required" });
+    return;
   }
+  const agent = await getAgentByWidgetKey(apiKey);
+  if (!agent) {
+    res.status(404).json({ error: "Widget not found or disabled" });
+    return;
+  }
+  if (!(await enforceWidgetTenantBudget(req, res, POLICIES.widgetTtsTenant, agent.userId))) return;
 
-  const ttsResult = await synthesizeWidgetTTS(text, voice, language);
+  const voice = agent.voice || "nova";
+  const language = (!requestedLanguage || requestedLanguage === "auto") && agent.language
+    ? agent.language
+    : requestedLanguage || "en-US";
+
+  const meter = createRequestMeter({
+    userId: agent.userId,
+    source: "widget-tts",
+    estimate: { ttsProviders: ["sarvam", "openai"], ttsCharacters: text.length },
+  });
+  res.once("close", () => { void meter.finish(); });
+
+  let ttsResult;
+  try {
+    ttsResult = await synthesizeWidgetTTS(text, voice, language, meter);
+  } catch (err) {
+    if (!(err instanceof SpendLimitError)) throw err;
+    res.status(spendLimitHttpStatus(err)).json({ error: err.message, code: err.code });
+    return;
+  }
   if (!ttsResult.audio) {
     res.status(502).json({ error: "TTS failed" });
     return;
   }
-  console.log(`[widget/tts] lang=${language} provider=${ttsResult.provider ?? "none"} mime=${ttsResult.mimeType}`);
+  logger.info({ language, provider: ttsResult.provider ?? "none", mimeType: ttsResult.mimeType }, "Widget standalone TTS complete");
   res.json({ audio: ttsResult.audio, provider: ttsResult.provider, language, audioMimeType: ttsResult.mimeType });
-
-  // Fire-and-forget TTS cost logging for standalone endpoint
-  if (apiKey && ttsResult.provider) {
-    const agent = await getAgentByWidgetKey(apiKey);
-    if (agent) {
-      resolveTenantIdForOwner(agent.userId).then(tenantId => {
-        if (!tenantId) return;
-        return logTTSCost({
-          tenantId,
-          userId: agent.userId,
-          provider: ttsResult.provider === "openai" ? "openai" : "sarvam",
-          characters: text.length,
-          context: "widget-tts-standalone",
-        });
-      }).catch((e) => console.error("[widget] standalone TTS cost logging error:", e));
-    }
-  }
 });
 
-router.get("/widget/loader.js", async (req, res) => {
+router.get("/widget/loader.js", widgetConfigRateLimit, async (req, res) => {
   const { key } = req.query as { key?: string };
   if (!key) {
     res.status(400).type("application/javascript").send("console.error('Dialog widget: missing key parameter');");
@@ -2214,9 +2374,9 @@ router.get("/widget/loader.js", async (req, res) => {
   var micBlocked = false;
   var crmAuthRequired = false;
   var crmStep = "none";
-  var crmPhone = "";
+  var crmChallengeId = "";
+  var crmFactor = "";
   var crmSessionToken = "";
-  var crmPendingToken = "";
   var chatUnlocked = true;
   var SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   var hasSpeechAPI = !!SpeechRecognition;
@@ -2691,7 +2851,7 @@ router.get("/widget/loader.js", async (req, res) => {
 
   function sendMessage(msg, isVoice) {
     if (!msg) return;
-    if (crmAuthRequired && !chatUnlocked && !crmPendingToken) {
+    if (crmAuthRequired && !chatUnlocked) {
       handleCrmInput(msg);
       return;
     }
@@ -2713,7 +2873,6 @@ router.get("/widget/loader.js", async (req, res) => {
       sessionLanguage: sessionLang
     };
     if (crmSessionToken) chatBody.crmSessionToken = crmSessionToken;
-    if (crmPendingToken) chatBody.crmPendingToken = crmPendingToken;
     fetch(BASE_URL + "/api/widget/chat", {
       method: "POST",
       headers: {"Content-Type":"application/json"},
@@ -2722,27 +2881,26 @@ router.get("/widget/loader.js", async (req, res) => {
       return r.json().then(function(data) { return { ok: r.ok, status: r.status, data: data }; });
     }).then(function(res){
       setTyping(false);
-      if (!res.ok) {
-        var errMsg = (res.data && res.data.error) || "Something went wrong. Please try again.";
+      if (!res.ok && res.data && res.data.crmAuthRequired) {
+        addMsg(res.data.reply || "Please verify your phone number to continue.", "bot", false);
+        chatUnlocked = false;
+        if (res.data.crmOrderRequired && crmSessionToken) {
+          crmStep = "order";
+          input.placeholder = "Enter your order ID\\u2026";
+        } else {
+          crmSessionToken = "";
+          crmChallengeId = "";
+          crmStep = "phone";
+          input.placeholder = "Enter your registered phone number\\u2026";
+        }
+      } else if (!res.ok) {
+        var errMsg = (res.data && (res.data.reply || res.data.error)) || "Something went wrong. Please try again.";
         if (res.status === 404) errMsg = "This widget is not active. Please contact the site owner.";
         addMsg(errMsg, "bot", false);
       } else {
         var reply = res.data.reply || "I\u2019m sorry, I didn\u2019t understand that.";
         addMsg(reply, "bot", false);
         history.push({role:"assistant", content:reply});
-        if (res.data.crmSessionToken) {
-          crmSessionToken = res.data.crmSessionToken;
-          crmPendingToken = "";
-          chatUnlocked = true;
-          crmStep = "verified";
-          input.placeholder = "Type or speak\\u2026";
-        } else if (res.data.crmClearSession) {
-          crmSessionToken = "";
-          chatUnlocked = false;
-          crmStep = "order";
-          input.placeholder = "Enter your order ID\\u2026";
-        }
-        if (res.data.crmPendingToken) crmPendingToken = res.data.crmPendingToken;
         if (res.data.detectedLanguage) sessionLang = res.data.detectedLanguage;
         if (isVoice) {
           // Server pre-generated TTS chunks in parallel — play them directly
@@ -2782,51 +2940,99 @@ router.get("/widget/loader.js", async (req, res) => {
     setTyping(true);
     if (mic) mic.disabled = true;
 
-    if (crmStep === "phone") {
-      crmPhone = msg;
-      fetch(BASE_URL + "/api/widget/crm/verify-phone", {
+    function crmPost(path, body) {
+      body.apiKey = API_KEY;
+      return fetch(BASE_URL + "/api/widget/crm/" + path, {
         method: "POST",
         headers: {"Content-Type":"application/json"},
-        body: JSON.stringify({ apiKey: API_KEY, phone: msg })
-      }).then(function(r){ return r.json().then(function(d){ return { ok: r.ok, data: d }; }); })
-      .then(function(res){
-        setTyping(false);
-        var botMsg = (res.data && res.data.message) || "Could not verify phone number.";
-        addMsg(botMsg, "bot", false);
-        if (res.ok && res.data && res.data.success) {
-          crmStep = "order";
-          input.placeholder = "Enter your order ID\\u2026";
+        body: JSON.stringify(body)
+      }).then(function(r){ return r.json().then(function(d){ return { ok: r.ok, data: d || {} }; }); });
+    }
+    function done() { setTyping(false); if (mic) mic.disabled = false; }
+    function failed() { done(); addMsg("Something went wrong. Please try again.", "bot", false); }
+
+    function accessDisabled(res) {
+      if (res.ok || res.data.error !== "customer_access_disabled") return false;
+      crmAuthRequired = false;
+      chatUnlocked = true;
+      crmStep = "none";
+      input.placeholder = "Type or speak\\u2026";
+      return true;
+    }
+
+    if (crmStep === "phone") {
+      crmPost("verification/start", { phone: msg }).then(function(res){
+        done();
+        addMsg(res.data.message || "Could not start verification.", "bot", false);
+        if (accessDisabled(res)) return;
+        if (res.ok && res.data.success) {
+          crmChallengeId = res.data.challengeId || "";
+          crmFactor = res.data.factor || "";
+          crmStep = "factor";
+          input.placeholder = crmFactor === "code"
+            ? "Enter the 6-digit code (or type resend)\\u2026"
+            : crmFactor === "date_of_birth"
+              ? "DD/MM/YYYY\\u2026"
+              : "Last " + (res.data.length || 4) + " digits of your order ID\\u2026";
         }
-      }).catch(function(){
-        setTyping(false);
-        addMsg("Could not verify your phone number. Please try again.", "bot", false);
-      }).finally(function(){ if (mic) mic.disabled = false; });
+      }).catch(failed);
+      return;
+    }
+
+    if (crmStep === "factor") {
+      if (crmFactor === "code" && /^\\s*resend\\s*$/i.test(msg)) {
+        crmPost("verification/resend", { challengeId: crmChallengeId }).then(function(res){
+          done();
+          addMsg(res.data.message || "Could not resend the code.", "bot", false);
+        }).catch(failed);
+        return;
+      }
+      var factorBody = { challengeId: crmChallengeId };
+      if (crmFactor === "code") factorBody.code = msg.replace(/\\s+/g, "");
+      else if (crmFactor === "date_of_birth") factorBody.dateOfBirth = msg.trim();
+      else factorBody.orderDigits = msg.replace(/\\s+/g, "");
+      crmPost("verification/verify", factorBody).then(function(res){
+        done();
+        if (accessDisabled(res)) { addMsg(res.data.message || "Please continue.", "bot", false); return; }
+        if (res.ok && res.data.success) {
+          crmSessionToken = res.data.sessionToken || "";
+          crmChallengeId = "";
+          if (res.data.orderSelected) {
+            chatUnlocked = true;
+            crmStep = "verified";
+            input.placeholder = "Type or speak\\u2026";
+            var hello = res.data.greeting || res.data.message || "You're verified.";
+            history.push({role:"assistant", content:hello});
+            addMsg(hello, "bot", false);
+          } else {
+            crmStep = "order";
+            input.placeholder = "Enter your order ID\\u2026";
+            addMsg(res.data.message || "You're verified.", "bot", false);
+          }
+        } else {
+          addMsg(res.data.message || "Could not verify those details.", "bot", false);
+        }
+      }).catch(failed);
       return;
     }
 
     if (crmStep === "order") {
-      fetch(BASE_URL + "/api/widget/crm/verify-order", {
-        method: "POST",
-        headers: {"Content-Type":"application/json"},
-        body: JSON.stringify({ apiKey: API_KEY, phone: crmPhone || msg, orderId: msg })
-      }).then(function(r){ return r.json().then(function(d){ return { ok: r.ok, data: d }; }); })
-      .then(function(res){
-        setTyping(false);
-        var botMsg = (res.data && res.data.message) || "Could not verify order.";
-        if (res.ok && res.data && res.data.success) {
-          crmSessionToken = res.data.sessionToken || "";
-          crmPendingToken = "";
+      crmPost("select-order", { sessionToken: crmSessionToken, orderId: msg }).then(function(res){
+        done();
+        var botMsg = res.data.message || "Could not find that order.";
+        if (res.ok && res.data.success) {
           chatUnlocked = true;
           crmStep = "verified";
           input.placeholder = "Type or speak\\u2026";
           botMsg = res.data.greeting || botMsg;
           history.push({role:"assistant", content:botMsg});
+        } else if (res.data.crmAuthRequired) {
+          crmSessionToken = "";
+          crmStep = "phone";
+          input.placeholder = "Enter your registered phone number\\u2026";
         }
         addMsg(botMsg, "bot", false);
-      }).catch(function(){
-        setTyping(false);
-        addMsg("Could not verify your order. Please try again.", "bot", false);
-      }).finally(function(){ if (mic) mic.disabled = false; });
+      }).catch(failed);
     }
   }
 

@@ -70,6 +70,8 @@ export const DEFAULT_API_RATES: Record<string, number> = {
   // LLM rates per 1M tokens
   "llm:gpt-4o-mini:input":     0.15,
   "llm:gpt-4o-mini:output":    0.60,
+  "llm:gpt-4o:input":          2.50,
+  "llm:gpt-4o:output":        10.00,
   "llm:deepseek-chat:input":   0.27,
   "llm:deepseek-chat:output":  1.10,
   "llm:sarvam-m:input":        0.15,
@@ -79,7 +81,26 @@ export const DEFAULT_API_RATES: Record<string, number> = {
   "tts:openai":               15.00,
   // STT rate per minute
   "stt:whisper":               0.006,
+  // Telephony rates per started minute (previously hard-coded in call completion)
+  "telephony:twilio:outbound": 0.013,
+  "telephony:twilio:inbound":  0.022,
+  "telephony:twilio:client":   0.004,
 };
+
+// Rates the platform can price but has no default for. Usage that needs one of
+// these is recorded as needs_reconciliation until a super admin sets it.
+export const CONFIGURABLE_RATE_KEYS: readonly string[] = [
+  ...Object.keys(DEFAULT_API_RATES),
+  "llm:gpt-4o-mini:cached_input",
+  "llm:gpt-4o:cached_input",
+  "llm:deepseek-chat:cached_input",
+  "stt:sarvam",
+  "stt:twilio-gather",
+  "telephony:twilio:conference",
+  "telephony:twilio-sip:outbound",
+  "telephony:exotel:outbound",
+  "telephony:exotel:inbound",
+];
 
 export const insertApiCostLogSchema = createInsertSchema(apiCostLogsTable).omit({ id: true, createdAt: true });
 export type InsertApiCostLog = z.infer<typeof insertApiCostLogSchema>;

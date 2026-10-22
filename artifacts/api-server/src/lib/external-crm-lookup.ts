@@ -2,6 +2,10 @@ import { db, externalCrmConfigsTable } from "@workspace/db";
 import type { ExternalCrmConfig, ExternalCrmResponseMapping } from "@workspace/db";
 import { eq } from "drizzle-orm";
 import { logger } from "./logger";
+import { safeUrl } from "./log-redaction";
+import { crmHttp } from "./crm-http";
+import { describeOutboundError, OutboundRequestError } from "./safe-outbound-http";
+import { CredentialError, openCredential } from "./credential-crypto";
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -108,64 +112,72 @@ function stringifyValue(val: unknown): string | undefined {
 
 // ── HTTP request builder ───────────────────────────────────────────────
 
-function buildAuthHeaders(config: ExternalCrmConfig): Record<string, string> {
+export const CRM_LOOKUP_MAX_RESPONSE_BYTES = 1024 * 1024;
+
+/**
+ * Throws CredentialError if a stored auth value cannot be decrypted, so a
+ * request is never sent without the tenant's configured authentication.
+ */
+export function buildAuthHeaders(
+  config: Pick<ExternalCrmConfig, "userId" | "authType" | "authValue" | "authHeaderName">,
+): Record<string, string> {
   const headers: Record<string, string> = { "Accept": "application/json" };
 
-  if (!config.authValue) return headers;
+  const authValue = openCredential("crmAuthValue", config.userId, config.authValue);
+  if (!authValue) return headers;
 
   switch (config.authType) {
     case "bearer":
-      headers["Authorization"] = `Bearer ${config.authValue}`;
+      headers["Authorization"] = `Bearer ${authValue}`;
       break;
     case "api_key":
-      headers["X-API-Key"] = config.authValue;
+      headers["X-API-Key"] = authValue;
       break;
     case "basic":
-      headers["Authorization"] = `Basic ${Buffer.from(config.authValue).toString("base64")}`;
+      headers["Authorization"] = `Basic ${Buffer.from(authValue).toString("base64")}`;
       break;
     case "header":
-      headers[config.authHeaderName || "X-Auth-Token"] = config.authValue;
+      headers[config.authHeaderName || "X-Auth-Token"] = authValue;
       break;
   }
 
   return headers;
 }
 
-async function callExternalCrm(config: ExternalCrmConfig, phone: string): Promise<unknown> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), config.timeoutMs);
+/**
+ * Sends the tenant's configured lookup through the SSRF-protected client and
+ * returns the parsed body, or null for a non-2xx response. Destination
+ * rejections and transport failures throw OutboundRequestError.
+ */
+export async function requestCrmLookup(config: ExternalCrmConfig, phone: string): Promise<unknown> {
+  let url = config.lookupUrl;
+  const headers = buildAuthHeaders(config);
+  let body: string | undefined;
 
-  try {
-    let url = config.lookupUrl;
-    const headers = buildAuthHeaders(config);
-    let body: string | undefined;
-
-    if (config.phoneParamLocation === "path") {
-      url = url.replace(/\{phone\}/g, encodeURIComponent(phone));
-    } else if (config.httpMethod === "GET" || config.phoneParamLocation === "query") {
-      const separator = url.includes("?") ? "&" : "?";
-      url = `${url}${separator}${encodeURIComponent(config.phoneParamName)}=${encodeURIComponent(phone)}`;
-    } else {
-      headers["Content-Type"] = "application/json";
-      body = JSON.stringify({ [config.phoneParamName]: phone });
-    }
-
-    const response = await fetch(url, {
-      method: config.httpMethod,
-      headers,
-      body,
-      signal: controller.signal,
-    });
-
-    if (!response.ok) {
-      logger.warn({ status: response.status, url }, "External CRM lookup returned non-OK status");
-      return null;
-    }
-
-    return await response.json();
-  } finally {
-    clearTimeout(timeout);
+  if (config.phoneParamLocation === "path") {
+    url = url.replace(/\{phone\}/g, encodeURIComponent(phone));
+  } else if (config.httpMethod === "GET" || config.phoneParamLocation === "query") {
+    const separator = url.includes("?") ? "&" : "?";
+    url = `${url}${separator}${encodeURIComponent(config.phoneParamName)}=${encodeURIComponent(phone)}`;
+  } else {
+    headers["Content-Type"] = "application/json";
+    body = JSON.stringify({ [config.phoneParamName]: phone });
   }
+
+  const response = await crmHttp.request(url, {
+    method: config.httpMethod,
+    headers,
+    body,
+    timeoutMs: config.timeoutMs,
+    maxResponseBytes: CRM_LOOKUP_MAX_RESPONSE_BYTES,
+  });
+
+  if (!response.ok) {
+    logger.warn({ status: response.status, lookupUrl: safeUrl(config.lookupUrl) }, "External CRM lookup returned non-OK status");
+    return null;
+  }
+
+  return response.json();
 }
 
 // ── Response mapping ───────────────────────────────────────────────────
@@ -303,24 +315,28 @@ export async function fetchExternalCrmData(
 
     const cached = getCachedData(userId, phone);
     if (cached) {
-      logger.debug({ userId, phone }, "External CRM data served from cache");
+      logger.debug({ userId }, "External CRM data served from cache");
       return cached;
     }
 
-    const responseBody = await callExternalCrm(config, phone);
+    const responseBody = await requestCrmLookup(config, phone);
     if (responseBody == null) return null;
 
     const ctx = mapResponse(responseBody, config);
 
     setCachedData(userId, phone, ctx, config.cacheTtlSeconds);
-    logger.info({ userId, phone, hasName: !!ctx.customerName }, "External CRM data fetched successfully");
+    logger.info({ userId, hasName: !!ctx.customerName }, "External CRM data fetched successfully");
 
     return ctx;
   } catch (err: any) {
-    if (err.name === "AbortError") {
-      logger.warn({ userId, phone }, "External CRM lookup timed out");
+    if (err instanceof OutboundRequestError && err.blocked) {
+      logger.warn({ userId, reason: err.reason }, "External CRM destination rejected");
+    } else if (err instanceof OutboundRequestError && err.reason === "timeout") {
+      logger.warn({ userId }, "External CRM lookup timed out");
+    } else if (err instanceof CredentialError) {
+      logger.error({ event: "credential_unavailable", field: "crmAuthValue", ownerId: userId, reason: err.reason }, "Stored credential unavailable");
     } else {
-      logger.error({ err, userId, phone }, "External CRM lookup failed");
+      logger.error({ err, userId }, "External CRM lookup failed");
     }
     return null;
   }
@@ -339,7 +355,7 @@ export async function testExternalCrmLookup(
       return { success: false, error: "No external CRM configuration found" };
     }
 
-    const responseBody = await callExternalCrm(config, phone);
+    const responseBody = await requestCrmLookup(config, phone);
     if (responseBody == null) {
       return { success: false, error: "CRM returned empty or non-OK response" };
     }
@@ -351,10 +367,19 @@ export async function testExternalCrmLookup(
       context: ctx,
       rawResponse: responseBody,
     };
-  } catch (err: any) {
+  } catch (err: unknown) {
+    if (err instanceof OutboundRequestError && err.blocked) {
+      logger.warn({ userId, reason: err.reason }, "External CRM destination rejected");
+    }
+    // Transport error text (resolved addresses, ports, TLS detail) would let
+    // a tenant probe the network, so only a fixed description is returned.
+    if (err instanceof CredentialError) {
+      logger.error({ event: "credential_unavailable", field: "crmAuthValue", ownerId: userId, reason: err.reason }, "Stored credential unavailable");
+      return { success: false, error: "Stored CRM credential could not be decrypted; re-enter it to continue" };
+    }
     return {
       success: false,
-      error: err.name === "AbortError" ? "Request timed out" : err.message,
+      error: err instanceof SyntaxError ? "CRM returned invalid JSON" : describeOutboundError(err),
     };
   }
 }

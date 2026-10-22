@@ -2,8 +2,28 @@ import { Router, type IRouter } from "express";
 import { db, externalCrmConfigsTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
 import { invalidateExternalCrmConfigCache, testExternalCrmLookup } from "../lib/external-crm-lookup";
+import { crmHttp } from "../lib/crm-http";
+import { sealCredential } from "../lib/credential-crypto";
+import { crmTestRateLimit } from "../lib/rate-limit-policies";
 
 const router: IRouter = Router();
+
+const PHONE_PLACEHOLDER = "phoneplaceholder0";
+
+const RESERVED_AUTH_HEADERS = new Set([
+  "host",
+  "connection",
+  "content-length",
+  "content-type",
+  "transfer-encoding",
+  "te",
+  "trailer",
+  "upgrade",
+  "keep-alive",
+  "expect",
+  "proxy-authorization",
+  "proxy-connection",
+]);
 
 // GET /api/external-crm/config — Get current CRM config
 router.get("/external-crm/config", async (req, res) => {
@@ -86,10 +106,32 @@ router.put("/external-crm/config", async (req, res) => {
     return;
   }
 
+  // Request time re-validates the final URL and every resolved address; this
+  // only rejects unusable destinations before they are stored.
   try {
-    new URL(lookupUrl);
+    const parsed = crmHttp.assertUrl(String(lookupUrl).replace(/\{phone\}/g, PHONE_PLACEHOLDER));
+    // The caller's phone may only be substituted into the path or query.
+    if (parsed.host.includes(PHONE_PLACEHOLDER)) throw new Error("phone placeholder in host");
   } catch {
-    res.status(400).json({ error: "Invalid lookupUrl format" });
+    res.status(400).json({ error: "lookupUrl must be a public HTTPS URL without embedded credentials" });
+    return;
+  }
+  const chatWebhookUrl = typeof widgetChatWebhookUrl === "string" ? widgetChatWebhookUrl.trim() : "";
+  if (chatWebhookUrl) {
+    try {
+      crmHttp.assertUrl(chatWebhookUrl);
+    } catch {
+      res.status(400).json({ error: "widgetChatWebhookUrl must be a public HTTPS URL without embedded credentials" });
+      return;
+    }
+  }
+  if (
+    authHeaderName &&
+    (typeof authHeaderName !== "string" ||
+      !/^[A-Za-z0-9-]{1,64}$/.test(authHeaderName) ||
+      RESERVED_AUTH_HEADERS.has(authHeaderName.toLowerCase()))
+  ) {
+    res.status(400).json({ error: "authHeaderName is not a valid custom header name" });
     return;
   }
 
@@ -119,16 +161,16 @@ router.put("/external-crm/config", async (req, res) => {
     endingNoteLeadSeconds: Math.max(0, Number(endingNoteLeadSeconds) ?? 2),
     callInstructions: callInstructions?.trim() || null,
     verifyIdentity: verifyIdentity === true,
-    widgetChatWebhookUrl: widgetChatWebhookUrl?.trim() || null,
+    widgetChatWebhookUrl: chatWebhookUrl || null,
     widgetChatSyncEnabled: widgetChatSyncEnabled === true,
     updatedAt: new Date(),
   };
 
   // Only update authValue if a new non-masked value is provided
   if (authValue && authValue !== "***configured***") {
-    data.authValue = authValue;
+    data.authValue = sealCredential("crmAuthValue", userId, String(authValue));
   } else if (!existing) {
-    data.authValue = authValue || null;
+    data.authValue = null;
   }
 
   if (existing) {
@@ -170,7 +212,7 @@ router.delete("/external-crm/config", async (req, res) => {
 });
 
 // POST /api/external-crm/test — Test the CRM lookup with a phone number
-router.post("/external-crm/test", async (req, res) => {
+router.post("/external-crm/test", crmTestRateLimit, async (req, res) => {
   const userId = req.userId!;
   const { phone } = req.body;
 

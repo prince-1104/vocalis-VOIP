@@ -3,7 +3,7 @@ import { Link } from "wouter";
 import {
   DollarSign, AlertTriangle, TrendingUp, Building2, ChevronRight,
   Loader2, Shield, ShieldAlert, ShieldCheck, Send, Save, ArrowLeft,
-  BarChart3, Cpu, Volume2, Mic, Download, Layers
+  BarChart3, Cpu, Volume2, Mic, Download, Layers, Phone
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -51,8 +51,10 @@ interface TenantDetail {
     minutes: number;
     callCount: number;
   }>;
-  subtotals: { llm: number; tts: number; stt: number };
+  subtotals: { llm: number; tts: number; stt: number; telephony?: number };
   grandTotal: number;
+  /** Usage recorded without a configured rate; excluded from the totals until reconciled. */
+  unpricedEntries?: number;
   callCount: number;
   monthlyLimitUsd: number;
   hardLimit: boolean;
@@ -432,19 +434,26 @@ function DetailView({
 
   const maxTrend = Math.max(...detail.trend.map(t => t.costUsd), 0.001);
 
+  // Keys are category:provider:model from the usage ledger.
   const providerLabels: Record<string, string> = {
-    "llm:gpt-4o-mini": "GPT-4o Mini",
-    "llm:deepseek-chat": "DeepSeek V3",
-    "llm:sarvam-m": "Sarvam-M",
-    "tts:sarvam": "Sarvam Bulbul v3",
-    "tts:openai": "OpenAI TTS",
-    "stt:whisper": "Whisper STT",
+    "llm:openai:gpt-4o-mini": "GPT-4o Mini",
+    "llm:openai:gpt-4o": "GPT-4o",
+    "llm:deepseek:deepseek-chat": "DeepSeek V3",
+    "llm:sarvam:sarvam-m": "Sarvam-M",
+    "tts:sarvam:bulbul:v3": "Sarvam Bulbul v3",
+    "tts:openai:tts-1": "OpenAI TTS",
+    "stt:openai:whisper-1": "Whisper STT",
+    "stt:sarvam:saaras:v3": "Sarvam Saaras STT",
+    "telephony:twilio:voice-outbound": "Twilio outbound",
+    "telephony:twilio:voice-inbound": "Twilio inbound",
+    "telephony:twilio:voice-client": "Twilio browser voice",
   };
 
   const providerIcons: Record<string, typeof Cpu> = {
     "llm:": Cpu,
     "tts:": Volume2,
     "stt:": Mic,
+    "telephony:": Phone,
   };
 
   function getProviderIcon(provider: string) {
@@ -553,11 +562,17 @@ function DetailView({
       </div>
 
       {/* Category Subtotals */}
-      <div className="grid grid-cols-3 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <SubtotalCard label="LLM" value={detail.subtotals.llm} icon={Cpu} />
         <SubtotalCard label="TTS" value={detail.subtotals.tts} icon={Volume2} />
         <SubtotalCard label="STT" value={detail.subtotals.stt} icon={Mic} />
+        <SubtotalCard label="Telephony" value={detail.subtotals.telephony ?? 0} icon={Phone} />
       </div>
+      {(detail.unpricedEntries ?? 0) > 0 && (
+        <p className="text-sm text-amber-400">
+          {detail.unpricedEntries} usage entries have no configured rate and are not included in these totals until reconciled.
+        </p>
+      )}
 
       {/* Per-Provider Breakdown */}
       <div className="glass-panel rounded-xl border border-white/5 overflow-hidden">

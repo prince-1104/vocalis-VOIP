@@ -1,4 +1,5 @@
-import { pgTable, text, serial, timestamp, integer, numeric } from "drizzle-orm/pg-core";
+import { pgTable, text, serial, timestamp, integer, numeric, jsonb, boolean, uniqueIndex } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 import { tenantsTable } from "./tenants";
@@ -16,9 +17,16 @@ export const invoicesTable = pgTable("invoices", {
   dueDate: timestamp("due_date"),
   paidAt: timestamp("paid_at"),
   notes: text("notes"),
+  // "call_logs": legacy estimate-based invoice. "ledger": built from usage_ledger.
+  source: text("source").notNull().default("call_logs"),
+  currency: text("currency").notNull().default("USD"),
+  rateVersions: jsonb("rate_versions").$type<string[]>(),
+  usageSummary: jsonb("usage_summary").$type<Record<string, unknown>>(),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
-});
+}, (table) => [
+  uniqueIndex("invoices_ledger_tenant_period_idx").on(table.tenantId, table.period).where(sql`source = 'ledger'`),
+]);
 
 export const invoiceLineItemsTable = pgTable("invoice_line_items", {
   id: serial("id").primaryKey(),
@@ -29,6 +37,10 @@ export const invoiceLineItemsTable = pgTable("invoice_line_items", {
   durationSeconds: integer("duration_seconds"),
   phone: text("phone"),
   startedAt: timestamp("started_at"),
+  description: text("description"),
+  category: text("category"),
+  usageCount: integer("usage_count"),
+  estimated: boolean("estimated"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 

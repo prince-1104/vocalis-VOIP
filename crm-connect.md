@@ -82,7 +82,7 @@ Your CRM can integrate with Dialog to trigger calls, receive real-time events, a
 │  │  • Intent Classifier (GPT-4o-mini)                            │   │
 │  └─────────────────────┬──────────────────────────────────────────┘   │
 │                        │                                               │
-│  ┌─────────────────────▼──────────────────────────────────────────┐   │
+│  ┌───────────────────────────────▼────────────────────────────────┐   │
 │  │                     Twilio (Telephony)                          │   │
 │  │  • PSTN calls (inbound + outbound)                             │   │
 │  │  • Conference rooms for transfers                              │   │

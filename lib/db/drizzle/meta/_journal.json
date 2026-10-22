@@ -15,6 +15,62 @@
       "when": 1781233203139,
       "tag": "0001_hot_christian_walker",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1792627200000,
+      "tag": "0002_call_media_sessions",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1792658650391,
+      "tag": "0003_widget_customer_verification",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1792660557140,
+      "tag": "0004_widget_verification_policies",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1792661782843,
+      "tag": "0005_twilio_webhook_idempotency",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1792666290120,
+      "tag": "0006_api_rate_limits",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1792678956026,
+      "tag": "0007_campaign_dispatch_and_suppression",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1792681370436,
+      "tag": "0008_usage_ledger_and_budgets",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1792686113229,
+      "tag": "0009_schema_reconciliation",
+      "breakpoints": true
     }
   ]
 }

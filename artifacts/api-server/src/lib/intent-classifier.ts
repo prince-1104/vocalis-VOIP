@@ -1,5 +1,7 @@
 import { openai } from "@workspace/integrations-openai-ai-server";
 import { logger } from "./logger";
+import { recordLlmCall, reportedUsage } from "./billing/llm-usage";
+import type { UsageScope } from "./billing/usage-ledger";
 
 // ── Intent Classification ──────────────────────────────────────────────
 // Hybrid classifier: fast regex/keyword patterns first (~0ms), LLM fallback
@@ -211,19 +213,18 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, errorMessage = "
 }
 
 // ── LLM-based fallback classifier ────────────────────────────────────
+const CLASSIFIER_MODEL = "gpt-4o-mini";
+const CLASSIFIER_MAX_TOKENS = 60;
+
 async function classifyByLLM(
   history: { role: string; content: string }[],
   latestUserMessage: string,
+  usage?: UsageScope,
 ): Promise<IntentResult> {
-  const completionPromise = openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    max_completion_tokens: 60,
-    temperature: 0,
-    response_format: { type: "json_object" },
-    messages: [
-      {
-        role: "system",
-        content: `You are an intent classifier for sales calls. Classify the caller's PRIMARY intent.
+  const messages = [
+    {
+      role: "system" as const,
+      content: `You are an intent classifier for sales calls. Classify the caller's PRIMARY intent.
 
 Output ONLY valid JSON: {"intent": "<intent_name>", "confidence": <0.0-1.0>, "needsHuman": <true/false>}
 
@@ -231,11 +232,26 @@ Possible intents: ${KNOWN_INTENTS.join(", ")}
 
 needsHuman=true for: complaint, escalation, complex billing dispute, unresolvable technical issue.
 needsHuman=false for: inquiry, greeting, pricing question, appointment, objection handling.`,
-      },
-      ...history.slice(-4).map(h => ({ role: h.role as "user" | "assistant", content: h.content })),
-      { role: "user" as const, content: latestUserMessage },
-    ],
+    },
+    ...history.slice(-4).map(h => ({ role: h.role as "user" | "assistant", content: h.content })),
+    { role: "user" as const, content: latestUserMessage },
+  ];
+  const completionPromise = openai.chat.completions.create({
+    model: CLASSIFIER_MODEL,
+    max_completion_tokens: CLASSIFIER_MAX_TOKENS,
+    temperature: 0,
+    response_format: { type: "json_object" },
+    messages,
   });
+
+  // Recorded when the provider answers, even after the classification timeout below.
+  if (usage) {
+    const base = { provider: "openai", model: CLASSIFIER_MODEL, promptTexts: messages.map((m) => m.content), key: "intent" };
+    completionPromise.then(
+      (response) => recordLlmCall(usage, { ...base, usage: reportedUsage(response.usage), outputText: response.choices[0]?.message?.content }),
+      (err) => recordLlmCall(usage, { ...base, usage: null, maxOutputTokens: CLASSIFIER_MAX_TOKENS, failure: err }),
+    );
+  }
 
   const response = await withTimeout(completionPromise, 1000, "LLM classification timeout");
 
@@ -256,6 +272,7 @@ export async function classifyIntent(
   history: { role: string; content: string }[],
   latestUserMessage: string,
   useLLMFallback = false,
+  usage?: UsageScope,
 ): Promise<IntentResult> {
   // 1. Try fast pattern matching first (~0ms)
   try {
@@ -277,7 +294,7 @@ export async function classifyIntent(
 
     // 3. LLM fallback — only when caller explicitly enabled AND pattern was uncertain
     if (useLLMFallback) {
-      return await classifyByLLM(history, latestUserMessage);
+      return await classifyByLLM(history, latestUserMessage, usage);
     }
 
     // 4. Pattern result (even low confidence) or safe default

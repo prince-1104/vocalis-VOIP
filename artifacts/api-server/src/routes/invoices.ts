@@ -1,15 +1,26 @@
 import { Router, type IRouter } from "express";
-import { db, invoicesTable, invoiceLineItemsTable, callLogsTable, tenantsTable } from "@workspace/db";
-import { eq, and, gte, lt, desc, sql } from "drizzle-orm";
+import { db, invoicesTable, invoiceLineItemsTable, tenantsTable, usageLedgerTable } from "@workspace/db";
+import { eq, and, desc, gte, lt } from "drizzle-orm";
 import { requireSuperadmin, resolveUser, requireRole } from "../middleware/auth";
+import { adminMutationRateLimit } from "../lib/rate-limit-policies";
+import { logger } from "../lib/logger";
+import {
+  addInvoiceAdjustment,
+  generateLedgerInvoice,
+  invoiceAdjustments,
+  invoiceAmountDue,
+  InvoiceError,
+  validAdjustmentAmount,
+} from "../lib/billing/invoicing";
+import { billingPeriod, getBudgetState, periodBounds } from "../lib/billing/spend-budget";
+import { roundMoney } from "../lib/billing/rate-card";
 
 const router: IRouter = Router();
 
-function periodBounds(period: string): { start: Date; end: Date } {
-  const [year, month] = period.split("-").map(Number);
-  const start = new Date(year, month - 1, 1);
-  const end = new Date(year, month, 1);
-  return { start, end };
+/** Errors are logged server-side; clients get a generic message (no driver or SQL detail). */
+function sendServerError(res: any, err: unknown, operation: string) {
+  logger.error({ err, operation }, "Invoice request failed");
+  res.status(500).json({ error: "Invoice request failed" });
 }
 
 export async function checkAndMarkOverdueInvoices(): Promise<void> {
@@ -22,6 +33,8 @@ export async function checkAndMarkOverdueInvoices(): Promise<void> {
 
   for (const invoice of sentInvoices) {
     if (invoice.dueDate && invoice.dueDate < now) {
+      // Credits can settle an invoice in full; nothing owed is never grounds for suspension.
+      if (await invoiceAmountDue(invoice) <= 0) continue;
       await db.update(invoicesTable)
         .set({ status: "overdue", updatedAt: new Date() })
         .where(eq(invoicesTable.id, invoice.id));
@@ -33,9 +46,17 @@ export async function checkAndMarkOverdueInvoices(): Promise<void> {
   }
 }
 
-router.use(resolveUser);
+async function withAdjustments<T extends { id: number; totalBilledCostUsd: string }>(invoice: T) {
+  const { rows, adjustmentTotal } = await invoiceAdjustments(invoice.id);
+  return {
+    adjustments: rows,
+    adjustedTotalBilledCostUsd: roundMoney(Number(invoice.totalBilledCostUsd) + adjustmentTotal).toFixed(6),
+  };
+}
 
-router.get("/superadmin/invoices", requireSuperadmin, async (req, res) => {
+router.use(["/invoices", "/superadmin/invoices", "/usage"], resolveUser);
+
+router.get("/superadmin/invoices", requireSuperadmin, async (_req, res) => {
   try {
     const invoices = await db
       .select({
@@ -51,6 +72,8 @@ router.get("/superadmin/invoices", requireSuperadmin, async (req, res) => {
         dueDate: invoicesTable.dueDate,
         paidAt: invoicesTable.paidAt,
         notes: invoicesTable.notes,
+        source: invoicesTable.source,
+        currency: invoicesTable.currency,
         createdAt: invoicesTable.createdAt,
         updatedAt: invoicesTable.updatedAt,
       })
@@ -60,100 +83,58 @@ router.get("/superadmin/invoices", requireSuperadmin, async (req, res) => {
 
     res.json({ invoices });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : "Unknown error";
-    res.status(500).json({ error: msg });
+    sendServerError(res, err, "list");
   }
 });
 
-router.post("/superadmin/invoices/generate", requireSuperadmin, async (req, res) => {
+router.post("/superadmin/invoices/generate", requireSuperadmin, adminMutationRateLimit, async (req, res) => {
+  const { tenantId, period, notes, allowIncomplete } = req.body as {
+    tenantId?: unknown;
+    period?: unknown;
+    notes?: unknown;
+    allowIncomplete?: unknown;
+  };
+  if (typeof tenantId !== "number" || !Number.isInteger(tenantId) || tenantId <= 0 || typeof period !== "string") {
+    res.status(400).json({ error: "tenantId and period (YYYY-MM) are required" });
+    return;
+  }
+  if (notes !== undefined && notes !== null && (typeof notes !== "string" || notes.length > 2000)) {
+    res.status(400).json({ error: "notes must be a string of at most 2000 characters" });
+    return;
+  }
   try {
-    const { tenantId, period, notes } = req.body as {
-      tenantId: number;
-      period: string;
-      notes?: string;
-    };
-
-    if (!tenantId || !period || !/^\d{4}-\d{2}$/.test(period)) {
-      res.status(400).json({ error: "tenantId and period (YYYY-MM) are required" });
-      return;
-    }
-
-    const existing = await db.query.invoicesTable.findFirst({
-      where: and(eq(invoicesTable.tenantId, tenantId), eq(invoicesTable.period, period)),
-    });
-    if (existing) {
-      res.status(409).json({ error: "Invoice already exists for this tenant and period", invoiceId: existing.id });
-      return;
-    }
-
-    const tenant = await db.query.tenantsTable.findFirst({ where: eq(tenantsTable.id, tenantId) });
-    if (!tenant || !tenant.ownerId) {
-      res.status(404).json({ error: "Tenant not found" });
-      return;
-    }
-
-    const commissionPct = parseFloat(tenant.commissionPct ?? "0");
-    const { start, end } = periodBounds(period);
-
-    const calls = await db.select().from(callLogsTable)
-      .where(and(
-        eq(callLogsTable.userId, tenant.ownerId),
-        gte(callLogsTable.startedAt, start),
-        lt(callLogsTable.startedAt, end),
-      ));
-
-    const totalRawCost = calls.reduce((sum, c) => sum + parseFloat(c.estimatedCostUsd ?? "0"), 0);
-
-    const totalBilledCost = calls.reduce((sum, c) => {
-      const rawCost = parseFloat(c.estimatedCostUsd ?? "0");
-      if (c.billedCostUsd !== null && c.billedCostUsd !== undefined) {
-        return sum + parseFloat(c.billedCostUsd);
-      }
-      return sum + rawCost * (1 + commissionPct / 100);
-    }, 0);
-
-    const commissionUsd = totalBilledCost - totalRawCost;
-
-    const paymentTermsDays = tenant.paymentTermsDays ?? 30;
-    const dueDate = new Date();
-    dueDate.setDate(dueDate.getDate() + paymentTermsDays);
-
-    const [invoice] = await db.insert(invoicesTable).values({
+    const result = await generateLedgerInvoice({
       tenantId,
       period,
-      totalRawCostUsd: totalRawCost.toFixed(6),
-      totalBilledCostUsd: totalBilledCost.toFixed(6),
-      commissionUsd: commissionUsd.toFixed(6),
-      commissionPct: commissionPct.toFixed(2),
-      status: "draft",
-      dueDate,
-      notes: notes || null,
-    }).returning();
-
-    if (calls.length > 0) {
-      await db.insert(invoiceLineItemsTable).values(
-        calls.map((c) => {
-          const raw = parseFloat(c.estimatedCostUsd ?? "0");
-          const billed = c.billedCostUsd !== null && c.billedCostUsd !== undefined
-            ? parseFloat(c.billedCostUsd)
-            : raw * (1 + commissionPct / 100);
-          return {
-            invoiceId: invoice.id,
-            callLogId: c.id,
-            rawCostUsd: raw.toFixed(6),
-            billedCostUsd: billed.toFixed(6),
-            durationSeconds: c.duration,
-            phone: c.phone,
-            startedAt: c.startedAt,
-          };
-        })
-      );
-    }
-
-    res.status(201).json({ invoice, callCount: calls.length });
+      notes: (notes as string | null | undefined) ?? null,
+      allowIncomplete: allowIncomplete === true,
+    });
+    res.status(201).json(result);
   } catch (err) {
-    const msg = err instanceof Error ? err.message : "Unknown error";
-    res.status(500).json({ error: msg });
+    if (err instanceof InvoiceError) {
+      switch (err.code) {
+        case "invalid_period":
+          res.status(400).json({ error: "tenantId and period (YYYY-MM) are required" });
+          return;
+        case "tenant_not_found":
+          res.status(404).json({ error: "Tenant not found" });
+          return;
+        case "invoice_exists":
+          res.status(409).json({ error: "Invoice already exists for this tenant and period", ...err.details });
+          return;
+        case "usage_incomplete":
+          res.status(409).json({
+            error: "Usage for this period is not final. Reconcile it first, or pass allowIncomplete to carry it to a later invoice.",
+            code: "usage_incomplete",
+            ...err.details,
+          });
+          return;
+        case "usage_claimed":
+          res.status(409).json({ error: "Usage was claimed by a concurrent invoice; retry", code: "usage_claimed" });
+          return;
+      }
+    }
+    sendServerError(res, err, "generate");
   }
 });
 
@@ -171,14 +152,43 @@ router.get("/superadmin/invoices/:id", requireSuperadmin, async (req, res) => {
 
     const tenant = await db.query.tenantsTable.findFirst({ where: eq(tenantsTable.id, invoice.tenantId) });
 
-    res.json({ invoice, lineItems, tenant });
+    res.json({ invoice, lineItems, tenant, ...(await withAdjustments(invoice)) });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : "Unknown error";
-    res.status(500).json({ error: msg });
+    sendServerError(res, err, "get");
   }
 });
 
-router.patch("/superadmin/invoices/:id", requireSuperadmin, async (req, res) => {
+router.post("/superadmin/invoices/:id/adjustments", requireSuperadmin, adminMutationRateLimit, async (req, res) => {
+  const id = parseInt(String(req.params.id));
+  const { billedAmountUsd, rawAmountUsd, reason } = req.body as { billedAmountUsd?: unknown; rawAmountUsd?: unknown; reason?: unknown };
+  if (!Number.isInteger(id) || id <= 0) {
+    res.status(400).json({ error: "Invalid invoice id" });
+    return;
+  }
+  if (!validAdjustmentAmount(billedAmountUsd) || (rawAmountUsd !== undefined && !validAdjustmentAmount(rawAmountUsd))) {
+    res.status(400).json({ error: "billedAmountUsd (and optional rawAmountUsd) must be finite USD amounts" });
+    return;
+  }
+  if (typeof reason !== "string" || reason.trim().length < 3 || reason.length > 500) {
+    res.status(400).json({ error: "reason must be 3 to 500 characters" });
+    return;
+  }
+  try {
+    const adjustment = await addInvoiceAdjustment({
+      invoiceId: id,
+      billedAmountUsd,
+      rawAmountUsd: rawAmountUsd as number | undefined,
+      reason: reason.trim(),
+      createdBy: req.userId ?? null,
+    });
+    if (!adjustment) { res.status(404).json({ error: "Invoice not found" }); return; }
+    res.status(201).json({ adjustment });
+  } catch (err) {
+    sendServerError(res, err, "adjust");
+  }
+});
+
+router.patch("/superadmin/invoices/:id", requireSuperadmin, adminMutationRateLimit, async (req, res) => {
   try {
     const id = parseInt(String(req.params.id));
     const { status, notes } = req.body as { status?: string; notes?: string };
@@ -219,8 +229,7 @@ router.patch("/superadmin/invoices/:id", requireSuperadmin, async (req, res) => 
 
     res.json({ invoice: updated });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : "Unknown error";
-    res.status(500).json({ error: msg });
+    sendServerError(res, err, "update");
   }
 });
 
@@ -233,8 +242,46 @@ router.get("/invoices", requireRole("admin", "manager"), async (req, res) => {
 
     res.json({ invoices });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : "Unknown error";
-    res.status(500).json({ error: msg });
+    sendServerError(res, err, "tenant_list");
+  }
+});
+
+/** The tenant's own usage this UTC month: settled spend, active holds and the limit. */
+router.get("/usage/summary", requireRole("admin", "manager"), async (req, res) => {
+  try {
+    const tenantId = req.tenantId!;
+    const period = billingPeriod();
+    const { start, end } = periodBounds(period);
+    const [state, entries] = await Promise.all([
+      getBudgetState(tenantId),
+      db.select().from(usageLedgerTable).where(and(
+        eq(usageLedgerTable.tenantId, tenantId),
+        gte(usageLedgerTable.eventAt, start),
+        lt(usageLedgerTable.eventAt, end),
+      )),
+    ]);
+    const byCategory: Record<string, { billableUsd: number; entries: number; unpricedEntries: number }> = {};
+    for (const entry of entries) {
+      const bucket = byCategory[entry.category] ??= { billableUsd: 0, entries: 0, unpricedEntries: 0 };
+      bucket.entries += 1;
+      if (entry.billableAmount == null) bucket.unpricedEntries += 1;
+      else bucket.billableUsd = roundMoney(bucket.billableUsd + Number(entry.billableAmount));
+    }
+    res.json({
+      period,
+      currency: "USD",
+      committedUsd: state.committedUsd,
+      reservedUsd: state.reservedUsd,
+      monthlyLimitUsd: state.monthlyLimitUsd,
+      hardLimit: state.hardLimit,
+      usagePercent: state.usagePercent,
+      status: state.status,
+      pendingEntries: entries.filter((entry) => entry.status === "pending").length,
+      needsReconciliationEntries: entries.filter((entry) => entry.status === "needs_reconciliation").length,
+      byCategory,
+    });
+  } catch (err) {
+    sendServerError(res, err, "usage_summary");
   }
 });
 
@@ -254,8 +301,9 @@ router.get("/invoices/:id", requireRole("admin", "manager"), async (req, res) =>
       .where(eq(invoiceLineItemsTable.invoiceId, id))
       .orderBy(desc(invoiceLineItemsTable.startedAt));
 
-    const callCount = lineItems.length;
+    const callCount = lineItems.filter((li) => li.callLogId != null || li.category == null).length;
     const totalMinutes = lineItems.reduce((sum, li) => sum + (li.durationSeconds ?? 0), 0) / 60;
+    const { adjustments, adjustedTotalBilledCostUsd } = await withAdjustments(invoice);
 
     res.json({
       invoice,
@@ -263,10 +311,11 @@ router.get("/invoices/:id", requireRole("admin", "manager"), async (req, res) =>
       lineItems,
       callCount,
       totalMinutes: parseFloat(totalMinutes.toFixed(2)),
+      adjustments: adjustments.map(({ createdBy: _createdBy, ...rest }) => rest),
+      adjustedTotalBilledCostUsd,
     });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : "Unknown error";
-    res.status(500).json({ error: msg });
+    sendServerError(res, err, "tenant_get");
   }
 });
 

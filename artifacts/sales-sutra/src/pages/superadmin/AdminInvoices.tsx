@@ -86,9 +86,10 @@ function formatDate(d: string | null | undefined) {
   return new Date(d).toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
 }
 
+// Billing periods are UTC months, matching the usage ledger.
 function currentPeriod() {
   const now = new Date();
-  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+  return `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
 }
 
 function GenerateInvoiceModal({ tenants, onClose }: { tenants: Tenant[]; onClose: () => void }) {
@@ -97,16 +98,18 @@ function GenerateInvoiceModal({ tenants, onClose }: { tenants: Tenant[]; onClose
   const [tenantId, setTenantId] = React.useState("");
   const [period, setPeriod] = React.useState(currentPeriod());
   const [notes, setNotes] = React.useState("");
+  const [allowIncomplete, setAllowIncomplete] = React.useState(false);
 
   const mutation = useMutation({
     mutationFn: () =>
       adminFetch(`${BASE}/api/superadmin/invoices/generate`, {
         method: "POST",
-        body: JSON.stringify({ tenantId: parseInt(tenantId), period, notes: notes || undefined }),
+        body: JSON.stringify({ tenantId: parseInt(tenantId), period, notes: notes || undefined, allowIncomplete }),
       }),
     onSuccess: (data: unknown) => {
-      const d = data as { callCount: number };
-      toast({ title: "Invoice generated", description: `Created invoice for ${period} with ${d.callCount} calls.` });
+      const d = data as { callCount: number; excludedIncomplete?: number };
+      const carried = d.excludedIncomplete ? ` ${d.excludedIncomplete} unreconciled usage entries carried forward.` : "";
+      toast({ title: "Invoice generated", description: `Created invoice for ${period} with ${d.callCount} calls.${carried}` });
       qc.invalidateQueries({ queryKey: ["admin-invoices"] });
       onClose();
     },
@@ -156,6 +159,15 @@ function GenerateInvoiceModal({ tenants, onClose }: { tenants: Tenant[]; onClose
             className="bg-background border-white/10"
           />
         </div>
+        <label className="flex items-start gap-2 text-sm text-muted-foreground">
+          <input
+            type="checkbox"
+            className="mt-1"
+            checked={allowIncomplete}
+            onChange={(e) => setAllowIncomplete(e.target.checked)}
+          />
+          <span>Invoice finalized usage now and leave pending or unreconciled usage for a later invoice</span>
+        </label>
         <Button
           className="w-full"
           disabled={!tenantId || !period || mutation.isPending}

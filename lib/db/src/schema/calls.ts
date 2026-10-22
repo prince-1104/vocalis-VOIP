@@ -19,6 +19,8 @@ export const callLogsTable = pgTable("call_logs", {
   transferredTo: text("transferred_to"),                   // agent phone/SIP if transferred
   transferReason: text("transfer_reason"),                 // intent that triggered transfer
   transferredAt: timestamp("transferred_at"),
+  transferAgentId: integer("transfer_agent_id"),            // crm_agents.id whose currentCalls this transfer reserved
+  transferReleasedAt: timestamp("transfer_released_at"),    // set once when the reserved agent slot is released
   liveTranscript: jsonb("live_transcript").$type<Array<{ role: string; content: string; timestamp: string }>>(),
 
   duration: integer("duration"),
@@ -34,6 +36,7 @@ export const callLogsTable = pgTable("call_logs", {
   twilioMinutes: real("twilio_minutes"),
   startedAt: timestamp("started_at").notNull().defaultNow(),
   endedAt: timestamp("ended_at"),
+  finalizedAt: timestamp("finalized_at"),                  // set once by the single winning terminal-status finalization
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 

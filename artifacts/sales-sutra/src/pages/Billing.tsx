@@ -44,7 +44,15 @@ interface LineItem {
   billedCostUsd: string;
   durationSeconds: number | null;
   phone: string | null;
+  description?: string | null;
   startedAt: string | null;
+}
+
+interface InvoiceAdjustment {
+  id: number;
+  billedAmountUsd: string;
+  reason: string;
+  createdAt: string;
 }
 
 interface InvoiceDetail {
@@ -53,6 +61,8 @@ interface InvoiceDetail {
   lineItems: LineItem[];
   callCount: number;
   totalMinutes: number;
+  adjustments?: InvoiceAdjustment[];
+  adjustedTotalBilledCostUsd?: string;
 }
 
 function statusConfig(status: string): { label: string; icon: React.ComponentType<{ className?: string }>; className: string } {
@@ -155,7 +165,7 @@ function InvoiceModal({ invoiceId, onClose }: { invoiceId: number; onClose: () =
                 lineItems.slice(0, 20).map((li) => (
                   <TableRow key={li.id} className="border-white/5 hover:bg-white/2">
                     <TableCell className="text-sm">
-                      <span className="font-mono text-xs text-muted-foreground">{li.phone ?? "Unknown"}</span>
+                      <span className="font-mono text-xs text-muted-foreground">{li.description ?? li.phone ?? "Unknown"}</span>
                       {li.startedAt && (
                         <span className="ml-2 text-xs text-muted-foreground">{formatDate(li.startedAt)}</span>
                       )}
@@ -191,9 +201,15 @@ function InvoiceModal({ invoiceId, onClose }: { invoiceId: number; onClose: () =
             <span className="text-muted-foreground">Commission ({parseFloat(invoice.commissionPct).toFixed(1)}%)</span>
             <span className="font-mono text-amber-400">+{formatUsd(invoice.commissionUsd)}</span>
           </div>
+          {data.adjustments?.map((adj) => (
+            <div key={adj.id} className="flex justify-between text-sm">
+              <span className="text-muted-foreground">Adjustment: {adj.reason}</span>
+              <span className="font-mono">{formatUsd(adj.billedAmountUsd)}</span>
+            </div>
+          ))}
           <div className="border-t border-white/10 pt-2 flex justify-between font-semibold">
             <span>Total Due</span>
-            <span className="font-mono text-lg">{formatUsd(invoice.totalBilledCostUsd)}</span>
+            <span className="font-mono text-lg">{formatUsd(data.adjustedTotalBilledCostUsd ?? invoice.totalBilledCostUsd)}</span>
           </div>
         </div>
 

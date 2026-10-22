@@ -4,9 +4,15 @@ import { db, agentConfigsTable, callLogsTable, contactsTable, campaignsTable, ca
 import { eq, and } from "drizzle-orm";
 import { dialNextForCampaign } from "../lib/campaign-dialer";
 import { placeOutboundCall, TelephonyNotConfiguredError } from "../lib/telephony/place-outbound-call";
+import { DialBlockedError, dialBlockedHttpStatus } from "../lib/call-suppression";
+import { SpendLimitError, spendLimitHttpStatus } from "../lib/billing/spend-budget";
+import { outboundTelephonyProvider, recordCallTelephony, settleCall } from "../lib/billing/call-usage";
+import { logger } from "../lib/logger";
 import { resolveTelephonyForUser } from "../lib/telephony/resolve-telephony";
 import { exotelHangupCall } from "../lib/telephony/exotel-client";
 import { hasCrmIntegration, executeTransfer } from "../lib/transfer-manager";
+import { callTransferRateLimit, dialRateLimit } from "../lib/rate-limit-policies";
+import { twilioAuthTokenFor } from "../lib/tenant-credentials";
 
 const router: IRouter = Router();
 
@@ -78,7 +84,34 @@ function getBaseUrl(req: any): string {
   return `https://${host}`;
 }
 
-router.post("/contacts/:id/dial", async (req, res) => {
+/**
+ * Resolves an optional campaign id from the request: null when absent,
+ * undefined when malformed or not owned (callers answer a uniform 404).
+ */
+async function ownedCampaignId(userId: number, raw: unknown): Promise<number | null | undefined> {
+  if (raw === undefined || raw === null || raw === "") return null;
+  const id = typeof raw === "number" ? raw : typeof raw === "string" && /^\d{1,9}$/.test(raw) ? Number(raw) : NaN;
+  if (!Number.isSafeInteger(id) || id <= 0) return undefined;
+  const campaign = await db.query.campaignsTable.findFirst({
+    where: and(eq(campaignsTable.id, id), eq(campaignsTable.userId, userId)),
+  });
+  return campaign ? campaign.id : undefined;
+}
+
+function sendDialError(res: any, err: any) {
+  if (err instanceof DialBlockedError) {
+    res.status(dialBlockedHttpStatus(err)).json({ error: err.message, reason: err.code });
+    return;
+  }
+  if (err instanceof SpendLimitError) {
+    res.status(spendLimitHttpStatus(err)).json({ error: err.message, reason: err.code });
+    return;
+  }
+  const status = err instanceof TelephonyNotConfiguredError ? 400 : 500;
+  res.status(status).json({ error: err.message || "Failed to place call" });
+}
+
+router.post("/contacts/:id/dial", dialRateLimit, async (req, res) => {
   const userId = req.userId!;
 
   const contact = await db.query.contactsTable.findFirst({
@@ -90,6 +123,12 @@ router.post("/contacts/:id/dial", async (req, res) => {
     return;
   }
 
+  const campaignId = await ownedCampaignId(userId, req.body?.campaignId);
+  if (campaignId === undefined) {
+    res.status(404).json({ error: "Campaign not found" });
+    return;
+  }
+
   const agentConfig = await db.query.agentConfigsTable.findFirst({ where: eq(agentConfigsTable.userId, userId) });
   const baseUrl = getBaseUrl(req);
 
@@ -97,7 +136,7 @@ router.post("/contacts/:id/dial", async (req, res) => {
     const placed = await placeOutboundCall({
       userId,
       contactId: contact.id,
-      campaignId: req.body.campaignId || null,
+      campaignId,
       phone: contact.phone,
       aiModel: agentConfig?.aiModel || "gpt-4o-mini",
       baseUrl,
@@ -109,12 +148,11 @@ router.post("/contacts/:id/dial", async (req, res) => {
 
     res.json({ callSid: placed.providerCallId, callLogId: placed.callLogId, status: "dialing" });
   } catch (err: any) {
-    const status = err instanceof TelephonyNotConfiguredError ? 400 : 500;
-    res.status(status).json({ error: err.message || "Failed to place call" });
+    sendDialError(res, err);
   }
 });
 
-router.post("/campaigns/:id/dial-next", async (req, res) => {
+router.post("/campaigns/:id/dial-next", dialRateLimit, async (req, res) => {
   const userId = req.userId!;
   const campaignId = parseInt(req.params.id);
 
@@ -133,7 +171,7 @@ router.post("/campaigns/:id/dial-next", async (req, res) => {
 });
 
 // ── Dial by raw phone number (Dialer UI) ──
-router.post("/dial/phone", async (req, res) => {
+router.post("/dial/phone", dialRateLimit, async (req, res) => {
   const userId = req.userId!;
   const { phone } = req.body;
 
@@ -156,8 +194,7 @@ router.post("/dial/phone", async (req, res) => {
     });
     res.json({ callSid: placed.providerCallId, callLogId: placed.callLogId, status: "dialing" });
   } catch (err: any) {
-    const status = err instanceof TelephonyNotConfiguredError ? 400 : 500;
-    res.status(status).json({ error: err.message || "Failed to place call" });
+    sendDialError(res, err);
   }
 });
 
@@ -197,8 +234,11 @@ router.post("/dial/calls/:id/end", async (req, res) => {
       if (telephony.provider === "EXOTEL") {
         await exotelHangupCall(telephony.credentials, call.callSid);
       } else if (agentConfig?.twilioAccountSid && agentConfig?.twilioAuthToken) {
-        const client = getTwilioClient(agentConfig.twilioAccountSid, agentConfig.twilioAuthToken);
-        await client.calls(call.callSid).update({ status: "completed" });
+        const authToken = twilioAuthTokenFor(agentConfig);
+        if (authToken) {
+          const client = getTwilioClient(agentConfig.twilioAccountSid, authToken);
+          await client.calls(call.callSid).update({ status: "completed" });
+        }
       }
     }
 
@@ -223,7 +263,7 @@ router.post("/dial/calls/:id/end", async (req, res) => {
 });
 
 // ── Internal: Transfer active call to CRM agent (JWT auth — used by Dialer UI) ──
-router.post("/dial/calls/:id/transfer", async (req, res) => {
+router.post("/dial/calls/:id/transfer", callTransferRateLimit, async (req, res) => {
   const userId = req.userId!;
   const callId = parseInt(req.params.id);
 
@@ -305,6 +345,33 @@ router.post("/dial/calls/:id/transfer", async (req, res) => {
   }
 });
 
+/**
+ * The Twilio call resource (fetched with the tenant's credentials) carries the
+ * billed duration and, once Twilio has rated the call, its price. Both are
+ * provider evidence for the call's telephony ledger entry.
+ */
+async function recordTwilioApiEvidence(
+  call: typeof callLogsTable.$inferSelect,
+  twilioCall: { price?: string | null; priceUnit?: string | null },
+  durationSecs: number,
+) {
+  const price = twilioCall.price == null ? NaN : Math.abs(Number(twilioCall.price));
+  const currency = typeof twilioCall.priceUnit === "string" && /^[A-Z]{3}$/.test(twilioCall.priceUnit) ? twilioCall.priceUnit : null;
+  try {
+    await recordCallTelephony(call, {
+      provider: call.direction === "outbound" ? await outboundTelephonyProvider(call.userId) : "twilio",
+      seconds: durationSecs,
+      measurement: "actual",
+      outcome: durationSecs > 0 ? "charged" : "not_charged",
+      providerCost: Number.isFinite(price) && currency ? { amount: price, currency } : null,
+      reason: "provider_api",
+    });
+    await settleCall(call.id, "call_completed");
+  } catch (err) {
+    logger.error({ err, callLogId: call.id }, "Call telephony evidence recording failed");
+  }
+}
+
 // ── Internal: Poll call status + live transcript (JWT auth — used by Dialer UI) ──
 router.get("/dial/calls/:id/live", async (req, res) => {
   const userId = req.userId!;
@@ -339,9 +406,10 @@ router.get("/dial/calls/:id/live", async (req, res) => {
       where: eq(agentConfigsTable.userId, userId),
     });
 
-    if (agentConfig?.twilioAccountSid && agentConfig?.twilioAuthToken) {
+    const authToken = agentConfig ? twilioAuthTokenFor(agentConfig) : null;
+    if (agentConfig?.twilioAccountSid && authToken) {
       try {
-        const client = getTwilioClient(agentConfig.twilioAccountSid, agentConfig.twilioAuthToken);
+        const client = getTwilioClient(agentConfig.twilioAccountSid, authToken);
         const twilioCall = await client.calls(call.callSid).fetch();
         const durationSecs = parseInt(String(twilioCall.duration ?? "0"), 10) || 0;
         const endTime = twilioCall.endTime ?? null;
@@ -351,6 +419,9 @@ router.get("/dial/calls/:id/live", async (req, res) => {
 
         status = mapTwilioCallStatus(twilioCall.status, call.endedAt, endTime, durationSecs);
 
+        if (isTerminal) {
+          await recordTwilioApiEvidence(call, twilioCall, durationSecs);
+        }
         if (isTerminal && !call.endedAt) {
           await syncCallEndFromTwilio(call.id, twilioCall.status, endTime, durationSecs);
           endedAt = endTime ?? new Date();

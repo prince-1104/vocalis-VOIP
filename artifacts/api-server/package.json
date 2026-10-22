@@ -7,7 +7,10 @@
     "dev": "cross-env NODE_ENV=development pnpm run build && pnpm run start",
     "build": "node ./build.mjs",
     "start": "node --enable-source-maps ./dist/index.cjs",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "credentials:migrate": "node --enable-source-maps ./dist/credential-migrate.cjs",
+    "db:migrate": "node --enable-source-maps ./dist/db-migrate.cjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node ./test/run-tests.mjs"
   },
   "dependencies": {
     "@workspace/api-zod": "workspace:*",

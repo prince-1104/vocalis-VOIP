@@ -13,3 +13,8 @@ export * from "./crm";
 export * from "./intent-training";
 export * from "./external-crm";
 export * from "./widget-chat-sessions";
+export * from "./call-media-sessions";
+export * from "./widget-customer-verification";
+export * from "./rate-limits";
+export * from "./call-suppressions";
+export * from "./billing";

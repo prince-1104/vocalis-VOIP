@@ -1,23 +1,27 @@
-import { WebSocketServer, WebSocket } from "ws";
-import { URL } from "url";
+import { createMediaUpgrade, rejectMediaUpgrade, type ActiveMediaContext } from "./media-ws-auth";
+import { guardDatabase, guardEffect } from "./media-effects";
+import { WebSocket } from "ws";
 import { randomUUID } from "crypto";
 import { spawn } from "child_process";
-import { db, callLogsTable, intentTrainingTable } from "@workspace/db";
+import { db as database, callLogsTable, intentTrainingTable } from "@workspace/db";
 import { eq, and } from "drizzle-orm";
 import { openai } from "@workspace/integrations-openai-ai-server";
 import { toFile } from "openai";
 import { crmEventBus } from "./crm-event-bus";
-import { logLLMCost, logTTSCost, resolveTenantIdForOwner } from "./cost-logger";
+import { afterProviderSuccess, classifyProviderFailure, createUsageScope } from "./billing/usage-ledger";
+import { recordLlmCall, reportedUsage, type LlmCallSink } from "./billing/llm-usage";
+import { extendCallHold, releaseTurnBudget, reserveTurnBudget } from "./billing/call-usage";
+import { SpendLimitError, type Reservation } from "./billing/spend-budget";
 import { classifyIntent, shouldTransfer, detectHumanRequest, type TransferRules } from "./intent-classifier";
-import { findBestAgent, buildTransferEventData, executeTransfer } from "./transfer-manager";
+import { findBestAgent, buildTransferEventData, executeTransfer as providerExecuteTransfer } from "./transfer-manager";
 import {
   countUserTurns,
   resolveAgentPhone,
   DEFAULT_CAMPAIGN_CLOSING_MESSAGE,
 } from "./campaign-transfer";
 import { logger } from "./logger";
-import { hangupCall } from "./telephony/hangup-call";
-import { registerExotelStream, unregisterExotelStream } from "./telephony/exotel-stream-registry";
+import { providerHttpError } from "./log-redaction";
+import { hangupCall as providerHangupCall } from "./telephony/hangup-call";
 import OpenAI from "openai";
 import { buildWhisperPrompt, normalizePhoneTranscript } from "./phone-stt-normalize";
 import {
@@ -45,6 +49,8 @@ import {
   applyPitchTemplate,
 } from "./external-crm-lookup";
 import { shouldAutoHangupAfterTurn } from "./call-end-detector";
+
+const db = database;
 
 // ── bitwise G.711 mu-law Codec ─────────────────────────────────────────
 const SIGN_BIT = 0x80;
@@ -467,9 +473,24 @@ async function fetchConfig(callLogIdStr: string) {
 }
 
 // ── Conversational Pipeline Helper Functions ───────────────────────────
-async function generateSentenceTTS(text: string, lang: string, voice: string): Promise<Buffer> {
+/** One TTS provider request. In a race both requests are billed; the loser is marked discarded. */
+export interface TtsUsageEvent {
+  provider: "sarvam" | "openai";
+  model: string;
+  characters: number;
+  failure?: unknown;
+  discarded?: boolean;
+}
+
+async function generateSentenceTTS(
+  text: string,
+  lang: string,
+  voice: string,
+  onUsage?: (event: TtsUsageEvent) => void,
+): Promise<Buffer> {
   const SARVAM_API_KEY = process.env.SARVAM_API_KEY ?? "";
   const useSarvamTts = isIndianLanguage(lang);
+  const report = (event: TtsUsageEvent) => onUsage?.(event);
 
   if (useSarvamTts && SARVAM_API_KEY) {
     const speaker = BULBUL_VOICE_FOR_LANG[lang] ?? "manan";
@@ -498,15 +519,14 @@ async function generateSentenceTTS(text: string, lang: string, voice: string): P
       });
 
       if (!res.ok) {
-        const errText = await res.text();
-        throw new Error(`Sarvam Bulbul v3 TTS error ${res.status}: ${errText}`);
+        throw providerHttpError("Sarvam TTS", res.status, await res.text().catch(() => ""));
       }
 
       const data = await res.json() as any;
       const audioBase64: string | undefined = data.audios?.[0];
       if (!audioBase64) throw new Error("No audio returned from Sarvam");
       const wavBuffer = Buffer.from(audioBase64, "base64");
-      const mulaw = await convertToMulawWithFallback(wavBuffer);
+      const mulaw = await convertToMulawWithFallback(wavBuffer).catch((err) => { throw afterProviderSuccess(err); });
       return { source: "sarvam", audio: mulaw };
     })();
 
@@ -517,9 +537,22 @@ async function generateSentenceTTS(text: string, lang: string, voice: string): P
         input: text,
       });
       const mp3Buffer = Buffer.from(await mp3Response.arrayBuffer());
-      const mulaw = await convertToMulawWithFallback(mp3Buffer);
+      const mulaw = await convertToMulawWithFallback(mp3Buffer).catch((err) => { throw afterProviderSuccess(err); });
       return { source: "openai", audio: mulaw };
     })();
+
+    // Promise.any resolves with the first fulfilled request, so the first to fulfil is the one played.
+    let winner: "sarvam" | "openai" | null = null;
+    const track = (provider: "sarvam" | "openai", model: string, request: Promise<unknown>) => request.then(
+      () => {
+        const discarded = winner !== null;
+        if (!discarded) winner = provider;
+        report({ provider, model, characters: text.length, discarded });
+      },
+      (err) => report({ provider, model, characters: text.length, failure: err }),
+    );
+    track("sarvam", "bulbul:v3", sarvamPromise);
+    track("openai", "tts-1", openaiPromise);
 
     try {
       // Race both — whichever finishes first wins
@@ -532,11 +565,18 @@ async function generateSentenceTTS(text: string, lang: string, voice: string): P
       throw aggErr;
     }
   } else {
-    const mp3Response = await openai.audio.speech.create({
-      model: "tts-1",
-      voice: (voice || "nova") as any,
-      input: text,
-    });
+    let mp3Response;
+    try {
+      mp3Response = await openai.audio.speech.create({
+        model: "tts-1",
+        voice: (voice || "nova") as any,
+        input: text,
+      });
+    } catch (err) {
+      report({ provider: "openai", model: "tts-1", characters: text.length, failure: err });
+      throw err;
+    }
+    report({ provider: "openai", model: "tts-1", characters: text.length });
 
     const mp3Buffer = Buffer.from(await mp3Response.arrayBuffer());
     const mulaw = await convertToMulawWithFallback(mp3Buffer);
@@ -545,12 +585,39 @@ async function generateSentenceTTS(text: string, lang: string, voice: string): P
   }
 }
 
+const STREAM_MAX_OUTPUT_TOKENS = 200;
+/** Allowance for the system prompt (agent instructions, script, training) when sizing a turn hold. */
+const TURN_PROMPT_TOKENS = 4000;
+
+const OPENAI_MODEL_MAP: Record<string, string> = {
+  "gpt-4o-mini":          "gpt-4o-mini",
+  "gpt-4o":               "gpt-4o",
+  "gpt-5.2":              "gpt-4o",
+  "gemini-1.5-pro":       "gpt-4o-mini",
+  "llama-3.3-8b-private": "gpt-4o-mini",
+  "bharatgpt":            "gpt-4o-mini",
+  "bolna-ai":             "gpt-4o-mini",
+};
+
+/** Provider and exact model a configured (UI) model name is sent to. */
+function streamTarget(aiModel: string): { provider: "openai" | "deepseek" | "sarvam"; model: string } {
+  if (aiModel === "deepseek-chat" || aiModel === "deepseek-v3") return { provider: "deepseek", model: "deepseek-chat" };
+  if (aiModel === "sarvam-m" || aiModel === "sarvam-1-2b") return { provider: "sarvam", model: "sarvam-m" };
+  return { provider: "openai", model: OPENAI_MODEL_MAP[aiModel] ?? "gpt-4o-mini" };
+}
+
+const streamModelFor = (aiModel: string) => streamTarget(aiModel).model;
+
+const estimateHistoryTokens = (history: { content: string }[]) =>
+  Math.ceil(history.reduce((total, turn) => total + turn.content.length, 0) / 2);
+
 async function* streamLLMResponse(
   systemPrompt: string,
   history: { role: string; content: string }[],
   userMessage: string,
   aiModel: string,
-  lang: string
+  lang: string,
+  onUsage?: LlmCallSink,
 ): AsyncGenerator<string, void, unknown> {
   const messages = [
     { role: "system", content: systemPrompt },
@@ -561,95 +628,124 @@ async function* streamLLMResponse(
   const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY ?? "";
   const SARVAM_API_KEY = process.env.SARVAM_API_KEY ?? "";
 
-  let client: OpenAI;
-  let modelName = aiModel;
+  const { provider, model: modelName } = streamTarget(aiModel);
+  // DeepSeek and OpenAI report usage in a final stream chunk when asked; Sarvam's support is unverified.
+  const reportsStreamUsage = provider !== "sarvam";
+  const client: OpenAI = provider === "deepseek"
+    ? new OpenAI({ apiKey: DEEPSEEK_API_KEY, baseURL: "https://api.deepseek.com/v1" })
+    : provider === "sarvam"
+      ? new OpenAI({ apiKey: SARVAM_API_KEY, baseURL: "https://api.sarvam.ai/v1" })
+      : openai;
 
-  if (aiModel === "deepseek-chat" || aiModel === "deepseek-v3") {
-    client = new OpenAI({
-      apiKey: DEEPSEEK_API_KEY,
-      baseURL: "https://api.deepseek.com/v1"
-    });
-    modelName = "deepseek-chat";
-  } else if (aiModel === "sarvam-m" || aiModel === "sarvam-1-2b") {
-    client = new OpenAI({
-      apiKey: SARVAM_API_KEY,
-      baseURL: "https://api.sarvam.ai/v1"
-    });
-    modelName = "sarvam-m";
-  } else {
-    client = openai;
-    const OPENAI_MODEL_MAP: Record<string, string> = {
-      "gpt-4o-mini":          "gpt-4o-mini",
-      "gpt-4o":               "gpt-4o",
-      "gpt-5.2":              "gpt-4o",
-      "gemini-1.5-pro":       "gpt-4o-mini",
-      "llama-3.3-8b-private": "gpt-4o-mini",
-      "bharatgpt":            "gpt-4o-mini",
-      "bolna-ai":             "gpt-4o-mini",
-    };
-    modelName = OPENAI_MODEL_MAP[aiModel] ?? "gpt-4o-mini";
-  }
-
-  const stream = await client.chat.completions.create({
+  const report = (outcome: { usage?: unknown; outputText: string; failure?: unknown; cancelled?: boolean }) => onUsage?.({
+    provider,
     model: modelName,
-    messages: messages as any[],
-    max_completion_tokens: 200,
-    stream: true
+    usage: reportedUsage(outcome.usage),
+    promptTexts: messages.map((m) => m.content),
+    outputText: outcome.outputText,
+    maxOutputTokens: STREAM_MAX_OUTPUT_TOKENS,
+    failure: outcome.failure,
+    cancelled: outcome.cancelled,
   });
 
-  for await (const chunk of stream) {
-    const text = chunk.choices[0]?.delta?.content || "";
-    if (text) {
-      yield text;
+  let stream;
+  try {
+    stream = await client.chat.completions.create({
+      model: modelName,
+      messages: messages as any[],
+      max_completion_tokens: STREAM_MAX_OUTPUT_TOKENS,
+      stream: true,
+      ...(reportsStreamUsage ? { stream_options: { include_usage: true } } : {}),
+    });
+  } catch (err) {
+    report({ outputText: "", failure: err });
+    throw err;
+  }
+
+  let outputText = "";
+  let usage: unknown;
+  let finished = false;
+  try {
+    for await (const chunk of stream) {
+      if (chunk.usage) usage = chunk.usage;
+      const text = chunk.choices[0]?.delta?.content || "";
+      if (text) {
+        outputText += text;
+        yield text;
+      }
     }
+    finished = true;
+    report({ usage, outputText });
+  } catch (err) {
+    finished = true;
+    report({ usage, outputText, failure: usage ? undefined : err });
+    throw err;
+  } finally {
+    // The consumer stopped reading (barge-in): the provider may keep generating.
+    if (!finished) report({ usage, outputText, cancelled: !usage });
   }
 }
 
 // ── WebSocket Server Definition & Event Loop ───────────────────────────
-export const twilioWss = new WebSocketServer({ noServer: true });
-
-export async function handleExotelStreamUpgrade(request: any, socket: any, head: any) {
-  const url = new URL(request.url || "", `http://${request.headers.host}`);
-  let callLogId = url.searchParams.get("callLogId");
-  if (!callLogId) {
-    const pathParts = url.pathname.split("/").filter(Boolean);
-    callLogId = pathParts[3] || null;
-  }
-  if (!callLogId) {
-    socket.write("HTTP/1.1 400 Bad Request\r\n\r\n");
-    socket.destroy();
-    return;
-  }
-
-  twilioWss.handleUpgrade(request, socket, head, (ws) => {
-    twilioWss.emit("connection", ws, request, callLogId, "exotel");
-  });
+export async function handleExotelStreamUpgrade(_request: any, socket: any, _head: any) {
+  rejectMediaUpgrade(socket);
 }
 
-export async function handleTwilioStreamUpgrade(request: any, socket: any, head: any) {
-  const url = new URL(request.url || "", `http://${request.headers.host}`);
-  let callLogId = url.searchParams.get("callLogId");
-  if (!callLogId) {
-    const pathParts = url.pathname.split("/").filter(Boolean);
-    callLogId = pathParts[4] || null;
-  }
-  if (!callLogId) {
-    socket.write("HTTP/1.1 400 Bad Request\r\n\r\n");
-    socket.destroy();
-    return;
-  }
+const mediaUpgrade = createMediaUpgrade(
+  (ws, context, start) => activateMediaPipeline(ws, context, start),
+  callId => finalizeCallLog(callId),
+);
+export const handleTwilioStreamUpgrade = mediaUpgrade.upgrade;
+export const closeMediaWebSockets = mediaUpgrade.close;
 
-  twilioWss.handleUpgrade(request, socket, head, (ws) => {
-    twilioWss.emit("connection", ws, request, callLogId, "twilio");
+export async function activateMediaPipeline(ws: WebSocket, context: ActiveMediaContext, verifiedStart: any,
+  overrides: Partial<{ fetchConfig: typeof fetchConfig; synthesize: typeof generateSentenceTTS; streamResponse: typeof streamLLMResponse; transfer: typeof providerExecuteTransfer }> = {}) {
+  const pendingTimers = new Set<ReturnType<typeof globalThis.setTimeout>>();
+  const setTimeout = (callback: (...args: any[]) => void, milliseconds: number) => {
+    assertActive();
+    const timer = globalThis.setTimeout(() => {
+      pendingTimers.delete(timer);
+      if (context.isActive()) callback();
+    }, milliseconds);
+    pendingTimers.add(timer);
+    return timer;
+  };
+  const callLogId = String(context.callLogId);
+  const streamProvider = context.provider as "twilio" | "exotel";
+  const assertActive = () => { if (!context.isActive()) throw new Error("Media session closed"); };
+  const db = guardDatabase(database, assertActive);
+  // Usage keeps recording after the session closes: late provider replies are still billed.
+  const usage = createUsageScope({
+    userId: context.ownerId,
+    callLogId: context.callLogId,
+    source: "media-stream",
+    keyPrefix: `call:${context.callLogId}:media`,
   });
-}
-
-twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string, streamProvider: "twilio" | "exotel" = "twilio") => {
+  const recordTts = (event: TtsUsageEvent) => {
+    usage.record({
+      category: "tts",
+      provider: event.provider,
+      model: event.model,
+      measurement: "actual",
+      unit: "characters",
+      quantity: event.characters,
+      outcome: event.failure === undefined ? "charged" : classifyProviderFailure(event.failure),
+      metadata: event.discarded ? { discarded: true } : undefined,
+    });
+  };
+  const recordLlm: LlmCallSink = (call) => { recordLlmCall(usage, call); };
+  const synthesizeWithUsage = overrides.synthesize || generateSentenceTTS;
+  const synthesize = guardEffect(assertActive, (text: string, lang: string, ttsVoice: string) =>
+    synthesizeWithUsage(text, lang, ttsVoice, recordTts));
+  const hangupCall = guardEffect(assertActive, providerHangupCall);
+  const executeTransfer = guardEffect(assertActive, overrides.transfer || providerExecuteTransfer);
+  const emitEvent = (event: Parameters<typeof crmEventBus.emitCallEvent>[0]) => { assertActive(); crmEventBus.emitCallEvent(event); };
+  assertActive();
   logger.info({ callLogId, streamProvider }, "Media Stream WebSocket client connected");
   const connectionTime = Date.now();
 
-  const config = await fetchConfig(callLogId);
-  if (!config) {
+  const config = await guardEffect(assertActive, overrides.fetchConfig || fetchConfig)(callLogId);
+  if (!config || config.userId !== context.ownerId) {
     logger.error({ callLogId }, "Failed to load call configuration for media stream");
     ws.close();
     return;
@@ -739,7 +835,7 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
     const playTtsMessage = async (message: string) => {
       if (!message?.trim()) return;
       try {
-        const audio = await generateSentenceTTS(message, lang, voice);
+        const audio = await synthesize(message, lang, voice);
         isSpeaking = true;
         // Timeout the player callback — if audio doesn't finish in 8s, proceed anyway
         await new Promise<void>((resolve) => {
@@ -759,7 +855,7 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
         const turn = { role: "assistant", content: message, timestamp: new Date().toISOString() };
         callMeta.liveTranscript = [...callMeta.liveTranscript, turn];
       } catch (ttsErr) {
-        logger.error({ ttsErr, callLogId }, "CRM ending TTS failed");
+        logger.error({ err: ttsErr, callLogId }, "CRM ending TTS failed");
       }
     };
 
@@ -794,7 +890,7 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
       logger.error({ err, callLogId }, "CRM call ending sequence failed");
     } finally {
       // Always hang up — even if TTS/DB failed
-      if (callSid) {
+      if (context.isActive() && callSid) {
         await hangupCall(userId, callSid, callLogRow?.phone || undefined).catch(
           (err) => logger.error({ err, callLogId }, "Hangup failed in endCrmInboundCall"),
         );
@@ -827,7 +923,7 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
       const endingNote = crmCallFlow?.endingNote?.trim();
       if (endingNote) {
         const noteText = applyPitchTemplate(endingNote, callMeta.externalCrmContext);
-        const noteAudio = await generateSentenceTTS(noteText, lang, voice);
+        const noteAudio = await synthesize(noteText, lang, voice);
         isSpeaking = true;
         await new Promise<void>((resolve) => {
           const safetyTimeout = setTimeout(() => {
@@ -867,7 +963,7 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
     } catch (err) {
       logger.error({ err, callLogId }, "Natural call end sequence failed");
     } finally {
-      crmEventBus.emitCallEvent({
+      emitEvent({
         type: "call.ended",
         callId: callLogIdNum,
         callSid: callSid || undefined,
@@ -882,7 +978,7 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
         timestamp: new Date().toISOString(),
       });
 
-      if (callSid) {
+      if (context.isActive() && callSid) {
         await hangupCall(userId, callSid, callLogRow?.phone || undefined).catch(
           (err) => logger.error({ err, callLogId }, "Hangup failed in finishCallNaturally"),
         );
@@ -913,7 +1009,7 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
     }
 
     try {
-      const closingAudio = await generateSentenceTTS(closingMessage, lang, voice);
+      const closingAudio = await synthesize(closingMessage, lang, voice);
       isSpeaking = true;
       await new Promise<void>((resolve) => {
         const safetyTimeout = setTimeout(() => {
@@ -944,9 +1040,9 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
         })
         .where(eq(callLogsTable.id, callLogIdNum));
     } catch (ttsErr) {
-      logger.error({ ttsErr, callLogId }, "Closing message TTS failed");
+      logger.error({ err: ttsErr, callLogId }, "Closing message TTS failed");
     } finally {
-      crmEventBus.emitCallEvent({
+      emitEvent({
         type: "call.ended",
         callId: callLogIdNum,
         callSid: callSid || undefined,
@@ -961,7 +1057,7 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
         timestamp: new Date().toISOString(),
       });
 
-      if (callSid) {
+      if (context.isActive() && callSid) {
         await hangupCall(userId, callSid, callLogRow?.phone || undefined).catch(
           (err) => logger.error({ err, callLogId }, "Hangup failed in endCampaignCallWithMessage"),
         );
@@ -995,8 +1091,8 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
         ? lockedCallLang
         : configuredLang;
 
-      logger.info({ callLogId, greeting: currentGreeting, greetingLang }, "Generating greeting TTS...");
-      const audio = await generateSentenceTTS(currentGreeting, greetingLang, voice);
+      logger.info({ callLogId, greetingChars: currentGreeting.length, greetingLang }, "Generating greeting TTS...");
+      const audio = await synthesize(currentGreeting, greetingLang, voice);
 
       if (!greetingCancelled) {
         isGenerating = false;
@@ -1041,11 +1137,11 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
         }
       }
     } catch (err) {
-      logger.error({ err }, "Error playing greeting");
+      logger.error({ err, callLogId }, "Error playing greeting");
       isGenerating = false;
       isSpeaking = false;
       greetingPhase = false;
-      if (deferredUtterance) {
+      if (context.isActive() && deferredUtterance) {
         const pending = deferredUtterance;
         deferredUtterance = null;
         processUserUtterance(pending);
@@ -1096,7 +1192,7 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
     const selected = resolveLanguageFromDigit(languageMenuConfig, digit);
     if (selected) {
       finalizeLanguageSelection(selected, `dtmf:${digit}`).catch(err =>
-        logger.error({ err, callLogId, digit }, "Language menu DTMF handling failed"),
+        logger.error({ err, callLogId, selectedLang: selected }, "Language menu DTMF handling failed"),
       );
     }
   };
@@ -1114,8 +1210,8 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
       greetingCancelled = false;
 
       const prompt = buildLanguageMenuPrompt(languageMenuConfig);
-      logger.info({ callLogId, prompt }, "Playing language menu prompt");
-      const audio = await generateSentenceTTS(prompt, "en-US", voice);
+      logger.info({ callLogId, promptChars: prompt.length }, "Playing language menu prompt");
+      const audio = await synthesize(prompt, "en-US", voice);
 
       if (!greetingCancelled && languageMenuPhase) {
         isGenerating = false;
@@ -1143,12 +1239,13 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
     }
   };
 
-  ws.on("message", async (msg: any) => {
+  const handleMessage = async (data: any) => {
     try {
-      const data = JSON.parse(msg.toString());
+      assertActive();
       if (data.event === "start") {
-        streamSid = data.start?.streamSid || data.start?.stream_sid || "";
-        callSid = data.start?.callSid || data.start?.call_sid || "";
+        if (player || data.start !== verifiedStart) { void context.shutdown(); ws.close(1008, "Media access denied"); return; }
+        streamSid = context.streamSid;
+        callSid = context.callSid;
         const fmt = String(data.start?.media_format?.encoding || "").toLowerCase();
         if (fmt.includes("mulaw") || fmt.includes("pcmu")) {
           inboundEncoding = "mulaw";
@@ -1158,16 +1255,7 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
           inboundEncoding = "pcm";
         }
         player = new AudioPlayer(ws, streamSid, streamProvider);
-        logger.info({ streamSid, callSid, streamProvider, inboundEncoding }, "Media stream started");
-
-        if (streamProvider === "exotel") {
-          registerExotelStream(callLogId, ws);
-        }
-
-        if (!callMeta.callSid) {
-          callMeta.callSid = callSid;
-          await db.update(callLogsTable).set({ callSid }).where(eq(callLogsTable.id, parseInt(callLogId, 10)));
-        }
+        logger.info({ callLogId, streamSid, callSid, streamProvider, inboundEncoding }, "Media stream started");
 
         if (transferRules?.campaignHandoff && transferRules.maxAiMinutes && transferRules.maxAiMinutes > 0) {
           const elapsed = Date.now() - callStartedAt.getTime();
@@ -1199,7 +1287,7 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
         // Twilio sends: { event: "dtmf", dtmf: { digit: "1" } }
         // Exotel sends: { event: "dtmf", dtmf: { digits: ["1"] } } or { digit: "1" }
         const digit = data.dtmf?.digit ?? data.dtmf?.digits?.[0] ?? data.digit;
-        logger.info({ callLogId, digit, languageMenuPhase, rawDtmf: data.dtmf ?? data.digit }, "DTMF event received");
+        logger.info({ callLogId, hasDigit: digit !== undefined && digit !== null, languageMenuPhase }, "DTMF event received");
         if (digit && languageMenuPhase) {
           greetingCancelled = true;
           player?.clear();
@@ -1297,37 +1385,29 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
       }
 
       if (data.event === "stop") {
-        logger.info({ callLogId }, "Twilio Media Stream stopped");
-        if (limitTimer) clearTimeout(limitTimer);
-        clearLanguageMenuTimer();
-        player?.clear();
-        finalizeCallLog(parseInt(callLogId, 10), callStartedAt).catch(err =>
-          logger.error({ err, callLogId }, "Failed to finalize call log on stream stop")
-        );
+        await context.shutdown();
+        ws.close();
       }
-    } catch (err) {
-      logger.error({ err }, "Error processing Twilio WS message");
+    } catch {
+      if (context.isActive()) { void context.shutdown(); ws.close(1011, "Media session unavailable"); }
     }
-  });
+  };
 
-  ws.on("close", () => {
-    logger.info({ callLogId }, "Twilio Media Stream WebSocket closed");
+  context.onShutdown(() => {
+    for (const timer of pendingTimers) clearTimeout(timer);
+    pendingTimers.clear();
+    activeGenerationId = "";
+    greetingCancelled = true;
+    deferredUtterance = null;
     if (limitTimer) clearTimeout(limitTimer);
+    if (crmLimitTimer) clearTimeout(crmLimitTimer);
     clearLanguageMenuTimer();
-    if (streamProvider === "exotel") unregisterExotelStream(callLogId);
-    player?.clear();
-    finalizeCallLog(parseInt(callLogId, 10), callStartedAt).catch(err =>
-      logger.error({ err, callLogId }, "Failed to finalize call log on websocket close")
-    );
-  });
-
-  ws.on("error", (err) => {
-    logger.error({ err, callLogId }, "Twilio Media Stream WebSocket error");
     player?.clear();
   });
 
   // Main turn pipeline
   const processUserUtterance = async (pcmSamples: Int16Array) => {
+    if (!context.isActive()) return;
     if (isProcessingTurn) {
       logger.info({ callLogId }, "Deferring utterance, turn already in progress");
       deferredUtterance = pcmSamples;
@@ -1358,37 +1438,85 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
       return;
     }
 
+    let turnHold: Reservation | null = null;
     try {
-      const wavBuffer = createWavBuffer(pcmSamples, 8000);
       let sttLang = getCallLang();
       if (sttLang === "auto") sttLang = "en-US";
+      const useSarvamStt = isIndianLanguage(sttLang);
+      const audioSeconds = pcmSamples.length / 8000;
+
+      // Active-call spending policy: every turn holds its expected AI cost and
+      // the call's telephony hold is kept ahead of elapsed time. A refusal (or
+      // unavailable budget state) ends the call gracefully, without new AI work.
+      try {
+        await extendCallHold(
+          { id: context.callLogId, userId, direction: callLogRow?.direction ?? null },
+          (Date.now() - callStartedAt.getTime()) / 1000,
+        );
+        turnHold = await reserveTurnBudget({
+          userId,
+          callLogId: context.callLogId,
+          turnId: genId,
+          estimate: {
+            llmModels: [streamModelFor(aiModel)],
+            inputTokens: TURN_PROMPT_TOKENS + estimateHistoryTokens(history),
+            maxOutputTokens: STREAM_MAX_OUTPUT_TOKENS,
+            extraLlmCalls: hasTransferRules ? 1 : 0,
+            ttsProviders: isIndianLanguage(getCallLang()) || isIndianLanguage(configuredLang) ? ["sarvam", "openai"] : ["openai"],
+            sttProvider: useSarvamStt ? "sarvam" : "openai",
+            sttSeconds: audioSeconds,
+          },
+        });
+      } catch (budgetErr) {
+        if (!(budgetErr instanceof SpendLimitError)) throw budgetErr;
+        logger.warn({ callLogId, code: budgetErr.code }, "Turn refused by spending limit — ending call");
+        isGenerating = false;
+        await finishCallNaturally("Spending limit reached");
+        return;
+      }
+
+      const wavBuffer = createWavBuffer(pcmSamples, 8000);
       let lang = sttLang;
       logger.info({ callLogId, sttLang, lockedCallLang }, "Transcribing audio...");
       let transcript = "";
 
-      const useSarvamStt = isIndianLanguage(sttLang);
+      const sttUsage = { category: "stt" as const, measurement: "actual" as const, unit: "audio_seconds" as const, quantity: audioSeconds };
       if (useSarvamStt) {
-        transcript = await callSarvamSTT(wavBuffer, "audio/wav", sttLang);
+        assertActive();
+        transcript = await callSarvamSTT(wavBuffer, "audio/wav", sttLang).catch((err: unknown) => {
+          usage.record({ ...sttUsage, provider: "sarvam", model: "saaras:v3", outcome: classifyProviderFailure(err) });
+          throw err;
+        });
+        usage.record({ ...sttUsage, provider: "sarvam", model: "saaras:v3" });
       } else {
         const file = await toFile(wavBuffer, "audio.wav", { type: "audio/wav" });
+        assertActive();
         const res = await openai.audio.transcriptions.create({
           file,
           model: "whisper-1",
           language: sttLang === "auto" ? undefined : sttLang.split("-")[0],
           prompt: buildWhisperPrompt(history, currentGreeting),
+        }).catch((err: unknown) => {
+          usage.record({ ...sttUsage, provider: "openai", model: "whisper-1", outcome: classifyProviderFailure(err) });
+          throw err;
         });
+        usage.record({ ...sttUsage, provider: "openai", model: "whisper-1" });
         transcript = res.text;
       }
 
+      assertActive();
       const rawTranscript = transcript;
       transcript = normalizePhoneTranscript(transcript, history, currentGreeting);
       if (transcript !== rawTranscript) {
-        logger.info({ callLogId, rawTranscript, transcript }, "STT transcript corrected");
+        logger.info(
+          { callLogId, rawTranscriptLength: rawTranscript.length, transcriptLength: transcript.length },
+          "STT transcript corrected",
+        );
       }
 
-      logger.info({ callLogId, transcript }, "Transcription complete");
+      logger.info({ callLogId, transcriptLength: transcript.length, sttProvider: useSarvamStt ? "sarvam" : "openai" }, "Transcription complete");
 
-      if (activeGenerationId !== genId) {
+      if (!context.isActive() || activeGenerationId !== genId) {
         logger.info({ callLogId }, "Generation aborted due to interruption during transcription.");
         return;
       }
@@ -1410,16 +1538,16 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
 
       let intentResult = { intent: "general_question", confidence: 1.0, needsHuman: false };
       try {
-        intentResult = await classifyIntent(history, transcript, hasTransferRules);
+        intentResult = await classifyIntent(history, transcript, hasTransferRules, usage);
         if (intentResult.confidence >= 0.6) {
           intentTurnCounts[intentResult.intent] = (intentTurnCounts[intentResult.intent] || 0) + 1;
         }
       } catch (classifyErr) {
-        logger.error({ classifyErr, callLogId }, "Intent classification failed");
+        logger.error({ err: classifyErr, callLogId }, "Intent classification failed");
       }
 
       // Emit user turn to CRM
-      crmEventBus.emitCallEvent({
+      emitEvent({
         type: "call.turn",
         callId: parseInt(callLogId, 10),
         callSid,
@@ -1517,7 +1645,7 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
             player?.clear();
             ws.send(JSON.stringify({ event: "clear", streamSid }));
 
-            crmEventBus.emitCallEvent({
+            emitEvent({
               type: "call.transferring",
               callId: callLogIdNum,
               callSid,
@@ -1532,7 +1660,7 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
             });
 
             try {
-              const handoffAudio = await generateSentenceTTS(transferMessage, lang, voice);
+              const handoffAudio = await synthesize(transferMessage, lang, voice);
               isSpeaking = true;
               await new Promise<void>((resolve) => {
                 const safetyTimeout = setTimeout(() => {
@@ -1561,9 +1689,9 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
                 })
                 .where(eq(callLogsTable.id, callLogIdNum));
             } catch (ttsErr) {
-              logger.error({ ttsErr, callLogId }, "Handoff TTS failed");
+              logger.error({ err: ttsErr, callLogId }, "Handoff TTS failed");
             } finally {
-              crmEventBus.emitCallEvent({
+              emitEvent({
                 type: "call.transferred",
                 callId: callLogIdNum,
                 callSid,
@@ -1577,7 +1705,7 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
                 timestamp: new Date().toISOString(),
               });
 
-              if (callSid) {
+              if (context.isActive() && callSid) {
                 await hangupCall(userId, callSid, callLogRow?.phone || undefined).catch(
                   (err) => logger.error({ err, callLogId }, "Hangup failed in CRM dashboard handoff"),
                 );
@@ -1591,11 +1719,11 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
 
           // Phone bridge transfer (campaign or intent-based)
           if (targetPhone && callSid) {
-            logger.info({ callLogId, targetPhone, agentId }, "Executing call transfer...");
+            logger.info({ callLogId, agentId, isSipTarget: targetPhone.startsWith("sip:") }, "Executing call transfer...");
             player?.clear();
             ws.send(JSON.stringify({ event: "clear", streamSid }));
 
-            crmEventBus.emitCallEvent({
+            emitEvent({
               type: "call.transferring",
               callId: callLogIdNum,
               callSid,
@@ -1620,7 +1748,7 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
             });
 
             if (result.success) {
-              crmEventBus.emitCallEvent({
+              emitEvent({
                 type: "call.transferred",
                 callId: callLogIdNum,
                 callSid,
@@ -1664,7 +1792,8 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
       }
 
       // Stream response
-      const responseStream = streamLLMResponse(systemPrompt, history, transcript, aiModel, lang);
+      assertActive();
+      const responseStream = (overrides.streamResponse || streamLLMResponse)(systemPrompt, history, transcript, aiModel, lang, recordLlm);
 
       let sentenceBuffer = "";
       let fullResponseText = "";
@@ -1694,19 +1823,19 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
 
       const enqueueSentenceTTS = (sentence: string, index: number) => {
         ttsPromises.push(
-          generateSentenceTTS(sentence, lang, voice)
+          synthesize(sentence, lang, voice)
             .then(audioBuffer => {
-              if (activeGenerationId === genId) {
+              if (context.isActive() && activeGenerationId === genId) {
                 ttsBuffersMap.set(index, audioBuffer);
                 playAudioSequential();
               }
             })
-            .catch(err => logger.error({ err, sentence }, "TTS generation failed")),
+            .catch(err => logger.error({ err, callLogId, index, chars: sentence.length }, "TTS generation failed")),
         );
       };
 
       for await (const chunk of responseStream) {
-        if (activeGenerationId !== genId) {
+        if (!context.isActive() || activeGenerationId !== genId) {
           logger.info({ callLogId }, "LLM stream cancelled due to interruption.");
           return;
         }
@@ -1722,7 +1851,7 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
 
           if (sentence) {
             const index = sentenceIndex++;
-            logger.info({ callLogId, sentence, index }, "Streaming sentence to TTS");
+            logger.info({ callLogId, index, chars: sentence.length }, "Streaming sentence to TTS");
             enqueueSentenceTTS(sentence, index);
           }
         }
@@ -1731,7 +1860,7 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
       if (sentenceBuffer.trim()) {
         const index = sentenceIndex++;
         const sentence = sentenceBuffer.trim();
-        logger.info({ callLogId, sentence, index }, "Streaming remainder sentence to TTS");
+        logger.info({ callLogId, index, chars: sentence.length }, "Streaming remainder sentence to TTS");
         enqueueSentenceTTS(sentence, index);
       }
 
@@ -1743,6 +1872,7 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
       isGenerating = false;
       history.push({ role: "assistant", content: fullResponseText });
 
+      assertActive();
       // Persist turn
       const updatedTranscript = [
         ...callMeta.liveTranscript,
@@ -1763,7 +1893,7 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
         .where(eq(callLogsTable.id, parseInt(callLogId, 10)));
 
       // Emit turn to CRM
-      crmEventBus.emitCallEvent({
+      emitEvent({
         type: "call.turn",
         callId: parseInt(callLogId, 10),
         callSid,
@@ -1772,46 +1902,24 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
         timestamp: new Date().toISOString()
       });
 
-      // Log costs
-      resolveTenantIdForOwner(userId).then(tenantId => {
-        if (!tenantId) return;
-
-        const charsPerToken = isIndianLanguage(lang) ? 2.0 : 2.5;
-        const inputTokens = Math.ceil((transcript.length + systemPrompt.length) / charsPerToken);
-        const outputTokens = Math.ceil(fullResponseText.length / charsPerToken);
-
-        logLLMCost({
-          tenantId,
-          userId,
-          provider: aiModel,
-          inputTokens,
-          outputTokens,
-          context: "twilio-voice-streaming"
-        });
-
-        logTTSCost({
-          tenantId,
-          userId,
-          provider: isIndianLanguage(lang) ? "sarvam" : "openai",
-          characters: fullResponseText.length,
-          context: "twilio-tts-streaming"
-        });
-      }).catch(err => logger.error({ err }, "Cost logging error"));
-
       if (shouldHangup && !limitTriggered) {
-        logger.info({ callLogId, transcript }, "Caller done + AI closing detected — hanging up");
+        logger.info({ callLogId }, "Caller done + AI closing detected — hanging up");
         await player?.waitUntilIdle();
         await finishCallNaturally("Conversation naturally concluded");
         return;
       }
 
     } catch (err) {
-      logger.error({ err }, "Error processing user utterance turn");
+      logger.error({ err, callLogId }, "Error processing user utterance turn");
       isGenerating = false;
     } finally {
+      if (turnHold) {
+        const hold = turnHold;
+        usage.flush().finally(() => releaseTurnBudget(hold));
+      }
       isProcessingTurn = false;
       // If another utterance arrived while this turn was in progress, process it now
-      if (deferredUtterance) {
+      if (context.isActive() && deferredUtterance) {
         const pending = deferredUtterance;
         deferredUtterance = null;
         logger.info({ callLogId }, "Processing deferred utterance from previous turn");
@@ -1819,4 +1927,17 @@ twilioWss.on("connection", async (ws: WebSocket, request: any, callLogId: string
       }
     }
   };
-});
+  ws.on("message", (raw, binary) => {
+    if (binary) { void context.shutdown(); ws.close(1008, "Media access denied"); return; }
+    try {
+      const data = JSON.parse(raw.toString());
+      if (data.streamSid && data.streamSid !== context.streamSid) { void context.shutdown(); ws.close(1008, "Media access denied"); return; }
+      if (data.event === "stop" && (data.stop?.callSid && data.stop.callSid !== context.callSid
+        || data.stop?.accountSid && data.stop.accountSid !== context.accountSid)) {
+        void context.shutdown(); ws.close(1008, "Media access denied"); return;
+      }
+      void handleMessage(data);
+    } catch { void context.shutdown(); ws.close(1008, "Media access denied"); }
+  });
+  await handleMessage({ event: "start", start: verifiedStart });
+}

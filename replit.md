@@ -114,4 +114,4 @@ Every package extends `tsconfig.base.json` which sets `composite: true`. The roo
 - `pnpm run build` — runs `typecheck` first, then recursively runs `build` in all packages that define it
 - `pnpm run typecheck` — runs `tsc --build --emitDeclarationOnly` using project references
 - `pnpm --filter @workspace/api-spec run codegen` — regenerate API client + Zod schemas
-- `pnpm --filter @workspace/db run push` — push DB schema changes to PostgreSQL
+- `pnpm --filter @workspace/api-server run db:migrate apply` — apply committed migrations (after `build`); `push` is not a supported schema path, see `docs/production-readiness/database-migrations-and-startup.md`

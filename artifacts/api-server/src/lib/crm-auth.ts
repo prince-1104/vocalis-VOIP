@@ -1,8 +1,9 @@
 import { Request, Response, NextFunction } from "express";
 import crypto from "crypto";
 import { db, crmApiKeysTable } from "@workspace/db";
-import { eq, and } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { logger } from "./logger";
+import { resolveCrmCredential, AuthorizationError } from "./crm-authorization";
 
 // ── API Key Authentication for CRM Integration ────────────────────────
 //
@@ -17,6 +18,7 @@ declare global {
       crmApiKeyId?: number;
       crmApiKeyScopes?: string[];
       crmWebhookUrl?: string;
+      /** Stored (encrypted) representation; decrypt with openCredential. */
       crmWebhookSecret?: string;
     }
   }
@@ -53,26 +55,9 @@ export async function resolveCrmApiKey(req: Request, res: Response, next: NextFu
       return;
     }
 
-    const rawKey = authHeader.slice(7).trim();
-
-    if (!rawKey.startsWith(CRM_KEY_PREFIX)) {
-      res.status(401).json({ error: "Invalid API key format. Keys must start with dk_live_" });
-      return;
-    }
-
-    const hash = hashApiKey(rawKey);
-
-    const apiKey = await db.query.crmApiKeysTable.findFirst({
-      where: and(
-        eq(crmApiKeysTable.keyHash, hash),
-        eq(crmApiKeysTable.isActive, true),
-      ),
-    });
-
-    if (!apiKey) {
-      res.status(401).json({ error: "Invalid or inactive API key" });
-      return;
-    }
+    const identity = await resolveCrmCredential(authHeader.slice(7).trim());
+    const apiKey = await db.query.crmApiKeysTable.findFirst({ where: eq(crmApiKeysTable.id, identity.apiKeyId) });
+    if (!apiKey?.isActive || apiKey.userId !== identity.userId || apiKey.tenantId !== identity.tenantId) throw new AuthorizationError(401);
 
     // Update last used timestamp (fire and forget)
     db.update(crmApiKeysTable)
@@ -81,16 +66,17 @@ export async function resolveCrmApiKey(req: Request, res: Response, next: NextFu
       .catch((err) => logger.error({ err }, "Failed to update API key lastUsedAt"));
 
     // Inject CRM context into request
-    req.userId = apiKey.userId;
-    req.tenantId = apiKey.tenantId;
+    req.userId = identity.userId;
+    req.tenantId = identity.tenantId;
     req.crmApiKeyId = apiKey.id;
-    req.crmApiKeyScopes = (apiKey.scopes as string[]) || [];
+    req.crmApiKeyScopes = identity.scopes;
     req.crmWebhookUrl = apiKey.webhookUrl || undefined;
     req.crmWebhookSecret = apiKey.webhookSecret || undefined;
 
     next();
   } catch (err) {
-    logger.error({ err }, "CRM API key auth error");
+    if (err instanceof AuthorizationError) { res.status(err.status).json({ error: "Access denied" }); return; }
+    logger.error("CRM API key authorization unavailable");
     next(err);
   }
 }

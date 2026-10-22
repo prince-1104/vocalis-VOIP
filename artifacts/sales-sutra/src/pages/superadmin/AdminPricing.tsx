@@ -40,9 +40,15 @@ export default function AdminPricing() {
   const handleSave = async () => {
     setIsSaving(true);
     try {
+      // Blank fields are left unset (usage needing them waits for reconciliation) rather than priced at zero.
       const payload: Record<string, number> = {};
       for (const [k, v] of Object.entries(form)) {
-        payload[k] = parseFloat(v) || 0;
+        const value = parseFloat(v);
+        if (v.trim() !== "" && Number.isFinite(value) && value >= 0 && value !== rates[k]) payload[k] = value;
+      }
+      if (Object.keys(payload).length === 0) {
+        toast({ title: "No rate changes to save" });
+        return;
       }
       const res = await fetch("/api/superadmin/costs/rates", {
         method: "PATCH",
@@ -80,6 +86,20 @@ export default function AdminPricing() {
     { key: "tts:sarvam", label: "Sarvam TTS (Bulbul v3)", unit: "per 1M chars" },
     { key: "tts:openai", label: "OpenAI TTS", unit: "per 1M chars" },
     { key: "stt:whisper", label: "STT (Whisper)", unit: "per minute" },
+    { key: "llm:gpt-4o:input", label: "gpt-4o input", unit: "per 1M tokens" },
+    { key: "llm:gpt-4o:output", label: "gpt-4o output", unit: "per 1M tokens" },
+    { key: "llm:gpt-4o-mini:cached_input", label: "gpt-4o-mini cached input", unit: "per 1M tokens" },
+    { key: "llm:gpt-4o:cached_input", label: "gpt-4o cached input", unit: "per 1M tokens" },
+    { key: "llm:deepseek-chat:cached_input", label: "deepseek-chat cached input", unit: "per 1M tokens" },
+    { key: "stt:sarvam", label: "STT (Sarvam Saaras)", unit: "per minute" },
+    { key: "stt:twilio-gather", label: "Twilio Gather speech", unit: "per request" },
+    { key: "telephony:twilio:outbound", label: "Twilio outbound call", unit: "per started minute" },
+    { key: "telephony:twilio:inbound", label: "Twilio inbound call", unit: "per started minute" },
+    { key: "telephony:twilio:client", label: "Twilio browser voice", unit: "per started minute" },
+    { key: "telephony:twilio:conference", label: "Twilio conference participant", unit: "per started minute" },
+    { key: "telephony:twilio-sip:outbound", label: "SIP trunk outbound", unit: "per started minute" },
+    { key: "telephony:exotel:outbound", label: "Exotel outbound call", unit: "per started minute" },
+    { key: "telephony:exotel:inbound", label: "Exotel inbound call", unit: "per started minute" },
   ];
 
   return (
@@ -104,8 +124,8 @@ export default function AdminPricing() {
           <div className="flex items-start gap-3 p-4 rounded-lg bg-blue-500/10 text-blue-400 text-sm mb-6 border border-blue-500/20">
             <Info className="w-5 h-5 flex-shrink-0 mt-0.5" />
             <p>
-              These rates apply immediately to all new API calls globally. 
-              Historical costs are permanently calculated and logged at the time of the call and will not be retroactively modified if you change the rates here.
+              Rates apply to usage recorded after saving (within about five minutes on every server). Each change creates a new rate version;
+              recorded usage keeps the version it was priced with. A blank rate is not treated as free: usage that needs it waits for reconciliation.
             </p>
           </div>
 

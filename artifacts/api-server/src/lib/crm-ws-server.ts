@@ -1,181 +1,202 @@
-import { Server as HTTPServer } from "http";
+import { Server as HTTPServer } from "node:http";
 import { WebSocketServer, WebSocket } from "ws";
-import { URL } from "url";
-import crypto from "crypto";
-import { db, crmApiKeysTable } from "@workspace/db";
-import { eq, and } from "drizzle-orm";
 import { crmEventBus, type CRMCallEvent } from "./crm-event-bus";
 import { logger } from "./logger";
-import { handleTwilioStreamUpgrade, handleExotelStreamUpgrade } from "./twilio-ws-server";
+import {
+  handleTwilioStreamUpgrade,
+  handleExotelStreamUpgrade,
+} from "./twilio-ws-server";
+import {
+  resolveCrmCredential,
+  revalidateCrmIdentity,
+  requireCrmRead,
+  authorizeCrmCall,
+  resolveCallOwner,
+  AuthorizationError,
+  type CrmIdentity,
+} from "./crm-authorization";
 
-// ── WebSocket Server for CRM Real-Time Streaming ──────────────────────
-//
-// CRM clients connect to:
-//   ws://host/ws/crm/calls/{callId}?apiKey=dk_live_xxx
-//
-// They receive all CRM events for that specific call in real-time.
-// Alternatively, connect to /ws/crm/calls?apiKey=dk_live_xxx to receive
-// ALL call events for the tenant.
+const defaults = {
+  resolveCrmCredential,
+  revalidateCrmIdentity,
+  authorizeCrmCall,
+  resolveCallOwner,
+  handleTwilioStreamUpgrade,
+  handleExotelStreamUpgrade,
+  bus: crmEventBus,
+  intervalMs: 30_000,
+};
 
-interface WSClient {
-  ws: WebSocket;
-  userId: number;
-  callId: number | null;    // null = subscribe to all calls for this tenant
-  apiKeyId: number;
-}
-
-const clients = new Set<WSClient>();
-
-async function authenticateApiKey(rawKey: string): Promise<{ userId: number; apiKeyId: number } | null> {
-  if (!rawKey || !rawKey.startsWith("dk_live_")) return null;
-
-  const hash = crypto.createHash("sha256").update(rawKey).digest("hex");
-
-  const apiKey = await db.query.crmApiKeysTable.findFirst({
-    where: and(
-      eq(crmApiKeysTable.keyHash, hash),
-      eq(crmApiKeysTable.isActive, true),
-    ),
-  });
-
-  if (!apiKey) return null;
-
-  // Update last used (fire and forget)
-  db.update(crmApiKeysTable)
-    .set({ lastUsedAt: new Date() })
-    .where(eq(crmApiKeysTable.id, apiKey.id))
-    .catch(() => {});
-
-  return { userId: apiKey.userId, apiKeyId: apiKey.id };
-}
-
-function broadcastEvent(event: CRMCallEvent): void {
-  const payload = JSON.stringify(event);
-
-  for (const client of clients) {
-    if (client.ws.readyState !== WebSocket.OPEN) continue;
-
-    // Send to clients watching this specific call or all calls for the tenant
-    // Note: we'd need to know the call's userId to filter properly.
-    // For now, filter by callId match or null (all calls).
-    if (client.callId === null || client.callId === event.callId) {
-      try {
-        client.ws.send(payload);
-      } catch (err) {
-        logger.error({ err, callId: event.callId }, "WS send error");
-      }
-    }
-  }
-}
-
-export function initWebSocketServer(server: HTTPServer): void {
+export function initWebSocketServer(
+  server: HTTPServer,
+  dependencies: Partial<typeof defaults> = {},
+): () => void {
+  const deps = { ...defaults, ...dependencies };
   const wss = new WebSocketServer({ noServer: true });
-
-  // Handle HTTP upgrade for WebSocket connections
-  server.on("upgrade", async (request, socket, head) => {
-    try {
-      const url = new URL(request.url || "", `http://${request.headers.host}`);
-      const pathname = url.pathname;
-
-      // Handle Exotel AgentStream upgrades
-      if (pathname.startsWith("/ws/exotel/media-stream")) {
-        await handleExotelStreamUpgrade(request, socket, head);
-        return;
-      }
-
-      // Handle Twilio Media Stream upgrades
-      if (pathname.startsWith("/ws/crm/calls/twilio-media-stream")) {
-        await handleTwilioStreamUpgrade(request, socket, head);
-        return;
-      }
-
-      // Only handle /ws/crm/calls paths
-      if (!pathname.startsWith("/ws/crm/calls")) {
-        socket.write("HTTP/1.1 404 Not Found\r\n\r\n");
-        socket.destroy();
-        return;
-      }
-
-      // Extract API key from query param
-      const apiKey = url.searchParams.get("apiKey");
-      if (!apiKey) {
-        socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
-        socket.destroy();
-        return;
-      }
-
-      const auth = await authenticateApiKey(apiKey);
-      if (!auth) {
-        socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
-        socket.destroy();
-        return;
-      }
-
-      // Extract optional callId from path: /ws/crm/calls/123
-      const pathParts = pathname.split("/").filter(Boolean);
-      let callId: number | null = null;
-      if (pathParts.length >= 4 && pathParts[3]) {
-        const parsed = parseInt(pathParts[3]);
-        if (!isNaN(parsed)) callId = parsed;
-      }
-
-      wss.handleUpgrade(request, socket, head, (ws) => {
-        wss.emit("connection", ws, request, { ...auth, callId });
-      });
-    } catch (err) {
-      logger.error({ err }, "WebSocket upgrade error");
-      socket.write("HTTP/1.1 500 Internal Server Error\r\n\r\n");
-      socket.destroy();
+  const clients = new Set<{
+    ws: WebSocket;
+    identity: CrmIdentity;
+    callId: number | null;
+    alive: boolean;
+  }>();
+  let disposed = false;
+  let delivery = Promise.resolve();
+  const deny = (socket: any, status: number) => {
+    socket.end(
+      `HTTP/1.1 ${status} Access denied\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`,
+    );
+  };
+  const validate = async (
+    client: typeof clients extends Set<infer T> ? T : never,
+  ) => {
+    const identity = await deps.revalidateCrmIdentity(client.identity);
+    requireCrmRead(identity);
+    if (client.callId !== null)
+      await deps.authorizeCrmCall(identity, client.callId);
+    return identity;
+  };
+  const closeInvalid = (client: { ws: WebSocket }, error: unknown) => {
+    client.ws.close(
+      error instanceof AuthorizationError ? 1008 : 1011,
+      "Access denied",
+    );
+  };
+  const upgrade = async (request: any, socket: any, head: Buffer) => {
+    if (disposed) {
+      deny(socket, 503);
+      return;
     }
-  });
-
-  wss.on("connection", (ws: WebSocket, _request: any, meta: { userId: number; apiKeyId: number; callId: number | null }) => {
-    const client: WSClient = {
-      ws,
-      userId: meta.userId,
-      callId: meta.callId,
-      apiKeyId: meta.apiKeyId,
-    };
-
-    clients.add(client);
-    logger.info({ userId: meta.userId, callId: meta.callId }, "CRM WebSocket client connected");
-
-    // Send a welcome message
-    ws.send(JSON.stringify({
-      type: "connected",
-      callId: meta.callId,
-      message: meta.callId
-        ? `Streaming events for call ${meta.callId}`
-        : "Streaming all call events for your tenant",
-    }));
-
-    // Handle client disconnect
-    ws.on("close", () => {
-      clients.delete(client);
-      logger.info({ userId: meta.userId, callId: meta.callId }, "CRM WebSocket client disconnected");
-    });
-
-    ws.on("error", (err) => {
-      logger.error({ err, userId: meta.userId }, "CRM WebSocket error");
-      clients.delete(client);
-    });
-
-    // Ping/pong to keep connection alive
-    const pingInterval = setInterval(() => {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.ping();
-      } else {
-        clearInterval(pingInterval);
+    try {
+      const url = new URL(request.url || "", "http://websocket.invalid");
+      if (url.pathname.startsWith("/ws/exotel/media-stream")) {
+        await deps.handleExotelStreamUpgrade(request, socket, head);
+        return;
       }
-    }, 30_000);
+      if (url.pathname.startsWith("/ws/crm/calls/twilio-media-stream")) {
+        await deps.handleTwilioStreamUpgrade(request, socket, head);
+        return;
+      }
+      const match = /^\/ws\/crm\/calls(?:\/([1-9][0-9]*))?$/.exec(url.pathname);
+      if (!match || (match[1] && !Number.isSafeInteger(Number(match[1])))) {
+        deny(socket, 404);
+        return;
+      }
+      const callId = match[1] ? Number(match[1]) : null;
+      const identity = await deps.resolveCrmCredential(
+        url.searchParams.get("apiKey") || "",
+      );
+      requireCrmRead(identity);
+      if (callId !== null) await deps.authorizeCrmCall(identity, callId);
+      if (disposed || socket.destroyed) {
+        deny(socket, 503);
+        return;
+      }
+      wss.handleUpgrade(request, socket, head, (ws) => {
+        const client = { ws, identity, callId, alive: true };
+        clients.add(client);
+        const cleanup = () => {
+          clients.delete(client);
+        };
+        ws.once("close", cleanup);
+        ws.on("error", () => {
+          cleanup();
+          ws.terminate();
+        });
+        ws.on("pong", () => {
+          client.alive = true;
+        });
+        ws.send(
+          JSON.stringify({
+            type: "connected",
+            callId,
+            message: callId
+              ? `Streaming events for call ${callId}`
+              : "Streaming all call events for your tenant",
+          }),
+        );
+      });
+    } catch (error) {
+      deny(socket, error instanceof AuthorizationError ? error.status : 503);
+    }
+  };
+  server.on("upgrade", upgrade);
 
-    ws.on("close", () => clearInterval(pingInterval));
-  });
-
-  // Subscribe to event bus and broadcast to connected clients
-  crmEventBus.onCallEvent((event) => {
-    broadcastEvent(event);
-  });
-
-  logger.info("CRM WebSocket server initialized on /ws/crm/calls");
+  const onEvent = (event: CRMCallEvent) => {
+    delivery = delivery
+      .then(async () => {
+        if (
+          disposed ||
+          !Number.isSafeInteger(event.callId) ||
+          event.callId <= 0
+        )
+          return;
+        const owner = await deps.resolveCallOwner(event.callId);
+        if (!owner) return;
+        for (const client of clients) {
+          if (
+            client.ws.readyState !== WebSocket.OPEN ||
+            (client.callId !== null && client.callId !== event.callId)
+          )
+            continue;
+          try {
+            const identity = await validate(client);
+            if (
+              !disposed &&
+              clients.has(client) &&
+              client.ws.readyState === WebSocket.OPEN &&
+              identity.userId === owner.userId &&
+              identity.tenantId === owner.tenantId
+            ) {
+              // The persisted call, not an optional publisher assertion, supplies identity.
+              client.ws.send(
+                JSON.stringify({ ...event, userId: owner.userId }),
+              );
+            }
+          } catch (error) {
+            closeInvalid(client, error);
+          }
+        }
+      })
+      .catch(() => {
+        logger.error("CRM event authorization unavailable");
+        for (const client of clients) client.ws.close(1011, "Access denied");
+      });
+  };
+  deps.bus.onCallEvent(onEvent);
+  let checking = false;
+  const timer = setInterval(async () => {
+    if (checking || disposed) return;
+    checking = true;
+    try {
+      for (const client of clients) {
+        try {
+          await validate(client);
+          if (!client.alive) {
+            client.ws.terminate();
+            continue;
+          }
+          client.alive = false;
+          if (client.ws.readyState === WebSocket.OPEN) client.ws.ping();
+        } catch (error) {
+          closeInvalid(client, error);
+        }
+      }
+    } finally {
+      checking = false;
+    }
+  }, deps.intervalMs);
+  timer.unref();
+  const dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    clearInterval(timer);
+    server.off("upgrade", upgrade);
+    server.off("close", dispose);
+    deps.bus.off("call-event", onEvent);
+    for (const client of clients) client.ws.terminate();
+    clients.clear();
+    wss.close();
+  };
+  server.once("close", dispose);
+  return dispose;
 }

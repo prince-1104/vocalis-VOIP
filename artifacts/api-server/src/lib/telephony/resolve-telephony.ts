@@ -6,7 +6,7 @@ import {
   exotelConfigsTable,
 } from "@workspace/db";
 import { eq } from "drizzle-orm";
-import { decrypt } from "../encryption";
+import { readCredential, twilioAuthTokenFor } from "../tenant-credentials";
 import type { ExotelCredentials } from "./exotel-client";
 
 export type TelephonyProvider = "TWILIO" | "SIP_TRUNK" | "EXOTEL";
@@ -64,12 +64,9 @@ export async function resolveTelephonyForUser(
       );
     }
 
-    let apiKey: string;
-    let apiToken: string;
-    try {
-      apiKey = decrypt(exotel.apiKey);
-      apiToken = decrypt(exotel.apiToken);
-    } catch {
+    const apiKey = readCredential("exotelApiKey", tenant.id, exotel.apiKey);
+    const apiToken = readCredential("exotelApiToken", tenant.id, exotel.apiToken);
+    if (!apiKey || !apiToken) {
       throw new TelephonyNotConfiguredError("Failed to decrypt Exotel credentials.");
     }
 
@@ -92,6 +89,10 @@ export async function resolveTelephonyForUser(
       "Twilio credentials not configured. Set them in Superadmin → Tenant → Telephony or AI Agent settings.",
     );
   }
+  const twilioAuthToken = twilioAuthTokenFor(agentConfig);
+  if (!twilioAuthToken) {
+    throw new TelephonyNotConfiguredError("Failed to decrypt Twilio credentials.");
+  }
 
   if (tenant.telephonyType === "SIP_TRUNK") {
     const sipConfig = await db.query.sipTrunkConfigsTable.findFirst({
@@ -102,17 +103,15 @@ export async function resolveTelephonyForUser(
       throw new TelephonyNotConfiguredError("SIP Trunk configuration is disabled or not found.");
     }
 
-    let sipAuthPassword: string;
-    try {
-      sipAuthPassword = decrypt(sipConfig.sipPassword);
-    } catch {
+    const sipAuthPassword = readCredential("sipPassword", tenant.id, sipConfig.sipPassword);
+    if (!sipAuthPassword) {
       throw new TelephonyNotConfiguredError("Failed to decrypt SIP password.");
     }
 
     return {
       provider: "SIP_TRUNK",
       twilioAccountSid: agentConfig.twilioAccountSid,
-      twilioAuthToken: agentConfig.twilioAuthToken,
+      twilioAuthToken,
       fromPhone: sipConfig.phoneNumber,
       toPhone: `sip:${destinationPhone}@${sipConfig.sipDomain}`,
       sipAuthUsername: sipConfig.sipUsername,
@@ -127,7 +126,7 @@ export async function resolveTelephonyForUser(
   return {
     provider: "TWILIO",
     twilioAccountSid: agentConfig.twilioAccountSid,
-    twilioAuthToken: agentConfig.twilioAuthToken,
+    twilioAuthToken,
     fromPhone: agentConfig.phoneNumber,
     toPhone: destinationPhone,
   };

@@ -4,7 +4,9 @@ import { eq, and } from "drizzle-orm";
 import type { CallLog } from "@workspace/db";
 import { crmEventBus } from "./crm-event-bus";
 import { logger } from "./logger";
+import { twilioAuthTokenFor } from "./tenant-credentials";
 import { requestExotelTransfer } from "./telephony/exotel-stream-registry";
+import { releaseTransferSlot, reserveTransferSlot, transferCallbackUrls } from "./transfer-slots";
 
 // ── Transfer Manager ───────────────────────────────────────────────────
 // Handles transferring active Twilio calls to CRM agents using Twilio
@@ -92,19 +94,6 @@ function escapeXml(text: string): string {
     .replace(/'/g, "&apos;");
 }
 
-function getBaseUrl(req?: any): string {
-  const domains = process.env.REPLIT_DOMAINS;
-  if (domains) {
-    const first = domains.split(",")[0].trim();
-    return `https://${first}`;
-  }
-  if (req) {
-    const host = req.headers?.host || "localhost";
-    return `https://${host}`;
-  }
-  return process.env.BASE_URL || "https://localhost";
-}
-
 /**
  * Exotel transfer — flow based.
  *
@@ -168,7 +157,7 @@ async function executeExotelTransfer(
     });
 
     logger.info(
-      { callId: request.callId, transferTo: request.transferTo },
+      { callId: request.callId, isSipTarget: request.transferTo.startsWith("sip:") },
       "Exotel transfer initiated (caller will be connected via Connect applet)",
     );
 
@@ -204,7 +193,8 @@ export async function executeTransfer(
       where: eq(agentConfigsTable.userId, userId),
     });
 
-    if (!agentConfig?.twilioAccountSid || !agentConfig?.twilioAuthToken) {
+    const authToken = agentConfig ? twilioAuthTokenFor(agentConfig) : null;
+    if (!agentConfig?.twilioAccountSid || !authToken) {
       return { success: false, error: "Twilio credentials not configured" };
     }
 
@@ -212,9 +202,10 @@ export async function executeTransfer(
       return { success: false, error: "Twilio phone number not configured" };
     }
 
-    const client = twilio(agentConfig.twilioAccountSid, agentConfig.twilioAuthToken);
+    const client = twilio(agentConfig.twilioAccountSid, authToken);
     const conferenceName = `crm-transfer-${request.callId}-${Date.now()}`;
-    const baseUrl = getBaseUrl();
+    const lang = agentConfig?.language || "en-US";
+    const callbacks = transferCallbackUrls(request.callId, conferenceName, lang);
 
     // Emit transferring event
     const callLog = await db.query.callLogsTable.findFirst({
@@ -236,36 +227,39 @@ export async function executeTransfer(
       timestamp: new Date().toISOString(),
     });
 
-    const lang = agentConfig?.language || "en-US";
     const callerMessage = request.callerMessage
       || "Please wait, your call is being transferred to our specialist. Please stay on the line.";
 
-    // Update the active call to join a conference (caller side)
-    await client.calls(request.callSid).update({
-      twiml: `<Response>
+    await reserveTransferSlot(request.callId, userId, conferenceName, request.crmAgentId);
+
+    let agentCall;
+    try {
+      // Update the active call to join a conference (caller side)
+      await client.calls(request.callSid).update({
+        twiml: `<Response>
         <Say>${escapeXml(callerMessage)}</Say>
         <Dial>
-          <Conference statusCallback="${baseUrl}/api/crm/conference-status?callId=${request.callId}"
+          <Conference statusCallback="${escapeXml(callbacks.conferenceStatus)}"
                       statusCallbackEvent="join leave end"
                       startConferenceOnEnter="false"
                       endConferenceOnExit="true"
                       beep="false"
-                      waitUrl="${baseUrl}/api/twilio/hold-music?lang=${encodeURIComponent(lang)}"
+                      waitUrl="${escapeXml(callbacks.holdMusic)}"
                       waitMethod="POST">
             ${conferenceName}
           </Conference>
         </Dial>
       </Response>`,
-    });
+      });
 
-    // Dial out to the CRM agent and connect them to the same conference
-    const agentCall = await client.calls.create({
-      to: request.transferTo,
-      from: agentConfig.phoneNumber,
-      twiml: `<Response>
+      // Dial out to the CRM agent and connect them to the same conference
+      agentCall = await client.calls.create({
+        to: request.transferTo,
+        from: agentConfig.phoneNumber,
+        twiml: `<Response>
         ${request.briefingMessage ? `<Say>${request.briefingMessage}</Say>` : ""}
         <Dial>
-          <Conference statusCallback="${baseUrl}/api/crm/conference-status?callId=${request.callId}"
+          <Conference statusCallback="${escapeXml(callbacks.conferenceStatus)}"
                       statusCallbackEvent="join leave end"
                       startConferenceOnEnter="true"
                       endConferenceOnExit="false"
@@ -274,35 +268,23 @@ export async function executeTransfer(
           </Conference>
         </Dial>
       </Response>`,
-      statusCallback: `${baseUrl}/api/crm/agent-call-status?callId=${request.callId}`,
-      statusCallbackMethod: "POST",
-      statusCallbackEvent: ["completed", "no-answer", "busy", "failed"],
-    });
+        statusCallback: callbacks.agentCallStatus,
+        statusCallbackMethod: "POST",
+        statusCallbackEvent: ["completed", "no-answer", "busy", "failed"],
+      });
+    } catch (err) {
+      await releaseTransferSlot(request.callId, conferenceName).catch(() => false);
+      throw err;
+    }
 
     // Update call log with transfer info
     await db.update(callLogsTable)
       .set({
-        conferenceSid: conferenceName,
         transferredTo: request.transferTo,
         transferReason: request.reason,
         transferredAt: new Date(),
       })
       .where(eq(callLogsTable.id, request.callId));
-
-    // Update CRM agent's current call count
-    if (request.crmAgentId) {
-      const agent = await db.query.crmAgentsTable.findFirst({
-        where: and(
-          eq(crmAgentsTable.userId, userId),
-          eq(crmAgentsTable.crmAgentId, request.crmAgentId),
-        ),
-      });
-      if (agent) {
-        await db.update(crmAgentsTable)
-          .set({ currentCalls: agent.currentCalls + 1 })
-          .where(eq(crmAgentsTable.id, agent.id));
-      }
-    }
 
     // Emit transferred event — CRM uses crmAgentId to show on the agent's dashboard
     crmEventBus.emitCallEvent({

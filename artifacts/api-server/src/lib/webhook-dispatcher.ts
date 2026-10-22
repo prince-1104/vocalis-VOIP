@@ -2,6 +2,9 @@ import { db, webhookDeliveriesTable, crmApiKeysTable, callLogsTable } from "@wor
 import { eq, and, lte } from "drizzle-orm";
 import { signWebhookPayload } from "./crm-auth";
 import { logger } from "./logger";
+import { crmHttp } from "./crm-http";
+import { OutboundRequestError } from "./safe-outbound-http";
+import { readCredential } from "./tenant-credentials";
 import type { CRMCallEvent } from "./crm-event-bus";
 import { crmEventBus } from "./crm-event-bus";
 
@@ -12,10 +15,13 @@ import { crmEventBus } from "./crm-event-bus";
 
 const RETRY_DELAYS_MS = [10_000, 60_000, 300_000]; // 10s, 1min, 5min
 const RESPONSE_BODY_MAX = 500;
+const RESPONSE_READ_MAX_BYTES = 64 * 1024;
 
 interface WebhookTarget {
   apiKeyId: number;
+  ownerId: number;
   webhookUrl: string;
+  /** Stored (encrypted) representation. */
   webhookSecret: string;
 }
 
@@ -33,13 +39,12 @@ async function deliverWebhook(
     timestamp: event.timestamp,
   });
 
-  const signature = signWebhookPayload(payload, target.webhookSecret);
+  const secret = readCredential("crmWebhookSecret", target.ownerId, target.webhookSecret);
+  if (!secret) return { success: false, status: 0, body: "Delivery failed: signing secret unavailable" };
+  const signature = signWebhookPayload(payload, secret);
 
   try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 10_000); // 10s timeout
-
-    const response = await fetch(target.webhookUrl, {
+    const response = await crmHttp.request(target.webhookUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -48,23 +53,25 @@ async function deliverWebhook(
         "X-Dialog-Delivery-Id": deliveryId?.toString() || "0",
       },
       body: payload,
-      signal: controller.signal,
+      timeoutMs: 10_000,
+      maxResponseBytes: RESPONSE_READ_MAX_BYTES,
     });
 
-    clearTimeout(timeout);
-
-    const responseBody = await response.text().catch(() => "");
-
     return {
-      success: response.status >= 200 && response.status < 300,
+      success: response.ok,
       status: response.status,
-      body: responseBody.slice(0, RESPONSE_BODY_MAX),
+      body: response.text().slice(0, RESPONSE_BODY_MAX),
     };
-  } catch (err: any) {
+  } catch (err: unknown) {
+    if (err instanceof OutboundRequestError && err.blocked) {
+      logger.warn({ apiKeyId: target.apiKeyId, reason: err.reason }, "Webhook destination rejected");
+    }
+    // Stored responseBody is readable by the tenant; transport error text
+    // (resolved addresses, ports) is replaced by a fixed reason.
     return {
       success: false,
       status: 0,
-      body: err.message?.slice(0, RESPONSE_BODY_MAX) || "Network error",
+      body: err instanceof OutboundRequestError ? `Delivery ${err.blocked ? "blocked" : "failed"}: ${err.reason}` : "Network error",
     };
   }
 }
@@ -165,9 +172,9 @@ export function startWebhookDispatcher(): void {
         .filter(k => k.webhookUrl && k.webhookSecret)
         .map(k => ({
           apiKeyId: k.id,
+          ownerId: k.userId,
           webhookUrl: k.webhookUrl!,
           webhookSecret: k.webhookSecret!,
-          userId: k.userId,
         }));
 
       if (targets.length === 0) return;
@@ -229,6 +236,7 @@ async function processRetries(): Promise<void> {
       const result = await deliverWebhook(
         {
           apiKeyId: apiKey.id,
+          ownerId: apiKey.userId,
           webhookUrl: apiKey.webhookUrl,
           webhookSecret: apiKey.webhookSecret,
         },

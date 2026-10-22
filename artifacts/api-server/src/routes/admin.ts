@@ -1,10 +1,13 @@
 import { Router, type IRouter } from "express";
-import { db, tenantsTable, tenantUsersTable, callLogsTable, agentConfigsTable, usersTable, platformSettingsTable, apiCostLogsTable, sipTrunkConfigsTable, exotelConfigsTable } from "@workspace/db";
+import { db, tenantsTable, tenantUsersTable, callLogsTable, agentConfigsTable, usersTable, platformSettingsTable, sipTrunkConfigsTable, exotelConfigsTable } from "@workspace/db";
+import { getTenantMonthCost } from "../lib/cost-logger";
 import { eq, and, gte, sql } from "drizzle-orm";
 import bcrypt from "bcryptjs";
-import { encrypt } from "../lib/encryption";
+import { sealCredential } from "../lib/credential-crypto";
+import { adminMutationRateLimit } from "../lib/rate-limit-policies";
 
 const router: IRouter = Router();
+router.use("/superadmin", adminMutationRateLimit);
 
 function getMonthStart(): Date {
   const now = new Date();
@@ -22,16 +25,10 @@ async function getTenantMonthStats(ownerId: number, tenantId?: number) {
     .from(callLogsTable)
     .where(and(eq(callLogsTable.userId, ownerId), gte(callLogsTable.startedAt, monthStart)));
 
-  // Cost from api_cost_logs (accurate per-API-call tracking) if tenantId is available
+  // Ledger-backed committed usage for the UTC billing month if tenantId is available
   let costThisMonth = 0;
   if (tenantId) {
-    const costRows = await db
-      .select({
-        totalCost: sql<string>`coalesce(sum(cost_usd::numeric), 0)`,
-      })
-      .from(apiCostLogsTable)
-      .where(and(eq(apiCostLogsTable.tenantId, tenantId), gte(apiCostLogsTable.createdAt, monthStart)));
-    costThisMonth = parseFloat(costRows[0]?.totalCost ?? "0");
+    costThisMonth = await getTenantMonthCost(tenantId);
   } else {
     // Fallback: use call_logs estimated cost if tenantId not available
     const costRows = await db
@@ -340,12 +337,14 @@ router.put("/superadmin/tenants/:id/telephony", async (req, res) => {
     return;
   }
 
-  type TelephonyUpdate = { updatedAt: Date; phoneNumber?: string; twilioAccountSid?: string; twilioAuthToken?: string };
+  type TelephonyUpdate = { updatedAt: Date; phoneNumber?: string; twilioAccountSid?: string; twilioAuthToken?: string | null };
   const updateData: TelephonyUpdate = { updatedAt: new Date() };
   if (phoneNumber !== undefined) updateData.phoneNumber = phoneNumber;
   if (twilioAccountSid !== undefined) updateData.twilioAccountSid = twilioAccountSid;
   if (twilioAuthToken !== undefined && twilioAuthToken !== "***configured***") {
-    updateData.twilioAuthToken = twilioAuthToken;
+    updateData.twilioAuthToken = twilioAuthToken
+      ? sealCredential("twilioAuthToken", tenant.ownerId, twilioAuthToken)
+      : null;
   }
 
   await db.update(agentConfigsTable).set(updateData).where(eq(agentConfigsTable.userId, tenant.ownerId));
@@ -381,7 +380,7 @@ router.post("/superadmin/tenants/:id/telephony/sip-trunk", async (req, res) => {
 
   let encryptedPassword = "";
   if (sipPassword) {
-    encryptedPassword = encrypt(sipPassword);
+    encryptedPassword = sealCredential("sipPassword", tenantId, sipPassword);
   } else if (existingConfig) {
     encryptedPassword = existingConfig.sipPassword;
   } else {
@@ -529,13 +528,13 @@ router.post("/superadmin/tenants/:id/telephony/exotel", async (req, res) => {
   let encryptedKey = existing?.apiKey || "";
   let encryptedToken = existing?.apiToken || "";
 
-  if (apiKey) encryptedKey = encrypt(apiKey);
+  if (apiKey) encryptedKey = sealCredential("exotelApiKey", tenantId, apiKey);
   else if (!existing) {
     res.status(400).json({ error: "apiKey is required for new Exotel configuration" });
     return;
   }
 
-  if (apiToken) encryptedToken = encrypt(apiToken);
+  if (apiToken) encryptedToken = sealCredential("exotelApiToken", tenantId, apiToken);
   else if (!existing) {
     res.status(400).json({ error: "apiToken is required for new Exotel configuration" });
     return;

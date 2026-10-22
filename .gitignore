@@ -54,6 +54,19 @@ start.md
 pricing.md
 .env
 
+# Documentation and notes (not needed in production)
+docs/
+*.md
+!README.md
+architecture-preview.html
+widget-test.html
+
+# Not needed in production: pasted logs/screenshots, old data dump, dev DB scripts
+attached_assets/
+database.sql
+lib/db/check-schema.mjs
+lib/db/seed-demo-user.mjs
+
 # Seed scripts & KB (contain credentials / tenant-specific data)
 NoeticMinds-KnowledgeBase.txt
 scripts/seed-noeticminds-kb.mjs

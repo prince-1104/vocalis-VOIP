@@ -1,0 +1,20 @@
+CREATE TABLE "call_media_sessions" (
+  "id" text PRIMARY KEY NOT NULL,
+  "credential_hash" text NOT NULL,
+  "call_log_id" integer NOT NULL,
+  "tenant_id" integer NOT NULL,
+  "owner_id" integer NOT NULL,
+  "provider" text NOT NULL,
+  "account_sid" text NOT NULL,
+  "call_sid" text NOT NULL,
+  "expires_at" timestamp with time zone NOT NULL,
+  "state" text DEFAULT 'pending' NOT NULL,
+  "stream_sid" text,
+  "created_at" timestamp with time zone DEFAULT now() NOT NULL,
+  "claimed_at" timestamp with time zone,
+  "closed_at" timestamp with time zone,
+  CONSTRAINT "call_media_sessions_call_log_id_unique" UNIQUE ("call_log_id"),
+  CONSTRAINT "call_media_sessions_call_log_id_call_logs_id_fk" FOREIGN KEY ("call_log_id") REFERENCES "call_logs"("id") ON DELETE CASCADE,
+  CONSTRAINT "call_media_sessions_tenant_id_tenants_id_fk" FOREIGN KEY ("tenant_id") REFERENCES "tenants"("id") ON DELETE CASCADE,
+  CONSTRAINT "call_media_sessions_owner_id_users_id_fk" FOREIGN KEY ("owner_id") REFERENCES "users"("id") ON DELETE CASCADE
+);

@@ -3,6 +3,7 @@ import { db, usersTable, tenantUsersTable, tenantsTable, tenantSessionsTable } f
 import { eq, and } from "drizzle-orm";
 import bcrypt from "bcryptjs";
 import { generateSessionId, getSessionExpiry, signToken } from "../middleware/auth";
+import { adminMutationRateLimit, passwordChangeRateLimit } from "../lib/rate-limit-policies";
 
 const router: IRouter = Router();
 
@@ -109,7 +110,7 @@ router.put("/auth/profile", async (req, res) => {
   }
 });
 
-router.put("/auth/profile/password", async (req, res) => {
+router.put("/auth/profile/password", passwordChangeRateLimit, async (req, res) => {
   const tenantUserId = req.tenantUserId!;
   const { currentPassword, newPassword } = req.body;
 
@@ -158,7 +159,7 @@ router.post("/auth/logout", async (req, res) => {
   res.json({ success: true });
 });
 
-router.post("/auth/create-sub-user", async (req, res) => {
+router.post("/auth/create-sub-user", adminMutationRateLimit, async (req, res) => {
   if (!req.isSuperadmin && req.userRole !== "admin") {
     res.status(403).json({ error: "Admin or superadmin access required" });
     return;

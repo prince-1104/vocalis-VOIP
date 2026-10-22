@@ -1,8 +1,14 @@
 import { db, externalCrmConfigsTable, widgetChatSessionsTable } from "@workspace/db";
 import type { WidgetChatTranscriptEntry } from "@workspace/db";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { logger } from "./logger";
+import { crmHttp } from "./crm-http";
+import { OutboundRequestError } from "./safe-outbound-http";
+import { CredentialError } from "./credential-crypto";
+import { buildAuthHeaders } from "./external-crm-lookup";
 import type { WidgetCrmSession } from "./widget-crm-session";
+
+const CHAT_WEBHOOK_MAX_RESPONSE_BYTES = 64 * 1024;
 
 export type WidgetChatCrmEvent =
   | "widget.chat.started"
@@ -20,33 +26,6 @@ export interface WidgetChatCrmPayload {
   };
   message?: WidgetChatTranscriptEntry;
   transcript: WidgetChatTranscriptEntry[];
-}
-
-function buildAuthHeaders(config: {
-  authType: string;
-  authValue: string | null;
-  authHeaderName: string | null;
-}): Record<string, string> {
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    Accept: "application/json",
-  };
-  if (!config.authValue) return headers;
-  switch (config.authType) {
-    case "bearer":
-      headers.Authorization = `Bearer ${config.authValue}`;
-      break;
-    case "api_key":
-      headers["X-API-Key"] = config.authValue;
-      break;
-    case "basic":
-      headers.Authorization = `Basic ${Buffer.from(config.authValue).toString("base64")}`;
-      break;
-    case "header":
-      headers[config.authHeaderName || "X-Auth-Token"] = config.authValue;
-      break;
-  }
-  return headers;
 }
 
 async function getCrmSyncConfig(userId: number) {
@@ -96,15 +75,13 @@ async function postToCrmWebhook(
     return false;
   }
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), config.timeoutMs ?? 5000);
-
   try {
-    const response = await fetch(config.widgetChatWebhookUrl, {
+    const response = await crmHttp.request(config.widgetChatWebhookUrl, {
       method: "POST",
-      headers: buildAuthHeaders(config),
+      headers: { ...buildAuthHeaders(config), "Content-Type": "application/json" },
       body: JSON.stringify(payload),
-      signal: controller.signal,
+      timeoutMs: config.timeoutMs ?? 5000,
+      maxResponseBytes: CHAT_WEBHOOK_MAX_RESPONSE_BYTES,
     });
 
     if (!response.ok) {
@@ -121,10 +98,14 @@ async function postToCrmWebhook(
 
     return true;
   } catch (err) {
-    logger.error({ err, userId, event: payload.event }, "Widget chat CRM webhook failed");
+    if (err instanceof OutboundRequestError && err.blocked) {
+      logger.warn({ userId, event: payload.event, reason: err.reason }, "Widget chat CRM webhook destination rejected");
+    } else if (err instanceof CredentialError) {
+      logger.error({ event: "credential_unavailable", field: "crmAuthValue", ownerId: userId, reason: err.reason }, "Stored credential unavailable");
+    } else {
+      logger.error({ err, userId, event: payload.event }, "Widget chat CRM webhook failed");
+    }
     return false;
-  } finally {
-    clearTimeout(timeout);
   }
 }
 
@@ -201,6 +182,25 @@ export async function recordWidgetChatTurn(
   };
 
   await postToCrmWebhook(userId, payload);
+}
+
+/**
+ * Most recent turns the server recorded for a verified session, scoped to the
+ * owning tenant. Writes are fire-and-forget, so a reply still being recorded
+ * may be missing from the next turn's context.
+ */
+export async function loadWidgetChatHistory(
+  userId: number,
+  sessionId: string,
+  limit: number,
+): Promise<Array<{ role: "user" | "assistant"; content: string }>> {
+  const existing = await db.query.widgetChatSessionsTable.findFirst({
+    where: and(eq(widgetChatSessionsTable.sessionId, sessionId), eq(widgetChatSessionsTable.userId, userId)),
+  });
+  return (existing?.transcript ?? [])
+    .filter((t) => (t.role === "user" || t.role === "assistant") && typeof t.content === "string" && t.content.trim())
+    .slice(-limit)
+    .map((t) => ({ role: t.role as "user" | "assistant", content: t.content }));
 }
 
 export function fireWidgetChatSessionStarted(

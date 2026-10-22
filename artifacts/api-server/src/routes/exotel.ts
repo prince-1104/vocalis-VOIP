@@ -67,6 +67,7 @@ router.post("/exotel/status", async (req, res) => {
       twilioEquivalent,
       duration,
       getBaseUrl(req),
+      "unverified_callback",
     );
   }
 
@@ -77,36 +78,10 @@ router.post("/exotel/status", async (req, res) => {
  * Dynamic Voicebot URL resolver for Exotel Passthru applet.
  * Returns JSON: { "url": "wss://host/ws/exotel/media-stream/{callLogId}" }
  */
-router.get("/exotel/stream-url", (req, res) => {
-  const callLogId = req.query.callLogId as string;
-  if (!callLogId) {
-    res.status(400).json({ error: "callLogId required" });
-    return;
-  }
-
-  const baseUrl = getBaseUrl(req);
-  const isLocal = baseUrl.includes("localhost") || baseUrl.includes("127.0.0.1");
-  const wsProto = isLocal ? "ws" : "wss";
-  const wsUrl = `${baseUrl.replace(/^https?/, wsProto)}/ws/exotel/media-stream/${callLogId}`;
-
-  res.json({ url: wsUrl });
-});
-
-/** Passthru applet can POST CustomField / call metadata */
-router.post("/exotel/passthru", (req, res) => {
-  const callLogId = req.query.callLogId as string || req.body?.CustomField || req.body?.custom_field;
-  if (!callLogId) {
-    res.status(400).json({ error: "callLogId required" });
-    return;
-  }
-
-  const baseUrl = getBaseUrl(req);
-  const isLocal = baseUrl.includes("localhost") || baseUrl.includes("127.0.0.1");
-  const wsProto = isLocal ? "ws" : "wss";
-  const wsUrl = `${baseUrl.replace(/^https?/, wsProto)}/ws/exotel/media-stream/${callLogId}`;
-
-  res.json({ url: wsUrl });
-});
+// Fail closed until the authenticated Exotel resolver/upgrade contract is supplied.
+const denyMedia = (_req: unknown, res: any) => res.status(403).json({ error: "Media access denied" });
+router.all("/exotel/stream-url", denyMedia);
+router.all("/exotel/passthru", denyMedia);
 
 /**
  * Connect applet Dynamic URL — called by Exotel after the Voicebot WebSocket
@@ -137,7 +112,7 @@ async function handleExotelConnect(req: any, res: any): Promise<void> {
   const dest = pending.destination.trim();
   const isSip = dest.toLowerCase().startsWith("sip:");
 
-  logger.info({ callLogId, destination: dest, isSip }, "Exotel connect: bridging caller to agent");
+  logger.info({ callLogId, isSip }, "Exotel connect: bridging caller to agent");
 
   res.status(200).json({
     fetch_after_attempt: false,

@@ -15,13 +15,28 @@ import { resolveCrmApiKey, requireScope, generateCrmApiKey, generateWebhookSecre
 import { crmEventBus } from "../lib/crm-event-bus";
 import { executeTransfer, findBestAgent } from "../lib/transfer-manager";
 import { placeOutboundCall, TelephonyNotConfiguredError } from "../lib/telephony/place-outbound-call";
+import { SpendLimitError, spendLimitHttpStatus } from "../lib/billing/spend-budget";
+import { addSuppression, DialBlockedError, dialBlockedHttpStatus, SUPPRESSION_REASONS, type SuppressionReason } from "../lib/call-suppression";
+import { callingWindowProblem, DEFAULT_CAMPAIGN_TIMEZONE } from "../lib/calling-window";
 import { hangupCall } from "../lib/telephony/hangup-call";
 import { logger } from "../lib/logger";
+import { crmHttp } from "../lib/crm-http";
+import { CredentialError, openCredential, sealCredential } from "../lib/credential-crypto";
+import {
+  adminMutationRateLimit,
+  crmAuthFailureRateLimit,
+  crmCallCreateRateLimit,
+  crmCampaignCreateRateLimit,
+  crmCampaignStartRateLimit,
+  crmKeyRateLimit,
+  crmTransferRateLimit,
+  crmWebhookConfigRateLimit,
+} from "../lib/rate-limit-policies";
 
 const router: IRouter = Router();
 
 // ── All CRM routes require API key auth ────────────────────────────────
-router.use("/crm", resolveCrmApiKey);
+router.use("/crm", crmAuthFailureRateLimit, resolveCrmApiKey, crmKeyRateLimit);
 
 // ═══════════════════════════════════════════════════════════════════════
 // CALLS
@@ -38,7 +53,7 @@ function getBaseUrl(req: any): string {
 }
 
 // POST /api/crm/calls — Initiate an outbound AI call
-router.post("/crm/calls", requireScope("calls:write"), async (req, res) => {
+router.post("/crm/calls", requireScope("calls:write"), crmCallCreateRateLimit, async (req, res) => {
   const userId = req.userId!;
 
   const {
@@ -55,6 +70,22 @@ router.post("/crm/calls", requireScope("calls:write"), async (req, res) => {
     return;
   }
 
+  let ownedCampaign: number | null = null;
+  if (campaignId !== undefined && campaignId !== null && campaignId !== "") {
+    const id = typeof campaignId === "number" ? campaignId
+      : typeof campaignId === "string" && /^\d{1,9}$/.test(campaignId) ? Number(campaignId) : NaN;
+    const campaign = Number.isSafeInteger(id) && id > 0
+      ? await db.query.campaignsTable.findFirst({
+          where: and(eq(campaignsTable.id, id), eq(campaignsTable.userId, userId)),
+        })
+      : undefined;
+    if (!campaign) {
+      res.status(404).json({ error: "Campaign not found" });
+      return;
+    }
+    ownedCampaign = campaign.id;
+  }
+
   const agentConfig = await db.query.agentConfigsTable.findFirst({
     where: eq(agentConfigsTable.userId, userId),
   });
@@ -68,7 +99,7 @@ router.post("/crm/calls", requireScope("calls:write"), async (req, res) => {
     // Routes through Exotel or Twilio based on the tenant's telephonyType.
     const placed = await placeOutboundCall({
       userId,
-      campaignId: campaignId || null,
+      campaignId: ownedCampaign,
       phone,
       aiModel: agentConfig?.aiModel || undefined,
       baseUrl,
@@ -82,7 +113,7 @@ router.post("/crm/calls", requireScope("calls:write"), async (req, res) => {
       callId: placed.callLogId,
       callSid: placed.providerCallId,
       userId,
-      data: { phone, campaignId, provider: placed.provider },
+      data: { phone, campaignId: ownedCampaign, provider: placed.provider },
       metadata,
       timestamp: new Date().toISOString(),
     });
@@ -95,7 +126,17 @@ router.post("/crm/calls", requireScope("calls:write"), async (req, res) => {
       streamUrl: `wss://${req.headers.host}/ws/crm/calls/${placed.callLogId}`,
     });
   } catch (err: any) {
-    logger.error({ err, phone }, "CRM call initiation failed");
+    if (err instanceof DialBlockedError) {
+      logger.warn({ reason: err.code }, "CRM call blocked before dispatch");
+      res.status(dialBlockedHttpStatus(err)).json({ error: err.message, reason: err.code });
+      return;
+    }
+    if (err instanceof SpendLimitError) {
+      logger.warn({ reason: err.code }, "CRM call blocked by spend limit");
+      res.status(spendLimitHttpStatus(err)).json({ error: err.message, reason: err.code });
+      return;
+    }
+    logger.error({ err }, "CRM call initiation failed");
 
     if (err instanceof TelephonyNotConfiguredError) {
       res.status(400).json({ error: err.message });
@@ -181,7 +222,7 @@ router.get("/crm/calls/:id/transcript", requireScope("calls:read"), async (req, 
 });
 
 // POST /api/crm/calls/:id/transfer — Transfer an active call to a CRM agent
-router.post("/crm/calls/:id/transfer", requireScope("calls:write"), async (req, res) => {
+router.post("/crm/calls/:id/transfer", requireScope("calls:write"), crmTransferRateLimit, async (req, res) => {
   const userId = req.userId!;
   const callId = parseInt(req.params.id as string);
 
@@ -409,7 +450,7 @@ router.patch("/crm/agents/:crmAgentId/availability", requireScope("calls:write")
 // ═══════════════════════════════════════════════════════════════════════
 
 // POST /api/crm/webhooks — Register/update webhook URL
-router.post("/crm/webhooks", async (req, res) => {
+router.post("/crm/webhooks", crmWebhookConfigRateLimit, async (req, res) => {
   const apiKeyId = req.crmApiKeyId!;
   const { webhookUrl } = req.body;
 
@@ -418,20 +459,32 @@ router.post("/crm/webhooks", async (req, res) => {
     return;
   }
 
-  // Validate URL format
+  // Delivery re-validates the URL and every resolved address on each attempt.
   try {
-    new URL(webhookUrl);
+    crmHttp.assertUrl(webhookUrl);
   } catch {
-    res.status(400).json({ error: "Invalid webhookUrl format" });
+    res.status(400).json({ error: "webhookUrl must be a public HTTPS URL without embedded credentials" });
     return;
   }
 
-  const secret = req.crmWebhookSecret || generateWebhookSecret();
+  // Re-registering keeps the existing signing secret. A stored secret that
+  // cannot be decrypted fails the request rather than being replaced.
+  let secret: string;
+  try {
+    secret = openCredential("crmWebhookSecret", req.userId!, req.crmWebhookSecret) ?? generateWebhookSecret();
+  } catch (err) {
+    logger.error(
+      { event: "credential_unavailable", field: "crmWebhookSecret", ownerId: req.userId, reason: err instanceof CredentialError ? err.reason : "error" },
+      "Stored credential unavailable",
+    );
+    res.status(500).json({ error: "Webhook signing secret is unavailable" });
+    return;
+  }
 
   await db.update(crmApiKeysTable)
     .set({
       webhookUrl,
-      webhookSecret: secret,
+      webhookSecret: sealCredential("crmWebhookSecret", req.userId!, secret),
       updatedAt: new Date(),
     })
     .where(eq(crmApiKeysTable.id, apiKeyId));
@@ -465,7 +518,7 @@ router.get("/crm/webhooks/deliveries", async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════
 
 // POST /api/crm/campaigns — Create a campaign from CRM
-router.post("/crm/campaigns", requireScope("campaigns:write"), async (req, res) => {
+router.post("/crm/campaigns", requireScope("campaigns:write"), crmCampaignCreateRateLimit, async (req, res) => {
   const userId = req.userId!;
   const {
     name,
@@ -489,6 +542,17 @@ router.post("/crm/campaigns", requireScope("campaigns:write"), async (req, res) 
     return;
   }
 
+  const window = {
+    startTime: startTime || "09:00",
+    endTime: endTime || "17:00",
+    timezone: timezone || DEFAULT_CAMPAIGN_TIMEZONE,
+  };
+  const windowProblem = callingWindowProblem(window);
+  if (windowProblem) {
+    res.status(400).json({ error: windowProblem });
+    return;
+  }
+
   // Create campaign
   const [campaign] = await db.insert(campaignsTable).values({
     userId,
@@ -496,9 +560,7 @@ router.post("/crm/campaigns", requireScope("campaigns:write"), async (req, res) 
     description,
     scriptId: scriptId || null,
     totalContacts: contacts.length,
-    startTime: startTime || "09:00",
-    endTime: endTime || "17:00",
-    timezone: timezone || "Asia/Kolkata",
+    ...window,
     maxConcurrentCalls: maxConcurrentCalls || 1,
     status: "draft",
   }).returning();
@@ -545,7 +607,7 @@ router.post("/crm/campaigns", requireScope("campaigns:write"), async (req, res) 
 });
 
 // POST /api/crm/campaigns/:id/start — Activate a campaign
-router.post("/crm/campaigns/:id/start", requireScope("campaigns:write"), async (req, res) => {
+router.post("/crm/campaigns/:id/start", requireScope("campaigns:write"), crmCampaignStartRateLimit, async (req, res) => {
   const userId = req.userId!;
   const campaignId = parseInt(req.params.id as string);
 
@@ -568,9 +630,20 @@ router.post("/crm/campaigns/:id/start", requireScope("campaigns:write"), async (
     return;
   }
 
-  await db.update(campaignsTable)
+  const windowProblem = callingWindowProblem(campaign);
+  if (windowProblem) {
+    res.status(400).json({ error: `Calling window is not configured correctly: ${windowProblem}` });
+    return;
+  }
+
+  const activated = await db.update(campaignsTable)
     .set({ status: "active", updatedAt: new Date() })
-    .where(eq(campaignsTable.id, campaignId));
+    .where(and(eq(campaignsTable.id, campaignId), eq(campaignsTable.userId, userId), eq(campaignsTable.status, campaign.status)))
+    .returning();
+  if (activated.length !== 1) {
+    res.status(409).json({ error: "Campaign status changed; retry." });
+    return;
+  }
 
   res.json({
     campaignId,
@@ -621,55 +694,43 @@ router.get("/crm/campaigns/:id/status", requireScope("campaigns:read", "calls:re
 });
 
 // ═══════════════════════════════════════════════════════════════════════
-// CONFERENCE STATUS CALLBACKS (from Twilio)
+// OPT-OUTS / DO-NOT-CALL (record only; removal is dashboard-only)
 // ═══════════════════════════════════════════════════════════════════════
 
-// These are called by Twilio during conferences — no CRM auth needed
-// (they live under /api/crm/ but are called by Twilio directly)
-
-router.post("/crm/conference-status", async (req, res) => {
-  const callId = parseInt(req.query.callId as string);
-  const event = req.body.StatusCallbackEvent;
-
-  if (callId && event) {
-    logger.info({ callId, event, conferenceSid: req.body.ConferenceSid }, "Conference status");
-
-    if (event === "participant-leave" || event === "conference-end") {
-      // Decrement agent call count if the agent left
-      const call = await db.query.callLogsTable.findFirst({
-        where: eq(callLogsTable.id, callId),
-      });
-
-      if (call?.transferredTo) {
-        const agent = await db.query.crmAgentsTable.findFirst({
-          where: and(
-            eq(crmAgentsTable.userId, call.userId),
-            eq(crmAgentsTable.phone, call.transferredTo),
-          ),
-        });
-
-        if (agent && agent.currentCalls > 0) {
-          await db.update(crmAgentsTable)
-            .set({ currentCalls: agent.currentCalls - 1 })
-            .where(eq(crmAgentsTable.id, agent.id));
-        }
-      }
+// POST /api/crm/opt-outs — Record that a number must not be called by this tenant
+router.post("/crm/opt-outs", (req, res, next) => {
+  const scopes = req.crmApiKeyScopes || [];
+  if (scopes.includes("calls:write") || scopes.includes("campaigns:write")) return next();
+  res.status(403).json({ error: "Insufficient scope. Required: calls:write or campaigns:write." });
+}, async (req, res) => {
+  const userId = req.userId!;
+  const { phone, reason } = req.body ?? {};
+  const suppressionReason: SuppressionReason = reason === undefined ? "opt_out" : reason;
+  if (!SUPPRESSION_REASONS.includes(suppressionReason)) {
+    res.status(400).json({ error: `reason must be one of: ${SUPPRESSION_REASONS.join(", ")}` });
+    return;
+  }
+  try {
+    const recorded = await addSuppression(userId, phone, suppressionReason, "crm_api");
+    if (!recorded) {
+      res.status(400).json({ error: "The phone number is not valid." });
+      return;
     }
+    logger.info({ suppressionId: recorded.id, created: recorded.created, source: "crm_api" }, "Call suppression recorded");
+    res.status(recorded.created ? 201 : 200).json({
+      id: recorded.id,
+      phone: recorded.phone,
+      reason: recorded.reason,
+      status: "suppressed",
+    });
+  } catch {
+    logger.error({ source: "crm_api" }, "Call suppression could not be recorded");
+    res.status(503).json({ error: "Opt-out could not be recorded; retry." });
   }
-
-  res.status(200).send("OK");
 });
 
-router.post("/crm/agent-call-status", async (req, res) => {
-  const callId = parseInt(req.query.callId as string);
-  const callStatus = req.body.CallStatus;
-
-  if (callId) {
-    logger.info({ callId, agentCallStatus: callStatus }, "Agent call status");
-  }
-
-  res.status(200).send("OK");
-});
+// Twilio conference / agent-leg callbacks are signed provider webhooks served
+// by routes/twilio.ts (/api/twilio/conference-status, /api/twilio/agent-call-status).
 
 // ═══════════════════════════════════════════════════════════════════════
 // API KEY MANAGEMENT (admin only — requires the existing JWT auth)
@@ -679,7 +740,7 @@ router.post("/crm/agent-call-status", async (req, res) => {
 export const crmAdminRouter: IRouter = Router();
 
 // POST /api/crm-admin/api-keys — Generate a new CRM API key
-crmAdminRouter.post("/crm-admin/api-keys", async (req, res) => {
+crmAdminRouter.post("/crm-admin/api-keys", adminMutationRateLimit, async (req, res) => {
   const userId = req.userId!;
   const tenantId = req.tenantId!;
   const { name, scopes } = req.body;
@@ -699,7 +760,7 @@ crmAdminRouter.post("/crm-admin/api-keys", async (req, res) => {
     keyPrefix: prefix,
     name,
     scopes: scopes || ["calls:read", "calls:write", "campaigns:read", "campaigns:write"],
-    webhookSecret,
+    webhookSecret: sealCredential("crmWebhookSecret", userId, webhookSecret),
   }).returning();
 
   // Return the full key ONLY on creation — it's never stored in plaintext
@@ -735,7 +796,7 @@ crmAdminRouter.get("/crm-admin/api-keys", async (req, res) => {
 });
 
 // DELETE /api/crm-admin/api-keys/:id — Permanently delete an API key
-crmAdminRouter.delete("/crm-admin/api-keys/:id", async (req, res) => {
+crmAdminRouter.delete("/crm-admin/api-keys/:id", adminMutationRateLimit, async (req, res) => {
   const userId = req.userId!;
   const keyId = parseInt(req.params.id);
 
@@ -771,7 +832,7 @@ crmAdminRouter.get("/crm-agents", async (req, res) => {
 });
 
 // POST /api/crm-agents — Register CRM agent (admin UI)
-crmAdminRouter.post("/crm-agents", async (req, res) => {
+crmAdminRouter.post("/crm-agents", adminMutationRateLimit, async (req, res) => {
   const userId = req.userId!;
   const { crmAgentId, name, specialization, phone, intents, maxConcurrentCalls } = req.body;
 

@@ -1,13 +1,16 @@
 import express, { type Express } from "express";
-import cors from "cors";
-import pinoHttp from "pino-http";
 import { logger } from "./lib/logger";
+import { installHttpSecurity } from "./lib/security-headers";
+import { createHttpLogger } from "./lib/http-logger";
+import { safeErrorHandler } from "./lib/error-handler";
+import { parseTrustProxy } from "./lib/trusted-proxy";
 import { resolveUser, requireRole, requireSuperadmin } from "./middleware/auth";
 import healthRouter from "./routes/health";
 import authPublicRouter from "./routes/auth-public";
 import authRouter from "./routes/auth";
 import contactsRouter from "./routes/contacts";
 import campaignsRouter from "./routes/campaigns";
+import suppressionsRouter from "./routes/suppressions";
 import callsRouter from "./routes/calls";
 import agentsRouter from "./routes/agents";
 import trainingRouter from "./routes/training";
@@ -22,31 +25,17 @@ import invoicesRouter, { checkAndMarkOverdueInvoices } from "./routes/invoices";
 import widgetRouter from "./routes/widget";
 import crmRouter, { crmAdminRouter } from "./routes/crm";
 import externalCrmRouter from "./routes/external-crm";
+import widgetVerificationSettingsRouter from "./routes/widget-verification-settings";
 import { startWebhookDispatcher } from "./lib/webhook-dispatcher";
 import { startCampaignDialScheduler } from "./lib/campaign-dialer";
 
 const app: Express = express();
 
-app.use(
-  pinoHttp({
-    logger,
-    serializers: {
-      req(req) {
-        return {
-          id: req.id,
-          method: req.method,
-          url: req.url?.split("?")[0],
-        };
-      },
-      res(res) {
-        return {
-          statusCode: res.statusCode,
-        };
-      },
-    },
-  }),
-);
-app.use(cors());
+// req.ip (and every per-address rate limit) depends on this; see trusted-proxy.ts.
+app.set("trust proxy", parseTrustProxy(process.env));
+
+app.use(createHttpLogger());
+installHttpSecurity(app, process.env);
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -60,9 +49,13 @@ app.use("/api", crmRouter);            // CRM routes use their own API-key auth
 app.use("/api", resolveUser);
 
 app.use("/api", authRouter);
+// Mounted before the role-gated routers: each invoice and usage route enforces
+// its own role (tenant admin/manager or superadmin).
+app.use("/api", invoicesRouter);
 
 app.use("/api", requireRole("manager", "admin"), contactsRouter);
 app.use("/api", requireRole("manager", "admin"), campaignsRouter);
+app.use("/api", requireRole("manager", "admin"), suppressionsRouter);
 app.use("/api", requireRole("manager", "admin"), callsRouter);
 app.use("/api", requireRole("manager", "admin"), analyticsRouter);
 
@@ -73,11 +66,10 @@ app.use("/api", requireRole("admin"), scriptsRouter);
 app.use("/api", requireRole("admin"), dialRouter);
 app.use("/api", requireRole("admin"), crmAdminRouter);  // CRM API key management
 app.use("/api", requireRole("admin"), externalCrmRouter);
+app.use("/api", requireRole("admin"), widgetVerificationSettingsRouter);
 
 app.use("/api", requireSuperadmin, adminRouter);
 app.use("/api", requireSuperadmin, adminCostsRouter);
-
-app.use("/api", invoicesRouter);
 
 // ── Serve the frontend SPA ─────────────────────────────────────────────
 import path from "node:path";
@@ -91,8 +83,10 @@ app.use(express.static(publicDir));
 
 // SPA fallback — serve index.html for any non-API route that doesn't match a static file
 app.use((_req, res) => {
-  res.sendFile(path.join(publicDir, "index.html"));
+  res.set("Cache-Control", "no-cache").sendFile(path.join(publicDir, "index.html"));
 });
+
+app.use(safeErrorHandler());
 // ─────────────────────────────────────────────────────────────────────────
 
 const OVERDUE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
@@ -106,13 +100,21 @@ async function runOverdueCheck() {
   }
 }
 
-runOverdueCheck();
-setInterval(runOverdueCheck, OVERDUE_CHECK_INTERVAL_MS);
+let workersStarted = false;
 
-// Start CRM webhook event dispatcher
-startWebhookDispatcher();
+// Background jobs read and write the database; index.ts starts them only after
+// the schema check passes.
+export function startBackgroundWorkers(): void {
+  if (workersStarted) return;
+  workersStarted = true;
+  runOverdueCheck();
+  setInterval(runOverdueCheck, OVERDUE_CHECK_INTERVAL_MS);
 
-// Keep parallel/auto campaigns dialing without requiring pause/resume
-startCampaignDialScheduler();
+  // Start CRM webhook event dispatcher
+  startWebhookDispatcher();
+
+  // Keep parallel/auto campaigns dialing without requiring pause/resume
+  startCampaignDialScheduler();
+}
 
 export default app;

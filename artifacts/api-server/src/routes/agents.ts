@@ -3,8 +3,26 @@ import { db, agentConfigsTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
 import { randomUUID } from "crypto";
 import { invalidateSystemPromptCache, invalidateAgentConfigCache } from "./twilio";
+import { logger } from "../lib/logger";
+import { sealCredential, type CredentialField } from "../lib/credential-crypto";
+import { adminMutationRateLimit } from "../lib/rate-limit-policies";
 
 const router: IRouter = Router();
+
+/** Empty or null clears the credential; anything else is stored encrypted. */
+function sealOptional(field: CredentialField, ownerId: number, value: unknown): string | null {
+  if (value === null || value === "") return null;
+  return sealCredential(field, ownerId, String(value));
+}
+
+const AGENT_UPDATE_FIELDS = new Set([
+  "agentName", "voice", "language",
+  "phoneNumber", "twilioAccountSid", "twilioAuthToken",
+  "telephonyProvider", "telephonyProviderName", "telephonyApiKey", "telephonyApiSecret", "telephonyAppId",
+  "greeting", "personality", "maxCallDuration", "voicemailMessage", "businessHoursOnly", "aiModel",
+  "widgetEnabled", "widgetCampaignId", "widgetVoiceEnabled", "widgetExternalCrmEnabled",
+  "languageMenuConfig",
+]);
 
 const VALID_MODELS = [
   "gpt-4o-mini",
@@ -21,13 +39,15 @@ const VALID_MODELS = [
 
 const VALID_PROVIDERS = ["twilio", "gupshup", "exotel", "plivo", "custom"];
 
+// Stored credentials are never returned, not even to superadmins; the
+// dashboard only sends a new value when one is entered.
 function maskConfig(config: any, isSuperadmin: boolean) {
   return {
     ...config,
     twilioAccountSid: isSuperadmin ? config.twilioAccountSid : (config.twilioAccountSid ? "***configured***" : null),
-    twilioAuthToken: isSuperadmin ? config.twilioAuthToken : (config.twilioAuthToken ? "***" : null),
-    telephonyApiKey: isSuperadmin ? config.telephonyApiKey : (config.telephonyApiKey ? "***configured***" : null),
-    telephonyApiSecret: isSuperadmin ? config.telephonyApiSecret : (config.telephonyApiSecret ? "***" : null),
+    twilioAuthToken: config.twilioAuthToken ? "***" : null,
+    telephonyApiKey: config.telephonyApiKey ? "***configured***" : null,
+    telephonyApiSecret: config.telephonyApiSecret ? "***" : null,
     twilioConfigured: !!(config.twilioAccountSid && config.twilioAuthToken),
     byocConfigured: config.telephonyProvider !== "twilio" && !!(config.telephonyApiKey),
   };
@@ -62,7 +82,13 @@ router.get("/agents", async (req, res) => {
 });
 router.put("/agents", async (req, res) => {
   const userId = req.userId!;
-  console.log("PUT /agents userId:", userId, "body:", req.body);
+  const requestedFields = req.body && typeof req.body === "object"
+    ? Object.keys(req.body).filter((key) => AGENT_UPDATE_FIELDS.has(key))
+    : [];
+  logger.info(
+    { event: "agent_configuration_update_requested", userId, fields: requestedFields },
+    "Agent configuration update requested",
+  );
   const {
     agentName, voice, language,
     phoneNumber, twilioAccountSid, twilioAuthToken,
@@ -103,11 +129,11 @@ router.put("/agents", async (req, res) => {
   if (req.isSuperadmin) {
     if (phoneNumber !== undefined) updateData.phoneNumber = phoneNumber;
     if (twilioAccountSid !== undefined) updateData.twilioAccountSid = twilioAccountSid;
-    if (twilioAuthToken !== undefined && twilioAuthToken !== "***") updateData.twilioAuthToken = twilioAuthToken;
+    if (twilioAuthToken !== undefined && twilioAuthToken !== "***") updateData.twilioAuthToken = sealOptional("twilioAuthToken", userId, twilioAuthToken);
     if (telephonyProvider !== undefined && VALID_PROVIDERS.includes(telephonyProvider)) updateData.telephonyProvider = telephonyProvider;
     if (telephonyProviderName !== undefined) updateData.telephonyProviderName = telephonyProviderName;
-    if (telephonyApiKey !== undefined && telephonyApiKey !== "***configured***") updateData.telephonyApiKey = telephonyApiKey;
-    if (telephonyApiSecret !== undefined && telephonyApiSecret !== "***") updateData.telephonyApiSecret = telephonyApiSecret;
+    if (telephonyApiKey !== undefined && telephonyApiKey !== "***configured***") updateData.telephonyApiKey = sealOptional("telephonyApiKey", userId, telephonyApiKey);
+    if (telephonyApiSecret !== undefined && telephonyApiSecret !== "***") updateData.telephonyApiSecret = sealOptional("telephonyApiSecret", userId, telephonyApiSecret);
     if (telephonyAppId !== undefined) updateData.telephonyAppId = telephonyAppId;
   } else if (phoneNumber !== undefined || twilioAccountSid !== undefined || twilioAuthToken !== undefined
     || telephonyProvider !== undefined || telephonyApiKey !== undefined || telephonyApiSecret !== undefined) {
@@ -129,7 +155,7 @@ router.put("/agents", async (req, res) => {
   res.json(maskConfig(config, req.isSuperadmin!));
 });
 
-router.post("/widget/generate-key", async (req, res) => {
+router.post("/widget/generate-key", adminMutationRateLimit, async (req, res) => {
   const userId = req.userId!;
   const newKey = randomUUID();
   const [updated] = await db.update(agentConfigsTable)

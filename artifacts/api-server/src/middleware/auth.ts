@@ -1,10 +1,9 @@
 import { Request, Response, NextFunction } from "express";
-import { db, usersTable, tenantsTable, tenantUsersTable, agentConfigsTable, tenantSessionsTable, invoicesTable } from "@workspace/db";
+import { db, usersTable, tenantsTable, tenantUsersTable, tenantSessionsTable, invoicesTable } from "@workspace/db";
 import { eq, and, gt } from "drizzle-orm";
 import jwt from "jsonwebtoken";
 import crypto from "crypto";
-
-const IS_DEVELOPMENT = process.env.NODE_ENV !== "production";
+import { invoiceAmountDue } from "../lib/billing/invoicing";
 
 function getJwtSecret(): string {
   const secret = process.env.JWT_SECRET;
@@ -41,7 +40,11 @@ export function signToken(payload: { tenantUserId: number; jti: string }): strin
 
 export function verifyToken(token: string): JwtPayload | null {
   try {
-    return jwt.verify(token, getJwtSecret()) as JwtPayload;
+    const payload = jwt.verify(token, getJwtSecret(), { algorithms: ["HS256"] });
+    if (typeof payload !== "object" || !Number.isSafeInteger(payload.tenantUserId) || payload.tenantUserId <= 0
+      || typeof payload.jti !== "string" || !/^[a-f0-9]{64}$/.test(payload.jti)
+      || typeof payload.exp !== "number") return null;
+    return payload as JwtPayload;
   } catch {
     return null;
   }
@@ -55,38 +58,6 @@ export function getSessionExpiry(): Date {
   const d = new Date();
   d.setDate(d.getDate() + 7);
   return d;
-}
-
-async function ensureTenantForUser(user: {
-  id: number;
-  name: string | null;
-  email: string | null;
-  businessName: string | null;
-}) {
-  const existing = await db.query.tenantUsersTable.findFirst({
-    where: and(eq(tenantUsersTable.userId, user.id), eq(tenantUsersTable.role, "admin")),
-  });
-  if (existing) return existing;
-
-  const slug = `tenant-${user.id}-${Date.now()}`;
-  const tenantName = user.businessName || user.name || `Tenant ${user.id}`;
-
-  const [tenant] = await db.insert(tenantsTable).values({
-    name: tenantName,
-    slug,
-    ownerId: user.id,
-  }).returning();
-
-  const [tenantUser] = await db.insert(tenantUsersTable).values({
-    tenantId: tenant.id,
-    userId: user.id,
-    role: "admin",
-    email: user.email || `user-${user.id}@salessutra.internal`,
-    name: user.name,
-    isActive: true,
-  }).returning();
-
-  return tenantUser;
 }
 
 export async function resolveUser(req: Request, res: Response, next: NextFunction) {
@@ -105,6 +76,7 @@ export async function resolveUser(req: Request, res: Response, next: NextFunctio
       const session = await db.query.tenantSessionsTable.findFirst({
         where: and(
           eq(tenantSessionsTable.token, payload.jti),
+          eq(tenantSessionsTable.tenantUserId, payload.tenantUserId),
           gt(tenantSessionsTable.expiresAt, new Date()),
         ),
       });
@@ -121,7 +93,8 @@ export async function resolveUser(req: Request, res: Response, next: NextFunctio
         ),
       });
 
-      if (!tenantUser) {
+      if (!tenantUser || session.tenantUserId !== tenantUser.id || session.tenantId !== tenantUser.tenantId
+        || !["admin", "manager"].includes(tenantUser.role)) {
         res.status(401).json({ error: "User account not found or disabled" });
         return;
       }
@@ -136,12 +109,15 @@ export async function resolveUser(req: Request, res: Response, next: NextFunctio
               where: and(eq(invoicesTable.tenantId, tenant.id), eq(invoicesTable.status, "overdue")),
             })
           : null;
+        const amountDue = overdueInvoice
+          ? await invoiceAmountDue(overdueInvoice).then((due) => due.toFixed(6), () => overdueInvoice.totalBilledCostUsd)
+          : null;
         res.status(402).json({
           error: "Account suspended — outstanding invoice",
           suspended: true,
           tenantId: tenant?.id,
           invoiceId: overdueInvoice?.id ?? null,
-          amountDue: overdueInvoice?.totalBilledCostUsd ?? null,
+          amountDue,
         });
         return;
       }
@@ -152,11 +128,10 @@ export async function resolveUser(req: Request, res: Response, next: NextFunctio
         return;
       }
 
-      const ownerUser = await db.query.usersTable.findFirst({
-        where: eq(usersTable.id, tenantOwnerId),
+      const principal = tenantUser.userId === null ? null : await db.query.usersTable.findFirst({
+        where: eq(usersTable.id, tenantUser.userId),
       });
-
-      const isSuperadmin = ownerUser?.isSuperadmin ?? false;
+      const isSuperadmin = principal?.isSuperadmin === true;
 
       req.userId = tenantOwnerId;
       req.tenantOwnerId = tenantOwnerId;
@@ -170,71 +145,7 @@ export async function resolveUser(req: Request, res: Response, next: NextFunctio
       return next();
     }
 
-    const replitUserId = req.headers["x-replit-user-id"] as string | undefined;
-    const replitUserName = req.headers["x-replit-user-name"] as string | undefined;
-
-    if (!replitUserId) {
-      if (IS_DEVELOPMENT) {
-        res.status(401).json({
-          error: "Not authenticated. Provide a Bearer token or Replit identity header.",
-        });
-      } else {
-        res.status(401).json({ error: "Not authenticated" });
-      }
-      return;
-    }
-
-    let user = await db.query.usersTable.findFirst({
-      where: eq(usersTable.replitUserId, replitUserId),
-    });
-
-    if (!user) {
-      const [newUser] = await db.insert(usersTable).values({
-        replitUserId,
-        name: replitUserName || null,
-        plan: "free",
-      }).returning();
-      user = newUser;
-
-      await db.insert(agentConfigsTable).values({
-        userId: newUser.id,
-        agentName: "SalesBot",
-        voice: "nova",
-        personality: "professional",
-        greeting: "Hi, this is SalesBot calling on behalf of [Business Name]. Is this a good time to speak?",
-        voicemailMessage: "Hi, this is a message for [Name]. Please call us back at your earliest convenience. Thank you!",
-      }).onConflictDoNothing();
-    }
-
-    const tenantUser = await ensureTenantForUser(user);
-
-    const tenant = await db.query.tenantsTable.findFirst({
-      where: eq(tenantsTable.id, tenantUser.tenantId),
-    });
-
-    if (tenant && tenant.status === "suspended" && !user.isSuperadmin) {
-      const overdueInvoice = await db.query.invoicesTable.findFirst({
-        where: and(eq(invoicesTable.tenantId, tenant.id), eq(invoicesTable.status, "overdue")),
-      });
-      res.status(402).json({
-        error: "Account suspended — outstanding invoice",
-        suspended: true,
-        tenantId: tenant.id,
-        invoiceId: overdueInvoice?.id ?? null,
-        amountDue: overdueInvoice?.totalBilledCostUsd ?? null,
-      });
-      return;
-    }
-
-    req.userId = user.id;
-    req.tenantOwnerId = user.id;
-    req.tenantId = tenantUser.tenantId;
-    req.tenantUserId = tenantUser.id;
-    req.authenticatedEmail = tenantUser.email || user.email || undefined;
-    req.authenticatedName = tenantUser.name || user.name;
-    req.userRole = user.isSuperadmin ? "superadmin" : "admin";
-    req.isSuperadmin = user.isSuperadmin;
-    next();
+    res.status(401).json({ error: "Not authenticated" });
   } catch (err) {
     next(err);
   }

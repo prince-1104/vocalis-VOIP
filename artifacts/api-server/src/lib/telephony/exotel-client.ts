@@ -66,8 +66,11 @@ export async function exotelConnectToFlow(params: ExotelConnectParams): Promise<
 
   if (!res.ok) {
     const msg = data?.RestException?.Message || data?.message || `Exotel API error ${res.status}`;
-    logger.warn({ status: res.status, data }, "Exotel connect failed");
-    throw new Error(msg);
+    logger.warn(
+      { provider: "exotel", status: res.status, providerCode: data?.RestException?.Code ?? data?.code },
+      "Exotel connect failed",
+    );
+    throw Object.assign(new Error(msg), { status: res.status });
   }
 
   const callSid = data?.Call?.Sid;

@@ -7,11 +7,29 @@ import { randomUUID } from "crypto";
 import { crmEventBus } from "../lib/crm-event-bus";
 import { classifyIntent, shouldTransfer, detectHumanRequest, type TransferRules } from "../lib/intent-classifier";
 import { findBestAgent, buildTransferEventData } from "../lib/transfer-manager";
-import { logLLMCost, logTTSCost, resolveTenantIdForOwner } from "../lib/cost-logger";
-import { dialNextForCampaign, triggerDialingForCampaign, tryMarkCampaignCompleted } from "../lib/campaign-dialer";
+import { classifyProviderFailure, createUsageScope, estimateTokens, recordUsage, syncCallLogCosts, type UsageScope } from "../lib/billing/usage-ledger";
+import { recordLlmCall, reportedUsage, type LlmUsage } from "../lib/billing/llm-usage";
+import {
+  outboundTelephonyProvider,
+  recordCallTelephony,
+  releaseTurnBudget,
+  reserveCallBudget,
+  reserveTurnBudget,
+  settleCall,
+  type CallLeg,
+} from "../lib/billing/call-usage";
+import { SpendLimitError } from "../lib/billing/spend-budget";
+import { applyCampaignCallOutcome, dialNextForCampaign, triggerDialingForCampaign, tryMarkCampaignCompleted } from "../lib/campaign-dialer";
 import { loadCampaignTransferRulesForCall } from "../lib/campaign-transfer";
 import { fetchExternalCrmData, getExternalCrmCallFlow, type ExternalCrmContext, type ExternalCrmCallFlowConfig } from "../lib/external-crm-lookup";
 
+import { twilioMediaIssuer, getOrCreateVerifiedCall } from "../lib/twilio-media-auth";
+import { verifyTwilioCallWebhook } from "../lib/twilio-webhook-auth";
+import { claimCallFinalization, releaseTransferSlot, reserveTransferSlot, transferCallbackUrls } from "../lib/transfer-slots";
+import { mediaSessions, mediaPublicUrl } from "../lib/media-session";
+import { logger } from "../lib/logger";
+import { twilioAuthTokenFor } from "../lib/tenant-credentials";
+import { providerHttpError } from "../lib/log-redaction";
 const router: IRouter = Router();
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, errorMessage = "Operation timed out"): Promise<T> {
@@ -390,7 +408,37 @@ async function buildSystemPrompt(
   return system;
 }
 
-async function generateAIResponse(systemPrompt: string, history: {role: string, content: string}[], userMessage: string, model = "gpt-4o-mini"): Promise<{ text: string; inputTokens: number; outputTokens: number }> {
+interface LlmReply {
+  text: string;
+  provider: "openai" | "deepseek" | "sarvam";
+  model: string;
+  usage: LlmUsage | null;
+}
+
+type LlmPrompt = { system: string; history: { content: string }[]; user: string };
+
+/** Allowance for the system prompt (agent instructions, script, training) when sizing a turn hold. */
+const SPEECH_LOOP_PROMPT_TOKENS = 4000;
+
+const promptTexts = (prompt: LlmPrompt) => [prompt.system, prompt.user, ...prompt.history.map((h) => h.content)];
+
+function recordLlmUsage(scope: UsageScope, reply: Pick<LlmReply, "provider" | "model" | "usage">, prompt: LlmPrompt, outputText: string) {
+  return recordLlmCall(scope, { ...reply, promptTexts: promptTexts(prompt), outputText });
+}
+
+/** Exact provider model a speech-loop turn is sent to (mirrors generateResponseForModel). */
+function speechLoopModel(aiModel: string): { provider: LlmReply["provider"]; model: string } {
+  if (aiModel === "deepseek-chat" || aiModel === "deepseek-v3") return { provider: "deepseek", model: "deepseek-chat" };
+  if (aiModel === "sarvam-m" || aiModel === "sarvam-1-2b") return { provider: "sarvam", model: "sarvam-m" };
+  return { provider: "openai", model: resolveOpenAIModel(aiModel) };
+}
+
+/** Records a failed LLM request that the provider may still have billed. */
+function recordLlmFailure(scope: UsageScope, target: { provider: string; model: string }, prompt: LlmPrompt, err: unknown) {
+  return recordLlmCall(scope, { ...target, usage: null, promptTexts: promptTexts(prompt), maxOutputTokens: 200, failure: err });
+}
+
+async function generateAIResponse(systemPrompt: string, history: {role: string, content: string}[], userMessage: string, model = "gpt-4o-mini"): Promise<LlmReply> {
   const messages: any[] = [
     { role: "system", content: systemPrompt },
     ...history.map(h => ({ role: h.role, content: h.content })),
@@ -407,8 +455,9 @@ async function generateAIResponse(systemPrompt: string, history: {role: string, 
 
   return {
     text: response.choices[0]?.message?.content || "I'm sorry, I didn't catch that. Could you repeat that?",
-    inputTokens: response.usage?.prompt_tokens ?? 0,
-    outputTokens: response.usage?.completion_tokens ?? 0,
+    provider: "openai",
+    model,
+    usage: reportedUsage(response.usage),
   };
 }
 
@@ -418,41 +467,16 @@ async function generateResponseForModel(
   userMessage: string,
   aiModel: string,
   lang: string,
-): Promise<{ text: string; provider: string; inputTokens: number; outputTokens: number }> {
+): Promise<LlmReply> {
   if (aiModel === "deepseek-chat" || aiModel === "deepseek-v3") {
-    const text = await callDeepSeekLLM(systemPrompt, history, userMessage);
-    const charsPerToken = 2.5;
-    const inputChars = userMessage.length + (systemPrompt?.length ?? 0);
-    const outputChars = text.length;
-    return {
-      text,
-      provider: "deepseek-chat",
-      inputTokens: Math.ceil(inputChars / charsPerToken),
-      outputTokens: Math.ceil(outputChars / charsPerToken),
-    };
+    return callDeepSeekLLM(systemPrompt, history, userMessage);
   }
 
   if (aiModel === "sarvam-m" || aiModel === "sarvam-1-2b") {
-    const text = await callSarvamLLM(systemPrompt, history, userMessage);
-    const charsPerToken = 2.0;
-    const inputChars = userMessage.length + (systemPrompt?.length ?? 0);
-    const outputChars = text.length;
-    return {
-      text,
-      provider: "sarvam-m",
-      inputTokens: Math.ceil(inputChars / charsPerToken),
-      outputTokens: Math.ceil(outputChars / charsPerToken),
-    };
+    return callSarvamLLM(systemPrompt, history, userMessage);
   }
 
-  const resolved = resolveOpenAIModel(aiModel);
-  const aiResult = await generateAIResponse(systemPrompt, history, userMessage, resolved);
-  return {
-    text: aiResult.text,
-    provider: resolved,
-    inputTokens: aiResult.inputTokens,
-    outputTokens: aiResult.outputTokens,
-  };
+  return generateAIResponse(systemPrompt, history, userMessage, resolveOpenAIModel(aiModel));
 }
 
 async function generateOpenAITTS(text: string, voice: string = "nova"): Promise<string> {
@@ -522,8 +546,7 @@ async function callSarvamSTT(audioBuffer: Buffer, mimeType: string, lang: string
   });
 
   if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`Sarvam STT error ${res.status}: ${errText}`);
+    throw providerHttpError("Sarvam STT", res.status, await res.text().catch(() => ""));
   }
 
   const data = await res.json() as any;
@@ -534,7 +557,7 @@ async function callDeepSeekLLM(
   systemPrompt: string,
   history: {role: string, content: string}[],
   userMessage: string,
-): Promise<string> {
+): Promise<LlmReply> {
   if (!DEEPSEEK_API_KEY) throw new Error("DEEPSEEK_API_KEY not configured — Hindi calls require DeepSeek V3.2");
 
   const messages = [
@@ -558,19 +581,23 @@ async function callDeepSeekLLM(
   });
 
   if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`DeepSeek V3.2 API error ${res.status}: ${text}`);
+    throw providerHttpError("DeepSeek", res.status, await res.text().catch(() => ""));
   }
 
   const data = await res.json() as any;
-  return data.choices?.[0]?.message?.content ?? "मुझे समझ नहीं आया, क्या आप दोबारा बोल सकते हैं?";
+  return {
+    text: data.choices?.[0]?.message?.content ?? "मुझे समझ नहीं आया, क्या आप दोबारा बोल सकते हैं?",
+    provider: "deepseek",
+    model: "deepseek-chat",
+    usage: reportedUsage(data.usage),
+  };
 }
 
 async function callSarvamLLM(
   systemPrompt: string,
   history: {role: string, content: string}[],
   userMessage: string,
-): Promise<string> {
+): Promise<LlmReply> {
   if (!SARVAM_API_KEY) throw new Error("SARVAM_API_KEY not configured");
 
   const messages = [
@@ -594,12 +621,16 @@ async function callSarvamLLM(
   });
 
   if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Sarvam-M (Sarvam-1 2B family) API error ${res.status}: ${text}`);
+    throw providerHttpError("Sarvam-M", res.status, await res.text().catch(() => ""));
   }
 
   const data = await res.json() as any;
-  return data.choices?.[0]?.message?.content ?? "ಮತ್ತೊಮ್ಮೆ ಹೇಳುತ್ತೀರಾ?";
+  return {
+    text: data.choices?.[0]?.message?.content ?? "ಮತ್ತೊಮ್ಮೆ ಹೇಳುತ್ತೀರಾ?",
+    provider: "sarvam",
+    model: "sarvam-m",
+    usage: reportedUsage(data.usage),
+  };
 }
 
 // Sarvam Bulbul v3 voices, language-tuned for natural prosody.
@@ -673,8 +704,7 @@ async function callSarvamTTS(text: string, lang: string): Promise<string | null>
   });
 
   if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`Sarvam Bulbul v3 TTS error ${res.status}: ${errText}`);
+    throw providerHttpError("Sarvam TTS", res.status, await res.text().catch(() => ""));
   }
 
   const data = await res.json() as any;
@@ -683,94 +713,74 @@ async function callSarvamTTS(text: string, lang: string): Promise<string | null>
   return storeTtsAudio(audioBase64);
 }
 
+/** Records a TTS request by characters sent, the unit the TTS rates are quoted in. */
+function recordTtsUsage(scope: UsageScope, provider: "openai" | "sarvam", text: string, failure?: unknown) {
+  return scope.record({
+    category: "tts",
+    provider,
+    model: provider === "sarvam" ? "bulbul:v3" : "tts-1",
+    measurement: "actual",
+    unit: "characters",
+    quantity: text.length,
+    outcome: failure === undefined ? "charged" : classifyProviderFailure(failure),
+  });
+}
+
+/**
+ * Sarvam TTS that records its own usage. Usage follows the provider request,
+ * not the caller's timeout: a reply that arrives late was still billed.
+ */
+function sarvamTtsWithUsage(text: string, lang: string, scope: UsageScope, timeoutMs: number, label: string) {
+  const request = callSarvamTTS(text, lang);
+  const sent = normalizeTTSPronunciation(text, lang);
+  request.then(
+    (id) => { if (id) recordTtsUsage(scope, "sarvam", sent); },
+    (err) => { recordTtsUsage(scope, "sarvam", sent, err); },
+  );
+  return withTimeout(request, timeoutMs, label);
+}
+
+async function openAiTtsWithUsage(text: string, voice: string, scope: UsageScope) {
+  try {
+    const b64 = await generateOpenAITTS(text, voice);
+    recordTtsUsage(scope, "openai", text);
+    return b64;
+  } catch (err) {
+    recordTtsUsage(scope, "openai", text, err);
+    throw err;
+  }
+}
+
 async function generateAIResponseIndic(
   systemPrompt: string,
   history: {role: string, content: string}[],
   userMessage: string,
   lang: string,
-  baseUrl: string,
-  userId?: number,
+  usage: UsageScope,
 ): Promise<{ text: string; ttsAudioId: string | null }> {
   const llm = resolveSplitModelLLM(lang);
 
-  console.log(`[split-model] STT=saaras:v3 (via Twilio <Gather> transcript) lang=${lang} LLM=${llm} TTS=bulbul:v3`);
+  logger.info({ event: "split_model_turn", lang, llm, tts: "bulbul:v3" }, "Split-model Indic turn");
 
-  let text: string;
-  if (lang === "hi-IN") {
-    text = await callDeepSeekLLM(systemPrompt, history, userMessage);
-  } else {
-    text = await callSarvamLLM(systemPrompt, history, userMessage);
-  }
-
-  // Fire-and-forget: log LLM cost for Indic model
-  if (userId) {
-    resolveTenantIdForOwner(userId).then(tenantId => {
-      if (!tenantId) return;
-      const charsPerToken = 2; // Indic scripts are denser
-      const inputChars = userMessage.length + (systemPrompt?.length ?? 0);
-      const outputChars = text.length;
-      return logLLMCost({
-        tenantId,
-        userId,
-        provider: llm,
-        inputTokens: Math.ceil(inputChars / charsPerToken),
-        outputTokens: Math.ceil(outputChars / charsPerToken),
-        context: "twilio-voice-indic",
-      });
-    }).catch(e => console.error("[twilio] Indic LLM cost logging error:", e));
-  }
+  const prompt = { system: systemPrompt, history, user: userMessage };
+  const reply = await (lang === "hi-IN"
+    ? callDeepSeekLLM(systemPrompt, history, userMessage)
+    : callSarvamLLM(systemPrompt, history, userMessage)
+  ).catch((err: unknown) => {
+    recordLlmFailure(usage, { provider: lang === "hi-IN" ? "deepseek" : "sarvam", model: llm }, prompt, err);
+    throw err;
+  });
+  const text = reply.text;
+  recordLlmUsage(usage, reply, prompt, text);
 
   let ttsAudioId: string | null = null;
   try {
-    ttsAudioId = await withTimeout(callSarvamTTS(text, lang), 2500, "Sarvam TTS timeout");
-
-    // Fire-and-forget: log Sarvam TTS cost
-    if (userId && ttsAudioId) {
-      resolveTenantIdForOwner(userId).then(tenantId => {
-        if (!tenantId) return;
-        return logTTSCost({
-          tenantId,
-          userId,
-          provider: "sarvam",
-          characters: text.length,
-          context: "twilio-tts-sarvam",
-        });
-      }).catch(e => console.error("[twilio] Sarvam TTS cost logging error:", e));
-    }
+    ttsAudioId = await sarvamTtsWithUsage(text, lang, usage, 2500, "Sarvam TTS timeout");
   } catch (ttsErr) {
-    console.error("[split-model] Sarvam Bulbul TTS failed, falling back to Twilio <Say>:", ttsErr);
+    logger.error({ err: ttsErr, provider: "sarvam", lang }, "Sarvam TTS failed, falling back to Twilio <Say>");
   }
 
   return { text, ttsAudioId };
-}
-
-async function renderPromptAudioForCall(
-  text: string,
-  lang: string,
-  voice: string,
-): Promise<{ ttsAudioId: string | null; useMp3: boolean }> {
-  if (isIndianLanguage(lang)) {
-    try {
-      const sarvamTtsId = await withTimeout(callSarvamTTS(text, lang), 2500, "Greeting Sarvam TTS timeout");
-      if (sarvamTtsId) {
-        return { ttsAudioId: sarvamTtsId, useMp3: false };
-      }
-    } catch (err) {
-      console.error("[call-audio] Sarvam greeting TTS failed:", err);
-    }
-  }
-
-  if (lang === "auto") {
-    try {
-      const b64 = await withTimeout(generateOpenAITTS(text, voice || "nova"), 2500, "Greeting OpenAI TTS timeout");
-      const ttsId = storeTtsAudio(b64);
-      return { ttsAudioId: ttsId, useMp3: true };
-    } catch (err) {
-      console.error("[call-audio] OpenAI greeting TTS failed:", err);
-    }
-  }
-
-  return { ttsAudioId: null, useMp3: false };
 }
 
 const OPENAI_MODEL_MAP: Record<string, string> = {
@@ -792,56 +802,6 @@ function resolveOpenAIModel(model?: string | null): string {
   return OPENAI_MODEL_MAP[model ?? ""] ?? "gpt-4o-mini";
 }
 
-const MODEL_PRICING: Record<string, { input: number; output: number }> = {
-  "gpt-4o-mini":   { input: 0.15,  output: 0.60 },
-  "gpt-4o":        { input: 2.50,  output: 10.00 },
-  "gpt-5.2":       { input: 15.00, output: 60.00 },
-  "deepseek-chat": { input: 0.27,  output: 1.10 },
-  "sarvam-m":      { input: 0.10,  output: 0.30 },
-};
-
-const SARVAM_TTS_COST_PER_1K_CHARS = 0.006;
-const SARVAM_TTS_ESTIMATED_CHARS_PER_TURN = 200;
-
-function computeCallCost(durationSeconds: number, direction: string, model: string, language?: string | null) {
-  const minutes = Math.max(1, Math.ceil(durationSeconds / 60));
-  // Widget-voice calls use Twilio Client SDK ($0.004/min) instead of PSTN
-  const twilioBaseRate = direction === "outbound" ? 0.013 : direction === "widget-voice" ? 0.004 : 0.022;
-  const twilioSpeechRate = direction === "widget-voice" ? 0 : 0.04;  // No speech recognition charge for Client SDK
-  const twilioCost = minutes * (twilioBaseRate + twilioSpeechRate);
-
-  const estimatedTurns = Math.max(1, Math.round(durationSeconds / 25));
-  const inputTokens = estimatedTurns * 400;
-  const outputTokens = estimatedTurns * 50;
-
-  let llmCost: number;
-  const isIndic = isIndianLanguage(language);
-
-  if (isIndic && language === "hi-IN") {
-    // Hindi: DeepSeek LLM + Sarvam Bulbul TTS (both are invoked at runtime)
-    const pricing = MODEL_PRICING["deepseek-chat"];
-    const deepseekCost = (inputTokens * pricing.input + outputTokens * pricing.output) / 1_000_000;
-    const ttsCost = (estimatedTurns * SARVAM_TTS_ESTIMATED_CHARS_PER_TURN * SARVAM_TTS_COST_PER_1K_CHARS) / 1_000;
-    llmCost = deepseekCost + ttsCost;
-  } else if (isIndic) {
-    // Other Indian languages: Sarvam LLM + Sarvam Bulbul TTS
-    const pricing = MODEL_PRICING["sarvam-m"];
-    const llmOnlyCost = (inputTokens * pricing.input + outputTokens * pricing.output) / 1_000_000;
-    const ttsCost = (estimatedTurns * SARVAM_TTS_ESTIMATED_CHARS_PER_TURN * SARVAM_TTS_COST_PER_1K_CHARS) / 1_000;
-    llmCost = llmOnlyCost + ttsCost;
-  } else {
-    const pricing = MODEL_PRICING[model] || MODEL_PRICING["gpt-4o-mini"];
-    llmCost = (inputTokens * pricing.input + outputTokens * pricing.output) / 1_000_000;
-  }
-
-  return {
-    twilioCost: parseFloat(twilioCost.toFixed(6)),
-    llmCost: parseFloat(llmCost.toFixed(6)),
-    totalCost: parseFloat((twilioCost + llmCost).toFixed(6)),
-    twilioMinutes: minutes,
-  };
-}
-
 const CALL_OUTCOME_MAP: Record<string, string> = {
   completed: "answered",
   "no-answer": "no_answer",
@@ -850,39 +810,57 @@ const CALL_OUTCOME_MAP: Record<string, string> = {
   canceled: "no_answer",
 };
 
+/**
+ * Where a call duration came from. Only signed Twilio callbacks are provider
+ * evidence; unsigned Exotel callbacks and media-close wall time are estimates.
+ */
+export type CallDurationEvidence = "provider_callback" | "unverified_callback" | "media_close";
+
+async function recordCompletionUsage(
+  log: typeof callLogsTable.$inferSelect,
+  callStatus: string,
+  seconds: number,
+  evidence: CallDurationEvidence,
+) {
+  const provider = log.direction === "outbound" ? await outboundTelephonyProvider(log.userId) : "twilio";
+  const unanswered = seconds === 0 && callStatus !== "completed";
+  // Twilio does not bill busy, failed, no-answer or canceled calls; an unsigned
+  // callback or another provider's status is not evidence of a zero charge.
+  const confirmedUnbilled = unanswered && evidence === "provider_callback" && (provider === "twilio" || provider === "twilio-sip");
+  await recordCallTelephony(log, {
+    provider,
+    seconds,
+    measurement: evidence === "provider_callback" ? "actual" : "estimated",
+    outcome: confirmedUnbilled ? "not_charged" : unanswered ? "unknown" : "charged",
+    reason: evidence,
+  }).catch((err) => logger.error({ err, callLogId: log.id }, "Call telephony usage recording failed"));
+}
+
 export async function completeCallLog(
   callLogId: number,
   callStatus: string,
   callDuration: number,
   baseUrl?: string,
+  evidence: CallDurationEvidence = "media_close",
 ) {
+  if (!Object.hasOwn(CALL_OUTCOME_MAP, callStatus)) return;
   const existingLog = await db.query.callLogsTable.findFirst({
     where: eq(callLogsTable.id, callLogId),
   });
   if (!existingLog) return;
 
-  if (existingLog.duration && existingLog.duration > 0 && existingLog.estimatedCostUsd) {
+  // Rows finalized before finalized_at existed (and before the usage ledger).
+  if (!existingLog.finalizedAt && existingLog.duration && existingLog.duration > 0 && existingLog.estimatedCostUsd) {
     return;
   }
 
-  const direction = existingLog.direction || "outbound";
-  const model = existingLog.aiModel || "gpt-4o-mini";
-
-  let language: string | null = null;
-  let commissionPct = 0;
-  const [agentConf, tenant] = await Promise.all([
-    db.query.agentConfigsTable.findFirst({ where: eq(agentConfigsTable.userId, existingLog.userId) }),
-    db.query.tenantsTable.findFirst({ where: eq(tenantsTable.ownerId, existingLog.userId) }),
-  ]);
-  language = agentConf?.language ?? null;
-  if (tenant) {
-    commissionPct = parseFloat(tenant.commissionPct ?? "0");
+  // Usage is recorded whether or not this callback wins finalization: a signed
+  // callback arriving after a media-close estimate reconciles the estimate.
+  await recordCompletionUsage(existingLog, callStatus, callDuration, evidence);
+  if (existingLog.finalizedAt) {
+    await syncCallLogCosts(callLogId).catch((err) => logger.error({ err, callLogId }, "Call cost sync failed"));
+    return;
   }
-
-  const costData = callDuration > 0 ? computeCallCost(callDuration, direction, model, language) : null;
-  const billedCost = costData
-    ? parseFloat((costData.totalCost * (1 + commissionPct / 100)).toFixed(6))
-    : null;
 
   const formattedTranscript = (existingLog.liveTranscript && Array.isArray(existingLog.liveTranscript))
     ? existingLog.liveTranscript
@@ -890,22 +868,23 @@ export async function completeCallLog(
         .join("\n\n")
     : null;
 
-  await db.update(callLogsTable)
-    .set({
-      outcome: CALL_OUTCOME_MAP[callStatus] || "no_answer",
-      duration: callDuration,
-      endedAt: new Date(),
-      ...(formattedTranscript ? { transcript: formattedTranscript } : {}),
-      ...(costData ? {
-        estimatedCostUsd: costData.totalCost.toString(),
-        billedCostUsd: billedCost !== null ? billedCost.toString() : undefined,
-        twilioCostUsd: costData.twilioCost.toString(),
-        openaiCostUsd: costData.llmCost.toString(),
-        twilioMinutes: costData.twilioMinutes,
-      } : {}),
-    })
-    .where(eq(callLogsTable.id, callLogId));
+  // Single conditional claim: duplicate or concurrent terminal callbacks lose
+  // here and never re-emit call.ended or advance the campaign again.
+  const won = await claimCallFinalization(callLogId, {
+    outcome: CALL_OUTCOME_MAP[callStatus] || "no_answer",
+    duration: callDuration,
+    endedAt: existingLog.endedAt ?? new Date(),
+    ...(formattedTranscript ? { transcript: formattedTranscript } : {}),
+  });
+  if (!won) {
+    await syncCallLogCosts(callLogId).catch((err) => logger.error({ err, callLogId }, "Call cost sync failed"));
+    return;
+  }
 
+  const costs = await settleCall(callLogId, "call_completed").catch((err) => {
+    logger.error({ err, callLogId }, "Call budget settlement failed");
+    return null;
+  });
   const finalLog = await db.query.callLogsTable.findFirst({ where: eq(callLogsTable.id, callLogId) });
   crmEventBus.emitCallEvent({
     type: "call.ended",
@@ -916,58 +895,60 @@ export async function completeCallLog(
       duration: callDuration,
       transcript: finalLog?.transcript || null,
       aiSummary: finalLog?.aiSummary || null,
-      estimatedCostUsd: costData?.totalCost?.toString() || null,
-      billedCostUsd: billedCost?.toString() || null,
+      estimatedCostUsd: costs?.totalCost != null ? costs.totalCost.toString() : null,
+      billedCostUsd: costs?.billedCost != null ? costs.billedCost.toString() : null,
       liveTranscript: finalLog?.liveTranscript || [],
     },
     metadata: finalLog?.crmMetadata as Record<string, unknown> | undefined,
     timestamp: new Date().toISOString(),
   });
 
-  if (!baseUrl || !existingLog.campaignId || !existingLog.contactId) return;
+  if (!existingLog.campaignId) return;
+  await applyCampaignCallOutcome(existingLog, CALL_OUTCOME_MAP[callStatus] || "no_answer");
+  if (!baseUrl) return;
 
   const campaign = await db.query.campaignsTable.findFirst({
-    where: eq(campaignsTable.id, existingLog.campaignId),
+    where: and(eq(campaignsTable.id, existingLog.campaignId), eq(campaignsTable.userId, existingLog.userId)),
   });
   if (!campaign) return;
 
-  const resolvedOutcome = CALL_OUTCOME_MAP[callStatus] || "no_answer";
-  const campaignContact = await db.query.campaignContactsTable.findFirst({
-    where: and(
-      eq(campaignContactsTable.campaignId, existingLog.campaignId),
-      eq(campaignContactsTable.contactId, existingLog.contactId)
-    )
-  });
-
-  if (campaignContact) {
-    if (resolvedOutcome === "answered") {
-      await db.update(campaignContactsTable)
-        .set({ status: "answered" })
-        .where(eq(campaignContactsTable.id, campaignContact.id));
-
-      await db.update(campaignsTable)
-        .set({ answeredCount: sql`${campaignsTable.answeredCount} + 1` })
-        .where(eq(campaignsTable.id, campaign.id));
-    } else if (campaignContact.attempts >= 1 + campaign.maxRetries) {
-      await db.update(campaignContactsTable)
-        .set({ status: "failed" })
-        .where(eq(campaignContactsTable.id, campaignContact.id));
-    } else {
-      const nextTime = new Date(Date.now() + campaign.retryIntervalMinutes * 60 * 1000);
-      await db.update(campaignContactsTable)
-        .set({ status: "retrying", nextAttemptAt: nextTime })
-        .where(eq(campaignContactsTable.id, campaignContact.id));
-    }
-  }
-
   if (campaign.status === "active" && campaign.isAutomatic) {
     triggerDialingForCampaign(campaign.id, existingLog.userId, baseUrl).catch((err) => {
-      console.error(`[twilio/status] Auto dialing next contact failed for campaign ${campaign.id}:`, err);
+      logger.error({ err, campaignId: campaign.id }, "Auto dialing next contact failed");
     });
   } else if (campaign.status === "active") {
     tryMarkCampaignCompleted(campaign.id).catch((err) => {
-      console.error(`[twilio/status] Campaign completion check failed for ${campaign.id}:`, err);
+      logger.error({ err, campaignId: campaign.id }, "Campaign completion check failed");
     });
+  }
+}
+
+/**
+ * Holds the expected telephony cost of an incoming (PSTN or widget) call before
+ * it is answered. Over a hard limit, or when budget state is unavailable, the
+ * call is rejected unanswered and its log is closed.
+ */
+async function holdIncomingCall(callLog: { id: number; userId: number }, leg: Extract<CallLeg, "inbound" | "client">): Promise<boolean> {
+  try {
+    await reserveCallBudget({
+      userId: callLog.userId,
+      provider: "twilio",
+      leg,
+      source: leg === "client" ? "widget-voice" : "inbound",
+      key: `call:${callLog.id}`,
+      callLogId: callLog.id,
+    });
+    return true;
+  } catch (err) {
+    if (!(err instanceof SpendLimitError)) throw err;
+    logger.warn({ callLogId: callLog.id, code: err.code }, "Incoming call refused by spending limit");
+    await claimCallFinalization(callLog.id, {
+      outcome: "no_answer",
+      duration: 0,
+      endedAt: new Date(),
+      transcript: "Call refused: usage limit reached.",
+    }).catch((claimErr) => logger.error({ err: claimErr, callLogId: callLog.id }, "Refused call finalization failed"));
+    return false;
   }
 }
 
@@ -1018,7 +999,7 @@ function mapVoice(voice?: string | null): string {
 router.post("/twilio/hold-music", (req, res) => {
   const twiml = new twilio.twiml.VoiceResponse();
   const lang = (req.query.lang as string) || "en-IN";
-  const baseUrl = getBaseUrl(req);
+  const baseUrl = mediaPublicUrl("");
 
   // Multi-language hold messages using Twilio's Polly voices (no TTS API cost)
   const holdMessages: Record<string, { voice: string; messages: string[] }> = {
@@ -1079,10 +1060,10 @@ router.post("/twilio/hold-music", (req, res) => {
   res.send(twiml.toString());
 });
 
-router.post("/twilio/inbound", async (req, res) => {
+router.post("/twilio/inbound", twilioMediaIssuer("inbound"), async (req, res) => {
   const twiml = new twilio.twiml.VoiceResponse();
 
-  const userId = await resolveUserByPhone(req.body.To);
+  const userId = req.verifiedMediaOwnerId!;
   if (!userId) {
     twiml.say("We're sorry, this number is not configured. Goodbye.");
     res.type("text/xml");
@@ -1095,9 +1076,9 @@ router.post("/twilio/inbound", async (req, res) => {
   const script = await resolveActiveScript(userId);
 
   const greeting = script?.openingLine || agentConfig?.greeting || "Hi, thank you for calling. How can I help you today?";
-  const baseUrl = getBaseUrl(req);
+  const baseUrl = mediaPublicUrl("");
 
-  const [callLog] = await db.insert(callLogsTable).values({
+  const callLog = await getOrCreateVerifiedCall({
     userId,
     direction: "inbound",
     phone: req.body.From || "unknown",
@@ -1105,7 +1086,14 @@ router.post("/twilio/inbound", async (req, res) => {
     outcome: "answered",
     aiModel: agentConfig?.aiModel || "gpt-4o-mini",
     startedAt: new Date(),
-  }).returning();
+  });
+
+  if (!await holdIncomingCall(callLog, "inbound")) {
+    twiml.reject();
+    res.type("text/xml");
+    res.send(twiml.toString());
+    return;
+  }
 
   // ── Pre-warm caches for the first voice turn (fire-and-forget) ──────
   // By the time the caller finishes speaking (2–5s), these will be ready.
@@ -1139,16 +1127,15 @@ router.post("/twilio/inbound", async (req, res) => {
   attachCallStatusCallback(twiml, baseUrl, callLog.id);
 
   const connect = twiml.connect();
-  const isLocal = baseUrl.includes("localhost") || baseUrl.includes("127.0.0.1");
-  const wsProto = isLocal ? "ws" : "wss";
-  const streamUrl = `${baseUrl.replace(/^https?/, wsProto)}/ws/crm/calls/twilio-media-stream/${callLog.id}`;
-  connect.stream({ url: streamUrl, dtmfDetection: 'inband' } as any);
+  const streamUrl = mediaPublicUrl(`/ws/crm/calls/twilio-media-stream/${callLog.id}`, true);
+  const stream = connect.stream({ url: streamUrl, dtmfDetection: 'inband' } as any);
+  stream.parameter({ name: "mediaCredential", value: await mediaSessions.issue(callLog.id) });
 
   res.type("text/xml");
   res.send(twiml.toString());
 });
 
-router.post("/twilio/voice", async (req, res) => {
+router.post("/twilio/voice", verifyTwilioCallWebhook({ route: "voice", callIdParam: "callLogId", callSid: "match" }), async (req, res) => {
   const requestStart = Date.now();
   let classifyDuration = 0;
   let llmDuration = 0;
@@ -1190,7 +1177,7 @@ router.post("/twilio/voice", async (req, res) => {
 
   // ── Fetch agent config from cache (avoids DB query per turn) ────────
   const agentConfig = await getCachedAgentConfig(userId);
-  const baseUrl = getBaseUrl(req);
+  const baseUrl = mediaPublicUrl("");
   const voice = mapVoice(agentConfig?.voice);
   const configuredLang = agentConfig?.language || "en-US";
   const aiModel = agentConfig?.aiModel || "gpt-4o-mini";
@@ -1199,7 +1186,7 @@ router.post("/twilio/voice", async (req, res) => {
   let lang = configuredLang;
   if (configuredLang === "auto" && speechResult) {
     lang = detectCallLanguage(speechResult);
-    console.log(`[twilio/voice] auto-detected lang=${lang} from utterance`);
+    logger.info({ callLogId, lang }, "Speech-loop language auto-detected");
   }
 
   let intentResult = { intent: "general_question", confidence: 1.0, needsHuman: false };
@@ -1209,11 +1196,50 @@ router.post("/twilio/voice", async (req, res) => {
   const transferRules = callMeta.crmMetadata?.__transferRules as TransferRules | undefined;
   const hasTransferRules = !!transferRules;
 
+  const numericCallLogId = parseInt(callLogId, 10);
+  const usage = createUsageScope({
+    userId,
+    callLogId: numericCallLogId,
+    source: "speech-loop",
+    keyPrefix: `call:${numericCallLogId}:gather:${randomUUID()}`,
+  });
+  if (!isSilent && req.body.SpeechResult) {
+    usage.record({ category: "stt", provider: "twilio-gather", model: "gather-speech", measurement: "actual", unit: "requests", quantity: 1 });
+  }
+
   if (!isSilent && speechResult.trim()) {
+    const turnHold = await reserveTurnBudget({
+      userId,
+      callLogId: numericCallLogId,
+      turnId: randomUUID(),
+      estimate: {
+        llmModels: [speechLoopModel(aiModel).model],
+        inputTokens: SPEECH_LOOP_PROMPT_TOKENS + estimateTokens(speechResult, ...history.map((h) => h.content)),
+        maxOutputTokens: 200,
+        extraLlmCalls: hasTransferRules ? 1 : 0,
+        ttsProviders: ["openai", "sarvam"],
+      },
+    }).catch((err: unknown) => {
+      if (err instanceof SpendLimitError) return err;
+      throw err;
+    });
+    if (turnHold instanceof SpendLimitError) {
+      logger.warn({ callLogId, code: turnHold.code }, "Speech-loop turn refused by spending limit");
+      twiml.say({ language: "en-US", voice: voice as any }, "We have to end this call now. Thank you for your time. Goodbye.");
+      twiml.hangup();
+      usage.flush().catch(() => {});
+      res.type("text/xml");
+      res.send(twiml.toString());
+      return;
+    }
+    res.once("finish", () => {
+      usage.flush().finally(() => releaseTurnBudget(turnHold));
+    });
+
     // 1. Detect explicit "talk to human" request
     if (detectHumanRequest(speechResult)) {
       humanReqCount++;
-      console.log(`[twilio/voice] Human request detected (count: ${humanReqCount})`);
+      logger.info({ callLogId, humanReqCount }, "Speech-loop human request detected");
     }
 
     // 2. Classify intent (fast regex, LLM fallback only if transfer rules exist)
@@ -1221,7 +1247,7 @@ router.post("/twilio/voice", async (req, res) => {
     try {
       const classifyStart = Date.now();
       const [classifyResult, intentTrainingRow] = await Promise.all([
-        classifyIntent(history, speechResult, hasTransferRules),
+        classifyIntent(history, speechResult, hasTransferRules, usage),
         db.query.intentTrainingTable.findFirst({
           where: and(
             eq(intentTrainingTable.userId, userId),
@@ -1246,7 +1272,7 @@ router.post("/twilio/voice", async (req, res) => {
         intentTraining = intentTrainingRow ?? null;
       }
     } catch (classifyErr) {
-      console.error("[twilio/voice] Intent classification error:", classifyErr);
+      logger.error({ err: classifyErr, callLogId }, "Speech-loop intent classification failed");
     }
 
     // 3. Check transfer rules & execute transfer if needed
@@ -1299,7 +1325,7 @@ router.post("/twilio/voice", async (req, res) => {
           }
 
           if (targetPhone) {
-            console.log(`[twilio/voice] Auto-transfer triggered: intent=${intentResult.intent} reason="${decision.reason}" target=${targetPhone}`);
+            logger.info({ callLogId, intent: intentResult.intent }, "Speech-loop auto-transfer triggered");
 
             const callLogRow = await db.query.callLogsTable.findFirst({
               where: eq(callLogsTable.id, numId),
@@ -1330,24 +1356,26 @@ router.post("/twilio/voice", async (req, res) => {
             });
 
             const conferenceName = `auto-transfer-${numId}-${Date.now()}`;
+            const callbacks = transferCallbackUrls(numId, conferenceName, lang);
             twiml.say("Please wait, your call is being transferred to our specialist. Please stay on the line.");
             const dial = twiml.dial();
             dial.conference(
               {
-                statusCallback: `${baseUrl}/api/crm/conference-status?callId=${numId}`,
+                statusCallback: callbacks.conferenceStatus,
                 statusCallbackEvent: "join leave end" as any,
                 startConferenceOnEnter: false,
                 endConferenceOnExit: true,
                 beep: "false",
-                waitUrl: `${baseUrl}/api/twilio/hold-music?lang=${encodeURIComponent(lang)}`,
+                waitUrl: callbacks.holdMusic,
                 waitMethod: "POST" as any,
               },
               conferenceName,
             );
 
+            // The speech loop never reserved an agent slot; only bind the conference.
+            await reserveTransferSlot(numId, userId, conferenceName);
             await db.update(callLogsTable)
               .set({
-                conferenceSid: conferenceName,
                 transferredTo: targetPhone,
                 transferReason: decision.reason,
                 transferredAt: new Date(),
@@ -1355,13 +1383,14 @@ router.post("/twilio/voice", async (req, res) => {
               .where(eq(callLogsTable.id, numId));
 
             const agentConfig2 = await db.query.agentConfigsTable.findFirst({ where: eq(agentConfigsTable.userId, userId!) });
-            if (agentConfig2?.twilioAccountSid && agentConfig2?.twilioAuthToken && agentConfig2?.phoneNumber) {
-              const client = twilio(agentConfig2.twilioAccountSid, agentConfig2.twilioAuthToken);
+            const authToken2 = agentConfig2 ? twilioAuthTokenFor(agentConfig2) : null;
+            if (agentConfig2?.twilioAccountSid && authToken2 && agentConfig2?.phoneNumber) {
+              const client = twilio(agentConfig2.twilioAccountSid, authToken2);
               client.calls.create({
                 to: targetPhone,
                 from: agentConfig2.phoneNumber,
                 twiml: `<Response><Dial><Conference startConferenceOnEnter="true" endConferenceOnExit="false" beep="false">${conferenceName}</Conference></Dial></Response>`,
-                statusCallback: `${baseUrl}/api/crm/agent-call-status?callId=${numId}`,
+                statusCallback: callbacks.agentCallStatus,
                 statusCallbackMethod: "POST",
                 statusCallbackEvent: ["completed", "no-answer", "busy", "failed"],
               }).then(async agentCall => {
@@ -1390,7 +1419,7 @@ router.post("/twilio/voice", async (req, res) => {
                   metadata: meta,
                   timestamp: new Date().toISOString(),
                 });
-              }).catch(err => console.error("[twilio/voice] Auto-transfer agent dial failed:", err));
+              }).catch(err => logger.error({ err, callLogId }, "Speech-loop auto-transfer agent dial failed"));
             }
 
             res.type("text/xml");
@@ -1442,51 +1471,27 @@ router.post("/twilio/voice", async (req, res) => {
     try {
       // ── LLM call — TTS is started immediately after it resolves ─────
       const llmStart = Date.now();
-      const aiResult = await generateResponseForModel(systemPrompt, history, speechResult, aiModel, lang);
+      const prompt = { system: systemPrompt, history, user: speechResult };
+      const aiResult = await generateResponseForModel(systemPrompt, history, speechResult, aiModel, lang)
+        .catch((err: unknown) => {
+          recordLlmFailure(usage, speechLoopModel(aiModel), prompt, err);
+          throw err;
+        });
       aiResponse = aiResult.text;
       llmDuration = Date.now() - llmStart;
+      recordLlmUsage(usage, aiResult, prompt, aiResponse);
 
-      // Start TTS generation immediately (fire-and-forget race with DB writes below)
       const useSarvamTts = isIndianLanguage(lang);
       const ttsStart = Date.now();
-      const ttsPromise = withTimeout(
-        useSarvamTts
-          ? callSarvamTTS(aiResponse, lang)
-          : generateOpenAITTS(aiResponse, agentConfig?.voice || "nova").then(b64 => storeTtsAudio(b64)),
-        2500,
-        "TTS generation timeout"
-      ).catch(e => { console.error("TTS generation err:", e); return null; });
-
-      // Fire-and-forget: log LLM cost
-      resolveTenantIdForOwner(userId).then(tenantId => {
-        if (!tenantId) return;
-        return logLLMCost({
-          tenantId,
-          userId,
-          provider: aiResult.provider,
-          inputTokens: aiResult.inputTokens,
-          outputTokens: aiResult.outputTokens,
-          context: "twilio-voice",
-        });
-      }).catch(e => console.error("[twilio] LLM cost logging error:", e));
-
-      // Await TTS (started in parallel with cost logging above)
-      const ttsResult = await ttsPromise;
+      const ttsResult = await (useSarvamTts
+        ? sarvamTtsWithUsage(aiResponse, lang, usage, 2500, "TTS generation timeout")
+        : withTimeout(openAiTtsWithUsage(aiResponse, agentConfig?.voice || "nova", usage), 2500, "TTS generation timeout")
+          .then((b64) => storeTtsAudio(b64))
+      ).catch(err => { logger.error({ err, callLogId }, "Speech-loop TTS generation failed"); return null; });
       ttsDuration = Date.now() - ttsStart;
-      if (ttsResult) {
-        ttsAudioId = ttsResult;
-        // Fire-and-forget: log TTS cost
-        resolveTenantIdForOwner(userId).then(tenantId => {
-          if (!tenantId) return;
-          if (useSarvamTts) {
-            return logTTSCost({ tenantId, userId, provider: "sarvam", characters: aiResponse.length, context: "twilio-tts-sarvam" });
-          } else {
-            return logTTSCost({ tenantId, userId, provider: "openai", characters: aiResponse.length, context: "twilio-tts-openai" });
-          }
-        }).catch(e => console.error("[twilio] TTS cost logging error:", e));
-      }
+      if (ttsResult) ttsAudioId = ttsResult;
     } catch (err) {
-      console.error("AI response error:", err);
+      logger.error({ err, callLogId }, "Speech-loop AI response failed");
       aiResponse = "I'm sorry, I had a technical issue. Could you please repeat that?";
     }
   }
@@ -1499,7 +1504,6 @@ router.post("/twilio/voice", async (req, res) => {
   // ── CRM Event Bus: emit conversation turn & Persist live transcript ──
   // Use cached callMeta — no DB fetch needed per turn.
   if (!isSilent && speechResult.trim()) {
-    const numericCallLogId = parseInt(callLogId, 10);
     if (!isNaN(numericCallLogId)) {
       const crmMeta = callMeta.crmMetadata;
 
@@ -1538,7 +1542,7 @@ router.post("/twilio/voice", async (req, res) => {
           transcript: formattedTranscript,
         })
         .where(eq(callLogsTable.id, numericCallLogId))
-        .catch(err => console.error("Failed to update live transcript/transcript:", err));
+        .catch(err => logger.error({ err, callLogId }, "Failed to update live transcript"));
     }
   }
 
@@ -1571,11 +1575,14 @@ router.post("/twilio/voice", async (req, res) => {
 
   res.type("text/xml");
   const totalDuration = Date.now() - requestStart;
-  console.log(`[twilio/voice] CallLogId=${callLogId} Turn latency: Classify=${classifyDuration}ms, LLM=${llmDuration}ms, TTS=${ttsDuration}ms, Total=${totalDuration}ms`);
+  logger.info(
+    { callLogId, classifyMs: classifyDuration, llmMs: llmDuration, ttsMs: ttsDuration, totalMs: totalDuration },
+    "Speech-loop turn latency",
+  );
   res.send(twiml.toString());
 });
 
-router.post("/twilio/voice-indic", async (req, res) => {
+router.post("/twilio/voice-indic", verifyTwilioCallWebhook({ route: "voice-indic", callIdParam: "callLogId", callSid: "match" }), async (req, res) => {
   const requestStart = Date.now();
   const twiml = new twilio.twiml.VoiceResponse();
   const callLogId = req.query.callLogId as string;
@@ -1613,7 +1620,7 @@ router.post("/twilio/voice-indic", async (req, res) => {
 
   // ── Use cached agent config ──────────────────────────────────────────
   const agentConfig = await getCachedAgentConfig(userId);
-  const baseUrl = getBaseUrl(req);
+  const baseUrl = mediaPublicUrl("");
   const voice = mapVoice(agentConfig?.voice);
   const configuredLang = agentConfig?.language || "en-US";
   const queryLang = (req.query.lang as string) || "";
@@ -1646,19 +1653,50 @@ router.post("/twilio/voice-indic", async (req, res) => {
           `IMPORTANT: Use the above intent-specific knowledge to answer the caller's question thoroughly. ` +
           `You are an expert on this topic. Give detailed, helpful answers. ` +
           `Only suggest connecting to a human agent if you truly cannot answer after using this knowledge.`;
-        console.log(`[voice-indic] Used intent training data for "${detectedIntent}"`);
+        logger.info({ callLogId, intent: detectedIntent }, "Indic speech-loop used intent training data");
       }
     } catch (intentErr) {
-      console.error("[voice-indic] Intent training lookup failed:", intentErr);
+      logger.error({ err: intentErr, callLogId }, "Indic speech-loop intent training lookup failed");
     }
 
+    const callId = parseInt(callLogId, 10);
+    const turnHold = await reserveTurnBudget({
+      userId,
+      callLogId: callId,
+      turnId: randomUUID(),
+      estimate: {
+        llmModels: [resolveSplitModelLLM(lang)],
+        inputTokens: SPEECH_LOOP_PROMPT_TOKENS + estimateTokens(speechResult, ...history.map((h) => h.content)),
+        maxOutputTokens: 200,
+        ttsProviders: ["sarvam"],
+      },
+    }).catch((err: unknown) => {
+      if (err instanceof SpendLimitError) return err;
+      throw err;
+    });
+    if (turnHold instanceof SpendLimitError) {
+      logger.warn({ callLogId, code: turnHold.code }, "Indic speech-loop turn refused by spending limit");
+      twiml.say({ language: "en-US", voice: "Polly.Raveena" }, "We have to end this call now. Thank you for your time. Goodbye.");
+      twiml.hangup();
+      res.type("text/xml");
+      res.send(twiml.toString());
+      return;
+    }
+    const usage = createUsageScope({
+      userId,
+      callLogId: callId,
+      source: "speech-loop",
+      keyPrefix: `call:${callId}:indic:${randomUUID()}`,
+    });
     try {
-      const indicResult = await generateAIResponseIndic(finalSystemPrompt, history, speechResult, lang, baseUrl, userId);
+      const indicResult = await generateAIResponseIndic(finalSystemPrompt, history, speechResult, lang, usage);
       aiResponse = indicResult.text;
       ttsAudioId = indicResult.ttsAudioId;
     } catch (err) {
-      console.error("[voice-indic] AI response error:", err);
+      logger.error({ err, callLogId }, "Indic speech-loop AI response failed");
       aiResponse = "I'm sorry, I had a technical issue. Could you please repeat that?";
+    } finally {
+      usage.flush().finally(() => releaseTurnBudget(turnHold));
     }
   }
 
@@ -1705,7 +1743,7 @@ router.post("/twilio/voice-indic", async (req, res) => {
           transcript: formattedTranscript,
         })
         .where(eq(callLogsTable.id, numericCallLogId))
-        .catch(err => console.error("Failed to update live transcript/transcript:", err));
+        .catch(err => logger.error({ err, callLogId }, "Failed to update live transcript"));
     }
   }
 
@@ -1731,11 +1769,11 @@ router.post("/twilio/voice-indic", async (req, res) => {
 
   res.type("text/xml");
   const totalDuration = Date.now() - requestStart;
-  console.log(`[twilio/voice-indic] CallLogId=${callLogId} Turn latency: Total=${totalDuration}ms`);
+  logger.info({ callLogId, totalMs: totalDuration }, "Indic speech-loop turn latency");
   res.send(twiml.toString());
 });
 
-router.post("/twilio/outbound-voice", async (req, res) => {
+router.post("/twilio/outbound-voice", twilioMediaIssuer("outbound"), async (req, res) => {
   const twiml = new twilio.twiml.VoiceResponse();
   const callLogId = req.query.callLogId as string;
 
@@ -1761,37 +1799,140 @@ router.post("/twilio/outbound-voice", async (req, res) => {
     ? script.openingLine
     : agentConfig?.greeting || "Hi, I'm calling on behalf of our company. Is this a good time to speak?";
 
-  const baseUrl = getBaseUrl(req);
+  const baseUrl = mediaPublicUrl("");
   const voice = mapVoice(agentConfig?.voice);
 
   const connect = twiml.connect();
-  const isLocal = baseUrl.includes("localhost") || baseUrl.includes("127.0.0.1");
-  const wsProto = isLocal ? "ws" : "wss";
-  const streamUrl = `${baseUrl.replace(/^https?/, wsProto)}/ws/crm/calls/twilio-media-stream/${callLogId}`;
-  connect.stream({ url: streamUrl });
+  const streamUrl = mediaPublicUrl(`/ws/crm/calls/twilio-media-stream/${callLogId}`, true);
+  const stream = connect.stream({ url: streamUrl });
+  stream.parameter({ name: "mediaCredential", value: await mediaSessions.issue(Number(callLogId)) });
 
   res.type("text/xml");
   res.send(twiml.toString());
 });
 
-router.post("/twilio/status", async (req, res) => {
-  let callLogId = req.query.callLogId as string | undefined;
-  const callStatus = req.body.CallStatus;
-  const callDuration = parseInt(req.body.CallDuration || "0");
+const providerStatus = (value: unknown) =>
+  typeof value === "string" && /^[a-z-]{1,32}$/.test(value) ? value : "unknown";
 
-  if (!callLogId && req.body.CallSid) {
-    const bySid = await db.query.callLogsTable.findFirst({
-      where: eq(callLogsTable.callSid, req.body.CallSid),
+router.post(
+  "/twilio/status",
+  verifyTwilioCallWebhook({ route: "status", callIdParam: "callLogId", allowCallSidLookup: true, callSid: "bind", allowEnded: true }),
+  async (req, res) => {
+    const { call } = req.twilioWebhook!;
+    const callStatus = providerStatus(req.body.CallStatus);
+    const rawDuration = req.body.CallDuration;
+    const callDuration = typeof rawDuration === "string" && /^[0-9]{1,6}$/.test(rawDuration) ? Number(rawDuration) : 0;
+
+    await completeCallLog(call.id, callStatus, callDuration, mediaPublicUrl(""), "provider_callback");
+    logger.info({ event: "twilio_status_callback", callLogId: call.id, providerStatus: callStatus }, "Twilio status callback");
+    res.status(200).send("OK");
+  },
+);
+
+// Transfer callbacks are bound to the call (signature + account + tenant) and
+// to the specific conference via the signed `transfer` parameter, so stale or
+// duplicate events from an earlier transfer cannot release the current slot.
+const CONFERENCE_RELEASE_EVENTS = new Set(["participant-leave", "conference-end"]);
+const AGENT_LEG_TERMINAL = new Set(["completed", "busy", "no-answer", "failed", "canceled"]);
+
+function boundTransfer(req: { query: any; twilioWebhook?: { call: { conferenceSid: string | null } } }) {
+  const transfer = req.query.transfer;
+  return typeof transfer === "string" && transfer.length > 0 && req.twilioWebhook?.call.conferenceSid === transfer
+    ? transfer
+    : null;
+}
+
+router.post(
+  "/twilio/conference-status",
+  verifyTwilioCallWebhook({ route: "conference-status", callIdParam: "callId", callSid: "none", allowEnded: true }),
+  async (req, res) => {
+    const { call } = req.twilioWebhook!;
+    const event = providerStatus(req.body.StatusCallbackEvent);
+    const friendlyName = req.body.FriendlyName;
+    let transfer = boundTransfer(req);
+    if (transfer && friendlyName !== undefined && String(friendlyName).trim() !== transfer) transfer = null;
+    const released = transfer && CONFERENCE_RELEASE_EVENTS.has(event)
+      ? await releaseTransferSlot(call.id, transfer)
+      : false;
+    logger.info(
+      { event: "twilio_conference_status", callLogId: call.id, providerEvent: event, currentTransfer: !!transfer, released },
+      "Conference status callback",
+    );
+    res.status(200).send("OK");
+  },
+);
+
+/**
+ * A transfer adds a second outbound PSTN leg (the agent) and conference
+ * participant time. The agent leg's duration comes from its signed status
+ * callback; the conference has no configured rate and stays for reconciliation.
+ */
+async function recordTransferUsage(
+  call: { id: number; userId: number; startedAt: Date | null },
+  transfer: string,
+  agentStatus: string,
+  body: Record<string, unknown>,
+) {
+  const rawDuration = body.CallDuration;
+  const seconds = typeof rawDuration === "string" && /^[0-9]{1,6}$/.test(rawDuration) ? Number(rawDuration) : 0;
+  const agentCallSid = typeof body.CallSid === "string" && /^CA[0-9a-f]{32}$/i.test(body.CallSid) ? body.CallSid : null;
+  const base = {
+    userId: call.userId,
+    callLogId: call.id,
+    source: "transfer",
+    category: "telephony" as const,
+    provider: "twilio",
+    unit: "call_seconds" as const,
+    eventAt: call.startedAt ?? new Date(),
+  };
+  const answered = agentStatus === "completed" && seconds > 0;
+  try {
+    await recordUsage({
+      ...base,
+      model: "voice-outbound",
+      leg: "outbound",
+      providerRequestId: agentCallSid,
+      idempotencyKey: `telephony:transfer:${call.id}:${transfer}:agent`,
+      measurement: "actual",
+      quantity: seconds,
+      outcome: answered ? "charged" : "not_charged",
     });
-    if (bySid) callLogId = String(bySid.id);
+    if (answered) {
+      await recordUsage({
+        ...base,
+        model: "conference-participant",
+        leg: "conference",
+        idempotencyKey: `telephony:transfer:${call.id}:${transfer}:conference`,
+        measurement: "estimated",
+        quantity: seconds,
+        metadata: { participants: 2 },
+      });
+    }
+    await syncCallLogCosts(call.id);
+  } catch (err) {
+    logger.error({ err, callLogId: call.id }, "Transfer usage recording failed");
   }
+}
 
-  if (callLogId) {
-    await completeCallLog(parseInt(callLogId, 10), callStatus, callDuration, getBaseUrl(req));
-  }
-
-  res.status(200).send("OK");
-});
+router.post(
+  "/twilio/agent-call-status",
+  verifyTwilioCallWebhook({ route: "agent-call-status", callIdParam: "callId", callSid: "none", allowEnded: true }),
+  async (req, res) => {
+    const { call } = req.twilioWebhook!;
+    const agentStatus = providerStatus(req.body.CallStatus);
+    const transfer = boundTransfer(req);
+    const terminal = AGENT_LEG_TERMINAL.has(agentStatus);
+    const released = transfer && terminal
+      ? await releaseTransferSlot(call.id, transfer)
+      : false;
+    if (transfer && terminal) await recordTransferUsage(call, transfer, agentStatus, req.body);
+    logger.info(
+      { event: "twilio_agent_call_status", callLogId: call.id, providerStatus: agentStatus, currentTransfer: !!transfer, released },
+      "Agent call status callback",
+    );
+    res.status(200).send("OK");
+  },
+);
 
 // GET/POST /api/twilio/hold-music — Twilio calls this while caller waits in conference
 router.post("/twilio/hold-music", (req, res) => {
@@ -1839,7 +1980,7 @@ router.post("/twilio/hold-music", (req, res) => {
   twiml.pause({ length: 8 });
   twiml.say(sayOptions, msg2);
   twiml.pause({ length: 8 });
-  twiml.redirect({ method: "POST" }, `${getBaseUrl(req)}/api/twilio/hold-music?lang=${encodeURIComponent(queryLang)}`);
+  twiml.redirect({ method: "POST" }, mediaPublicUrl(`/api/twilio/hold-music?lang=${encodeURIComponent(queryLang)}`));
 
   res.type("text/xml");
   res.send(twiml.toString());
@@ -1850,29 +1991,12 @@ router.post("/twilio/hold-music", (req, res) => {
 // Client JS SDK connects via WebRTC. Twilio hits this webhook to get the
 // initial TwiML. After that, the call flows through the existing /twilio/voice
 // turn loop — identical to regular phone calls.
-router.post("/twilio/widget-voice", async (req, res) => {
+router.post("/twilio/widget-voice", twilioMediaIssuer("widget"), async (req, res) => {
   const twiml = new twilio.twiml.VoiceResponse();
-  const baseUrl = getBaseUrl(req);
+  const baseUrl = mediaPublicUrl("");
 
-  // The Twilio Client SDK passes the TwiML Application SID in ApplicationSid.
-  // We also look for userId in the connect params (passed by the widget).
-  const applicationSid = req.body.ApplicationSid;
   const callerIdentity = req.body.From || req.body.Caller || "widget-caller";
-
-  // Resolve the tenant: find the agent config with this TwiML App SID
-  let userId: number | null = null;
-  if (applicationSid) {
-    const agent = await db.query.agentConfigsTable.findFirst({
-      where: eq(agentConfigsTable.twilioTwimlAppSid as any, applicationSid),
-    });
-    if (agent) userId = agent.userId;
-  }
-
-  // Fallback: try userId from connect params
-  if (!userId) {
-    const paramUserId = req.body.userId || req.query.userId;
-    if (paramUserId) userId = parseInt(paramUserId as string, 10) || null;
-  }
+  const userId = req.verifiedMediaOwnerId!;
 
   if (!userId) {
     twiml.say("We're sorry, this voice widget is not configured. Goodbye.");
@@ -1904,7 +2028,7 @@ router.post("/twilio/widget-voice", async (req, res) => {
   const configuredLang = agentConfig?.language || "en-US";
 
   // Create call log for this widget voice session
-  const [callLog] = await db.insert(callLogsTable).values({
+  const callLog = await getOrCreateVerifiedCall({
     userId,
     direction: "widget-voice" as any,
     phone: callerIdentity,
@@ -1912,7 +2036,14 @@ router.post("/twilio/widget-voice", async (req, res) => {
     outcome: "answered",
     aiModel: agentConfig?.aiModel || "gpt-4o-mini",
     startedAt: new Date(),
-  }).returning();
+  });
+
+  if (!await holdIncomingCall(callLog, "client")) {
+    twiml.reject();
+    res.type("text/xml");
+    res.send(twiml.toString());
+    return;
+  }
 
   const callLogIdStr = String(callLog.id);
   callMetaCache.set(callLogIdStr, {
@@ -1940,12 +2071,11 @@ router.post("/twilio/widget-voice", async (req, res) => {
   attachCallStatusCallback(twiml, baseUrl, callLog.id);
 
   const connect = twiml.connect();
-  const isLocal = baseUrl.includes("localhost") || baseUrl.includes("127.0.0.1");
-  const wsProto = isLocal ? "ws" : "wss";
-  const streamUrl = `${baseUrl.replace(/^https?/, wsProto)}/ws/crm/calls/twilio-media-stream/${callLog.id}`;
-  connect.stream({ url: streamUrl });
+  const streamUrl = mediaPublicUrl(`/ws/crm/calls/twilio-media-stream/${callLog.id}`, true);
+  const stream = connect.stream({ url: streamUrl });
+  stream.parameter({ name: "mediaCredential", value: await mediaSessions.issue(callLog.id) });
 
-  console.log(`[twilio/widget-voice] New widget call for user ${userId}, callLogId=${callLog.id}, caller=${callerIdentity}`);
+  logger.info({ event: "widget_voice_call_started", userId, callLogId: callLog.id }, "New widget voice call");
 
   res.type("text/xml");
   res.send(twiml.toString());

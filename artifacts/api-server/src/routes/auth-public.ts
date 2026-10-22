@@ -3,10 +3,11 @@ import { db, tenantUsersTable, tenantsTable, tenantSessionsTable } from "@worksp
 import { eq, and } from "drizzle-orm";
 import bcrypt from "bcryptjs";
 import { signToken, generateSessionId, getSessionExpiry } from "../middleware/auth";
+import { loginRateLimit } from "../lib/rate-limit-policies";
 
 const router: IRouter = Router();
 
-router.post("/auth/login", async (req, res) => {
+router.post("/auth/login", loginRateLimit, async (req, res) => {
   const { email, password, tenantSlug } = req.body;
 
   if (!email || !password) {

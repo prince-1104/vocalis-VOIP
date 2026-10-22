@@ -1,6 +1,6 @@
 import { Router, type IRouter } from "express";
-import { db, callLogsTable, apiCostLogsTable } from "@workspace/db";
-import { eq, and, gte } from "drizzle-orm";
+import { db, callLogsTable, usageLedgerTable } from "@workspace/db";
+import { eq, and, gte, ne } from "drizzle-orm";
 
 const router: IRouter = Router();
 
@@ -65,26 +65,27 @@ router.get("/analytics/summary", async (req, res) => {
     percentage: totalCalls > 0 ? (count / totalCalls) * 100 : 0,
   }));
 
-  const apiConditions: any[] = [eq(apiCostLogsTable.userId, userId)];
-  if (period !== "all") apiConditions.push(gte(apiCostLogsTable.createdAt, since));
-  const allApiCosts = await db.select().from(apiCostLogsTable).where(and(...apiConditions));
-  
-  const twilioCostSum = allCalls.reduce((sum, c) => sum + parseFloat(c.twilioCostUsd || "0"), 0);
-  const apiCostSum = allApiCosts.reduce((sum, c) => sum + parseFloat(c.costUsd || "0"), 0);
-  const totalCostUsd = twilioCostSum + apiCostSum;
-  
-  const totalTwilioCostUsd = twilioCostSum;
-  const totalOpenaiCostUsd = apiCostSum; // LLM + TTS + STT
-  const callsWithCost = allCalls.filter(c => parseFloat(c.twilioCostUsd || "0") > 0 || c.direction === "widget");
-  const avgCostPerCall = callsWithCost.length > 0 ? totalCostUsd / callsWithCost.length : 0;
+  // Costs come from the usage ledger; unpriced entries are counted, never treated as zero cost.
+  const usageConditions = [eq(usageLedgerTable.userId, userId), ne(usageLedgerTable.status, "failed")];
+  if (period !== "all") usageConditions.push(gte(usageLedgerTable.eventAt, since));
+  const usage = await db.select({
+    callLogId: usageLedgerTable.callLogId,
+    category: usageLedgerTable.category,
+    platformCost: usageLedgerTable.platformCost,
+    eventAt: usageLedgerTable.eventAt,
+  }).from(usageLedgerTable).where(and(...usageConditions));
+  const priced = usage.filter((u) => u.platformCost != null);
+  const costOf = (rows: typeof priced) => rows.reduce((sum, u) => sum + parseFloat(u.platformCost ?? "0"), 0);
+
+  const totalTwilioCostUsd = costOf(priced.filter((u) => u.category === "telephony"));
+  const totalOpenaiCostUsd = costOf(priced.filter((u) => u.category !== "telephony")); // LLM + TTS + STT
+  const totalCostUsd = totalTwilioCostUsd + totalOpenaiCostUsd;
+  const callsWithCost = new Set(priced.filter((u) => u.callLogId != null).map((u) => u.callLogId)).size;
+  const avgCostPerCall = callsWithCost > 0 ? totalCostUsd / callsWithCost : 0;
 
   const costByDay = Array.from(callsByDayMap.entries()).map(([date]) => {
-    const dayCalls = allCalls.filter(c => c.startedAt.toISOString().split("T")[0] === date);
-    const dayApiCosts = allApiCosts.filter(c => c.createdAt.toISOString().split("T")[0] === date);
-    
-    const dayTwilioCost = dayCalls.reduce((sum, c) => sum + parseFloat(c.twilioCostUsd || "0"), 0);
-    const dayApiCost = dayApiCosts.reduce((sum, c) => sum + parseFloat(c.costUsd || "0"), 0);
-    return { date, cost: parseFloat((dayTwilioCost + dayApiCost).toFixed(4)) };
+    const dayCost = costOf(priced.filter((u) => u.eventAt.toISOString().split("T")[0] === date));
+    return { date, cost: parseFloat(dayCost.toFixed(4)) };
   });
 
   res.json({
@@ -95,6 +96,7 @@ router.get("/analytics/summary", async (req, res) => {
     totalOpenaiCostUsd: parseFloat(totalOpenaiCostUsd.toFixed(4)),
     avgCostPerCall: parseFloat(avgCostPerCall.toFixed(4)),
     costByDay,
+    unpricedUsageEntries: usage.length - priced.length,
   });
 });
 
