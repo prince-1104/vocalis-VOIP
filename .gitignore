@@ -55,9 +55,12 @@ pricing.md
 .env
 
 # Documentation and notes (not needed in production)
-docs/
+docs/*
+!docs/production-readiness/
+docs/production-readiness/*
 *.md
 !README.md
+!docs/production-readiness/monitoring-alerting-disaster-recovery.md
 architecture-preview.html
 widget-test.html
 

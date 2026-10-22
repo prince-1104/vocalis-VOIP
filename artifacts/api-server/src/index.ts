@@ -9,6 +9,7 @@ import { credentialCodec } from "./lib/credential-crypto";
 import { probeRateLimitStore, rateLimitSettings } from "./lib/rate-limit";
 import { createReadiness, runStartup, StartupBlockedError, waitForCompatibleSchema } from "./lib/schema-readiness";
 import { setReadinessCheck } from "./routes/health";
+import { startInfrastructureMonitoring } from "./lib/operational-metrics";
 
 installProcessErrorHandlers();
 
@@ -55,6 +56,8 @@ runStartup({
     new Promise<void>((resolve, reject) => {
       // Create HTTP server wrapping Express so WebSocket can share the same port
       const server = createServer(app);
+      const stopMonitoring = startInfrastructureMonitoring(pool);
+      server.once("close", stopMonitoring);
 
       // Initialize CRM WebSocket server on the same HTTP server
       const disposeWebSockets = initWebSocketServer(server);

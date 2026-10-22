@@ -3,6 +3,7 @@ import type { Campaign } from "@workspace/db";
 import { eq, and, inArray, sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { logger } from "./logger";
+import { metrics } from "./operational-metrics";
 import { buildCallCrmMetadataForCampaign } from "./campaign-transfer";
 import { evaluateCallingWindow } from "./calling-window";
 import { DialBlockedError } from "./call-suppression";
@@ -514,6 +515,7 @@ export async function reconcileCampaignDispatches(
           .catch((err) => logger.error({ err, callLogId: log.id }, "Reconciliation budget release failed"));
         await applyCampaignCallOutcome(log, "no_answer", now, connection);
         logger.warn({ campaignId, linkId: link.id, callLogId: log.id }, "Campaign dispatch reconciled as no_answer");
+        metrics.operation("stale_dispatch")();
       }
     }
   }
@@ -569,6 +571,13 @@ export async function tryMarkCampaignCompleted(campaignId: number, connection: C
 }
 
 export async function dialNextForCampaign(
+  campaignId: number, userId: number, baseUrl: string,
+): Promise<DialNextResult> {
+  return metrics.measure("campaign", () => dialNextForCampaignImpl(campaignId, userId, baseUrl), "internal",
+    result => result.budgetBlocked || result.deferred ? "blocked" : result.dialFailed ? "error" : "success");
+}
+
+async function dialNextForCampaignImpl(
   campaignId: number,
   userId: number,
   baseUrl: string
@@ -718,6 +727,7 @@ export function startCampaignDialScheduler(): void {
   const intervalMs = 15_000;
 
   setInterval(async () => {
+    const finish = metrics.operation("campaign_job");
     try {
       const activeCampaigns = await db.select().from(campaignsTable).where(
         and(
@@ -734,7 +744,10 @@ export function startCampaignDialScheduler(): void {
         await triggerDialingForCampaign(campaign.id, campaign.userId, baseUrl);
       }
     } catch (err) {
+      finish("error");
       logger.error({ err }, "[campaign-dial-scheduler] Error");
+    } finally {
+      finish();
     }
   }, intervalMs);
 

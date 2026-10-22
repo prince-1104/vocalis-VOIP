@@ -2,6 +2,7 @@ import { db, webhookDeliveriesTable, crmApiKeysTable, callLogsTable } from "@wor
 import { eq, and, lte } from "drizzle-orm";
 import { signWebhookPayload } from "./crm-auth";
 import { logger } from "./logger";
+import { metrics } from "./operational-metrics";
 import { crmHttp } from "./crm-http";
 import { OutboundRequestError } from "./safe-outbound-http";
 import { readCredential } from "./tenant-credentials";
@@ -26,6 +27,12 @@ interface WebhookTarget {
 }
 
 async function deliverWebhook(
+  target: WebhookTarget, event: CRMCallEvent, deliveryId?: number,
+): Promise<{ success: boolean; status?: number; body?: string }> {
+  return metrics.measure("webhook_delivery", () => deliverWebhookImpl(target, event, deliveryId), "internal", result => result.success ? "success" : "error");
+}
+
+async function deliverWebhookImpl(
   target: WebhookTarget,
   event: CRMCallEvent,
   deliveryId?: number,
@@ -201,6 +208,7 @@ export function startWebhookDispatcher(): void {
 
 // Retry failed deliveries
 async function processRetries(): Promise<void> {
+  const finish = metrics.operation("webhook_job");
   try {
     const pending = await db.select()
       .from(webhookDeliveriesTable)
@@ -211,6 +219,8 @@ async function processRetries(): Promise<void> {
         ),
       )
       .limit(50);
+
+    metrics.retryBatch(pending);
 
     for (const delivery of pending) {
       const apiKey = await db.query.crmApiKeysTable.findFirst({
@@ -287,6 +297,9 @@ async function processRetries(): Promise<void> {
       }
     }
   } catch (err) {
+    finish("error");
     logger.error({ err }, "Webhook retry processor error");
+  } finally {
+    finish();
   }
 }

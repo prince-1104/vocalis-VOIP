@@ -2,6 +2,8 @@ import express, { type Express } from "express";
 import { logger } from "./lib/logger";
 import { installHttpSecurity } from "./lib/security-headers";
 import { createHttpLogger } from "./lib/http-logger";
+import { metrics } from "./lib/operational-metrics";
+import { createMetricsRouter } from "./routes/metrics";
 import { safeErrorHandler } from "./lib/error-handler";
 import { parseTrustProxy } from "./lib/trusted-proxy";
 import { resolveUser, requireRole, requireSuperadmin } from "./middleware/auth";
@@ -35,6 +37,7 @@ const app: Express = express();
 app.set("trust proxy", parseTrustProxy(process.env));
 
 app.use(createHttpLogger());
+app.use(metrics.http());
 installHttpSecurity(app, process.env);
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -47,6 +50,7 @@ app.use("/api", widgetRouter);
 app.use("/api", crmRouter);            // CRM routes use their own API-key auth
 
 app.use("/api", resolveUser);
+app.use("/api", createMetricsRouter());
 
 app.use("/api", authRouter);
 // Mounted before the role-gated routers: each invoice and usage route enforces
@@ -92,10 +96,13 @@ app.use(safeErrorHandler());
 const OVERDUE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 async function runOverdueCheck() {
+  const finish = metrics.operation("overdue_job");
   try {
     await checkAndMarkOverdueInvoices();
+    finish();
     logger.info("Overdue invoice check complete");
   } catch (err) {
+    finish("error");
     logger.error({ err }, "Overdue invoice check failed");
   }
 }

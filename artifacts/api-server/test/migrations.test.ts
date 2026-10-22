@@ -191,7 +191,7 @@ test("Database error descriptions never carry credentials, URLs or row details",
 
 test("Liveness stays up while readiness reflects startup state and current database reachability", async () => {
   let dbUp = true;
-  const db: Queryable = { query: async () => { if (!dbUp) throw new Error("down"); return { rows: [] }; } };
+  const db: Queryable = { query: async () => { if (!dbUp) throw new Error("down"); return { rows: [{ ready: 1 }] }; } };
   let clock = 0;
   const readiness = createReadiness(db, { cacheMs: 1_000, now: () => clock });
   setReadinessCheck(() => readiness.check());

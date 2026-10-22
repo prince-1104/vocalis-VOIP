@@ -1,4 +1,5 @@
 import twilio from "twilio";
+import { metrics } from "../operational-metrics";
 import { bindTwilioCallSid, mediaPublicUrl } from "../media-session";
 import { db, callLogsTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
@@ -64,6 +65,10 @@ function getTwilioClient(accountSid: string, authToken: string) {
  * spend-limit hold here, immediately before the call log and provider request.
  */
 export async function placeOutboundCall(params: PlaceOutboundCallParams): Promise<PlaceOutboundCallResult> {
+  return metrics.measure("call_setup", () => placeOutboundCallImpl(params));
+}
+
+async function placeOutboundCallImpl(params: PlaceOutboundCallParams): Promise<PlaceOutboundCallResult> {
   const { userId, phone, baseUrl } = params;
   await assertDialAllowed(userId, phone);
   const telephony = await resolveTelephonyForUser(userId, phone);

@@ -1,6 +1,7 @@
 import { db, tenantBudgetPeriodsTable, budgetReservationsTable, tenantLimitsTable } from "@workspace/db";
 import { and, eq, lt, sql } from "drizzle-orm";
 import { logger } from "../logger";
+import { metrics } from "../operational-metrics";
 import { resolveTenantIdForOwner } from "./tenant-owner";
 import { roundMoney } from "./rate-card";
 
@@ -153,6 +154,16 @@ export interface ReserveRequest {
  * with a warning. Idempotent per key; fails closed when state is unavailable.
  */
 export async function reserveBudget(request: ReserveRequest, connection: Connection = db): Promise<Reservation> {
+  const finish = metrics.operation("reservation");
+  try {
+    const result = await reserveBudgetImpl(request, connection);
+    finish(result.warning ?? "success"); return result;
+  } catch (err) {
+    finish(err instanceof SpendLimitError && err.code === "spend_limit" ? "blocked" : "error"); throw err;
+  }
+}
+
+async function reserveBudgetImpl(request: ReserveRequest, connection: Connection): Promise<Reservation> {
   const tenantId = await tenantFor(request.userId);
   const amount = roundMoney(Math.max(0, request.amount));
   const now = request.now ?? new Date();

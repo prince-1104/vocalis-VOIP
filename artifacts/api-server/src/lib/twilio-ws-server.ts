@@ -1,6 +1,7 @@
 import { createMediaUpgrade, rejectMediaUpgrade, type ActiveMediaContext } from "./media-ws-auth";
 import { guardDatabase, guardEffect } from "./media-effects";
 import { WebSocket } from "ws";
+import { metrics, errorOutcome } from "./operational-metrics";
 import { randomUUID } from "crypto";
 import { spawn } from "child_process";
 import { db as database, callLogsTable, intentTrainingTable } from "@workspace/db";
@@ -493,6 +494,8 @@ async function generateSentenceTTS(
   const report = (event: TtsUsageEvent) => onUsage?.(event);
 
   if (useSarvamTts && SARVAM_API_KEY) {
+    const finishSarvam = metrics.operation("tts", "sarvam");
+    const finishOpenai = metrics.operation("tts", "openai");
     const speaker = BULBUL_VOICE_FOR_LANG[lang] ?? "manan";
 
     // Fire both Sarvam and OpenAI TTS in parallel — use whichever responds first.
@@ -545,11 +548,12 @@ async function generateSentenceTTS(
     let winner: "sarvam" | "openai" | null = null;
     const track = (provider: "sarvam" | "openai", model: string, request: Promise<unknown>) => request.then(
       () => {
+        (provider === "sarvam" ? finishSarvam : finishOpenai)();
         const discarded = winner !== null;
         if (!discarded) winner = provider;
         report({ provider, model, characters: text.length, discarded });
       },
-      (err) => report({ provider, model, characters: text.length, failure: err }),
+      (err) => { (provider === "sarvam" ? finishSarvam : finishOpenai)(errorOutcome(err)); report({ provider, model, characters: text.length, failure: err }); },
     );
     track("sarvam", "bulbul:v3", sarvamPromise);
     track("openai", "tts-1", openaiPromise);
@@ -567,11 +571,11 @@ async function generateSentenceTTS(
   } else {
     let mp3Response;
     try {
-      mp3Response = await openai.audio.speech.create({
+      mp3Response = await metrics.measure("tts", () => openai.audio.speech.create({
         model: "tts-1",
         voice: (voice || "nova") as any,
         input: text,
-      });
+      }), "openai");
     } catch (err) {
       report({ provider: "openai", model: "tts-1", characters: text.length, failure: err });
       throw err;
@@ -629,6 +633,7 @@ async function* streamLLMResponse(
   const SARVAM_API_KEY = process.env.SARVAM_API_KEY ?? "";
 
   const { provider, model: modelName } = streamTarget(aiModel);
+  const finishMetric = metrics.operation("llm", provider);
   // DeepSeek and OpenAI report usage in a final stream chunk when asked; Sarvam's support is unverified.
   const reportsStreamUsage = provider !== "sarvam";
   const client: OpenAI = provider === "deepseek"
@@ -658,6 +663,7 @@ async function* streamLLMResponse(
       ...(reportsStreamUsage ? { stream_options: { include_usage: true } } : {}),
     });
   } catch (err) {
+    finishMetric(errorOutcome(err));
     report({ outputText: "", failure: err });
     throw err;
   }
@@ -675,14 +681,17 @@ async function* streamLLMResponse(
       }
     }
     finished = true;
+    finishMetric();
     report({ usage, outputText });
   } catch (err) {
     finished = true;
+    finishMetric(errorOutcome(err));
     report({ usage, outputText, failure: usage ? undefined : err });
     throw err;
   } finally {
     // The consumer stopped reading (barge-in): the provider may keep generating.
     if (!finished) report({ usage, outputText, cancelled: !usage });
+    if (!finished) finishMetric("pending");
   }
 }
 
@@ -1483,7 +1492,7 @@ export async function activateMediaPipeline(ws: WebSocket, context: ActiveMediaC
       const sttUsage = { category: "stt" as const, measurement: "actual" as const, unit: "audio_seconds" as const, quantity: audioSeconds };
       if (useSarvamStt) {
         assertActive();
-        transcript = await callSarvamSTT(wavBuffer, "audio/wav", sttLang).catch((err: unknown) => {
+        transcript = await metrics.measure("stt", () => callSarvamSTT(wavBuffer, "audio/wav", sttLang), "sarvam").catch((err: unknown) => {
           usage.record({ ...sttUsage, provider: "sarvam", model: "saaras:v3", outcome: classifyProviderFailure(err) });
           throw err;
         });
@@ -1491,12 +1500,12 @@ export async function activateMediaPipeline(ws: WebSocket, context: ActiveMediaC
       } else {
         const file = await toFile(wavBuffer, "audio.wav", { type: "audio/wav" });
         assertActive();
-        const res = await openai.audio.transcriptions.create({
+        const res = await metrics.measure("stt", () => openai.audio.transcriptions.create({
           file,
           model: "whisper-1",
           language: sttLang === "auto" ? undefined : sttLang.split("-")[0],
           prompt: buildWhisperPrompt(history, currentGreeting),
-        }).catch((err: unknown) => {
+        }), "openai").catch((err: unknown) => {
           usage.record({ ...sttUsage, provider: "openai", model: "whisper-1", outcome: classifyProviderFailure(err) });
           throw err;
         });

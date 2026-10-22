@@ -2,6 +2,7 @@ import { WebSocket, WebSocketServer } from "ws";
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import { logger } from "./logger";
+import { metrics } from "./operational-metrics";
 import {
   mediaSessions,
   verifyTwilioUpgrade,
@@ -70,6 +71,7 @@ export function createMediaUpgrade(
           | "active"
           | "closed" = "connected";
         let context: ActiveMediaContext | undefined;
+        let endSession: (() => void) | undefined;
         const cleanups = new Set<() => void>();
         let shutdownPromise: Promise<void> | undefined;
         const deny = () => {
@@ -82,6 +84,7 @@ export function createMediaUpgrade(
           if (shutdownPromise) return shutdownPromise;
           phase = "closed";
           clearTimeout(timer);
+          endSession?.();
           for (const cleanup of cleanups) {
             try {
               cleanup();
@@ -91,8 +94,10 @@ export function createMediaUpgrade(
           }
           cleanups.clear();
           shutdownPromise = (async () => {
-            if (context && (await deps.sessions.close(context.id)))
-              await finalize(callId);
+            const active = context;
+            if (active) await metrics.measure("finalization", async () => {
+              if (await deps.sessions.close(active.id)) await finalize(callId);
+            }, "twilio");
           })();
           // No error objects: they may embed provider request URLs/credentials.
           shutdownPromise.catch(() => {
@@ -151,6 +156,7 @@ export function createMediaUpgrade(
               },
             });
             context = activeContext;
+            endSession = metrics.mediaSession();
             ws.off("message", handshake);
             // Authenticated providers can send frames while config loads. Bound
             // this initialization queue; never feed frames into an unready pipeline.

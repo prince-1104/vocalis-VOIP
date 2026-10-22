@@ -1,4 +1,5 @@
 import twilio from "twilio";
+import { metrics } from "./operational-metrics";
 import { db, callLogsTable, crmAgentsTable, agentConfigsTable, contactsTable, crmApiKeysTable, tenantsTable } from "@workspace/db";
 import { eq, and } from "drizzle-orm";
 import type { CallLog } from "@workspace/db";
@@ -176,7 +177,11 @@ async function executeExotelTransfer(
   }
 }
 
-export async function executeTransfer(
+export async function executeTransfer(userId: number, request: TransferRequest) {
+  return metrics.measure("transfer", () => executeTransferImpl(userId, request), "other", result => result.success ? "success" : "error");
+}
+
+async function executeTransferImpl(
   userId: number,
   request: TransferRequest,
 ): Promise<{ success: boolean; conferenceSid?: string; error?: string }> {

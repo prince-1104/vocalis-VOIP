@@ -2,6 +2,7 @@ import { db, usageLedgerTable, tenantsTable, callLogsTable } from "@workspace/db
 import type { UsageCategory, UsageMeasurement, UsageStatus, UsageLedgerEntry } from "@workspace/db";
 import { and, eq } from "drizzle-orm";
 import { logger } from "../logger";
+import { metrics } from "../operational-metrics";
 import { currentRateCard, priceUsage, roundMoney, PLATFORM_CURRENCY, type RateCard } from "./rate-card";
 import { addCommittedSpend, billingPeriod } from "./spend-budget";
 import { resolveTenantIdForOwner } from "./tenant-owner";
@@ -213,6 +214,11 @@ async function findEntry(tenantId: number, key: string, connection: Connection) 
  * the earlier values without double counting; a plain repeat is a no-op.
  */
 export async function recordUsage(record: UsageRecord, connection: Connection = db): Promise<RecordResult> {
+  return metrics.measure("usage", () => recordUsageImpl(record, connection), "internal", result =>
+    result.status === "needs_reconciliation" ? "needs_reconciliation" : result.status === "pending" ? "pending" : "success");
+}
+
+async function recordUsageImpl(record: UsageRecord, connection: Connection): Promise<RecordResult> {
   const tenantId = await resolveTenantIdForOwner(record.userId);
   if (!tenantId) throw new Error("Usage owner has no tenant");
   const card = await currentRateCard(connection);
@@ -282,6 +288,13 @@ export type ResolutionEvidence =
  * current rate card, or apply provider evidence (billed duration or no charge).
  */
 export async function resolveUsageEntry(
+  tenantId: number, entryId: number, evidence: ResolutionEvidence, connection: Connection = db,
+): Promise<{ status: UsageStatus } | null> {
+  return metrics.measure("usage_resolution", () => resolveUsageEntryImpl(tenantId, entryId, evidence, connection), "internal",
+    result => result === null ? "blocked" : result.status === "needs_reconciliation" ? "needs_reconciliation" : "success");
+}
+
+async function resolveUsageEntryImpl(
   tenantId: number,
   entryId: number,
   evidence: ResolutionEvidence,

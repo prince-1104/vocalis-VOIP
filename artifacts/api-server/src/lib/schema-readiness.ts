@@ -5,6 +5,7 @@ import {
   type Queryable,
   type SchemaReport,
 } from "@workspace/db/migrations";
+import { metrics } from "./operational-metrics";
 
 export type StartupBlockReason =
   | "database_unavailable"
@@ -81,16 +82,36 @@ export type ReadinessState = "starting" | "ready" | "blocked";
  * process alive). Ready requires a passed startup schema check and a database
  * that currently answers; results are cached briefly so probes cannot load it.
  */
-export function createReadiness(db: Queryable, { probeTimeoutMs = 2_000, cacheMs = 1_000, now = Date.now } = {}) {
+export function createReadiness(db: Queryable, { probeTimeoutMs = 2_000, cacheMs = 1_000, now = Date.now,
+  schemaIntervalMs = 60_000, checkSchema = async () => (await inspectSchema(db)).status === "ready",
+} = {}) {
   let state: ReadinessState = "starting";
   let cached: { at: number; ok: boolean } | null = null;
   let inflight: Promise<boolean> | null = null;
+  let schemaAt = 0;
+  let schemaOk = true;
 
   async function probe(): Promise<boolean> {
     let timer: NodeJS.Timeout | undefined;
     try {
+      // Retain the underlying flight after response timeout. A stuck database
+      // can occupy at most one probe, rather than one new query per request.
+      if (!inflight) {
+        const work = metrics.measure("database_probe", async () => {
+          const result = await db.query("select 1 as ready");
+          if (result?.rows?.length !== 1 || result.rows[0]?.ready !== 1) return false;
+          if (now() - schemaAt >= schemaIntervalMs) {
+            // Failed inspections are throttled too; never reuse a prior pass
+            // after an exception or a malformed schema result.
+            schemaAt = now(); schemaOk = false;
+            schemaOk = (await checkSchema()) === true;
+          }
+          return schemaOk;
+        }, "internal", (ok) => ok ? "success" : "error");
+        inflight = work.catch(() => false).finally(() => { inflight = null; });
+      }
       return await Promise.race([
-        db.query("select 1").then(() => true),
+        inflight,
         new Promise<boolean>((resolve) => {
           timer = setTimeout(() => resolve(false), probeTimeoutMs);
           timer.unref?.();
@@ -104,14 +125,13 @@ export function createReadiness(db: Queryable, { probeTimeoutMs = 2_000, cacheMs
   }
 
   return {
-    markReady() { state = "ready"; },
+    markReady() { state = "ready"; schemaAt = now(); },
     markBlocked() { state = "blocked"; },
     get state() { return state; },
     async check(): Promise<{ ready: boolean; status: string }> {
       if (state !== "ready") return { ready: false, status: state };
       if (!cached || now() - cached.at >= cacheMs) {
-        inflight ??= probe().finally(() => { inflight = null; });
-        cached = { at: now(), ok: await inflight };
+        cached = { at: now(), ok: await probe() };
       }
       return cached.ok ? { ready: true, status: "ready" } : { ready: false, status: "database_unavailable" };
     },
