@@ -4,6 +4,7 @@ import { installHttpSecurity } from "./lib/security-headers";
 import { createHttpLogger } from "./lib/http-logger";
 import { metrics } from "./lib/operational-metrics";
 import { createMetricsRouter } from "./routes/metrics";
+import { createVobizSipRouter } from "./routes/vobiz-sip";
 import { safeErrorHandler } from "./lib/error-handler";
 import { parseTrustProxy } from "./lib/trusted-proxy";
 import { resolveUser, requireRole, requireSuperadmin } from "./middleware/auth";
@@ -51,6 +52,7 @@ app.use("/api", crmRouter);            // CRM routes use their own API-key auth
 
 app.use("/api", resolveUser);
 app.use("/api", createMetricsRouter());
+app.use("/api", createVobizSipRouter());
 
 app.use("/api", authRouter);
 // Mounted before the role-gated routers: each invoice and usage route enforces

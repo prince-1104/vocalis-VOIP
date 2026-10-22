@@ -23,6 +23,8 @@ export type CredentialField =
   | "crmAuthValue"
   | "crmWebhookSecret"
   | "sipPassword"
+  | "vobizSipUsername"
+  | "vobizSipPassword"
   | "exotelApiKey"
   | "exotelApiToken";
 
@@ -30,13 +32,15 @@ export type CredentialField =
  * `legacy` is the representation each column held before v1: plaintext
  * columns were never encrypted; cbc columns used the old AES-256-CBC helper.
  */
-export const CREDENTIAL_FIELDS: Record<CredentialField, { column: string; legacy: "plaintext" | "cbc" }> = {
+export const CREDENTIAL_FIELDS: Record<CredentialField, { column: string; legacy: "plaintext" | "cbc" | "none" }> = {
   twilioAuthToken: { column: "agent_configs.twilio_auth_token", legacy: "plaintext" },
   telephonyApiKey: { column: "agent_configs.telephony_api_key", legacy: "plaintext" },
   telephonyApiSecret: { column: "agent_configs.telephony_api_secret", legacy: "plaintext" },
   crmAuthValue: { column: "external_crm_configs.auth_value", legacy: "plaintext" },
   crmWebhookSecret: { column: "crm_api_keys.webhook_secret", legacy: "plaintext" },
   sipPassword: { column: "sip_trunk_configs.sip_password", legacy: "cbc" },
+  vobizSipUsername: { column: "vobiz_sip_configs.sip_username", legacy: "none" },
+  vobizSipPassword: { column: "vobiz_sip_configs.sip_password", legacy: "none" },
   exotelApiKey: { column: "exotel_configs.api_key", legacy: "cbc" },
   exotelApiToken: { column: "exotel_configs.api_token", legacy: "cbc" },
 };
@@ -178,6 +182,7 @@ export function createCredentialCodec(keyring: CredentialKeyring): CredentialCod
     if (CREDENTIAL_FIELDS[field].legacy === "cbc") {
       return LEGACY_CBC.test(stored) ? { format: "legacy_cbc" as const } : { format: "invalid" as const };
     }
+    if (CREDENTIAL_FIELDS[field].legacy === "none") return { format: "invalid" as const };
     return { format: "legacy_plaintext" as const };
   }
 

@@ -51,7 +51,8 @@ export function createPostgresMediaSessionStore(
       if (
         tenants.length !== 1 ||
         tenants[0].status !== "active" ||
-        tenants[0].telephonyType === "EXOTEL"
+        tenants[0].telephonyType === "EXOTEL" ||
+        tenants[0].telephonyType === "VOBIZ_SIP"
       )
         return null;
       const agent = await db.query.agentConfigsTable.findFirst({
@@ -91,7 +92,7 @@ export function createPostgresMediaSessionStore(
             sql`exists (select 1 from ${callLogsTable} c join ${tenantsTable} t on t.id = ${session.tenantId}
         join ${agentConfigsTable} a on a.user_id = c.user_id
         where c.id = ${session.callLogId} and c.user_id = ${session.ownerId} and c.call_sid = ${session.callSid}
-        and c.ended_at is null and t.owner_id = c.user_id and t.status = 'active' and t.telephony_type <> 'EXOTEL'
+        and c.ended_at is null and t.owner_id = c.user_id and t.status = 'active' and t.telephony_type not in ('EXOTEL', 'VOBIZ_SIP')
         and a.twilio_account_sid = ${session.accountSid}
         and (select count(*) from ${tenantsTable} own where own.owner_id = c.user_id) = 1)`,
           ),

@@ -193,6 +193,10 @@ async function executeTransferImpl(
     return executeExotelTransfer(userId, request);
   }
 
+  if (tenant?.telephonyType === "VOBIZ_SIP") {
+    return { success: false, error: "Vobiz SIP transfers require the LiveKit integration." };
+  }
+
   try {
     const agentConfig = await db.query.agentConfigsTable.findFirst({
       where: eq(agentConfigsTable.userId, userId),

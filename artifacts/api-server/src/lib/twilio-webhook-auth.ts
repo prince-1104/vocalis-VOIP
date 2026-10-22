@@ -54,7 +54,8 @@ export async function activeTwilioTenantId(
   if (
     tenants.length !== 1 ||
     tenants[0].status !== "active" ||
-    tenants[0].telephonyType === "EXOTEL"
+    tenants[0].telephonyType === "EXOTEL" ||
+    tenants[0].telephonyType === "VOBIZ_SIP"
   )
     return null;
   return tenants[0].id;

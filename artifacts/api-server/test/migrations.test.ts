@@ -74,7 +74,7 @@ test("Migration files that disagree with the build's list are refused", async ()
     journal.entries.pop();
     await writeFile(journalPath, JSON.stringify(journal));
     assert.throws(() => loadMigrationFiles(copy), (err: unknown) =>
-      err instanceof MigrationError && err.details.some((d) => d.startsWith("only in build: 0009_schema_reconciliation")));
+      err instanceof MigrationError && err.details.includes(`only in build: ${MIGRATION_JOURNAL.at(-1)!.tag}@${MIGRATION_JOURNAL.at(-1)!.when}`));
   } finally {
     await rm(copy, { recursive: true, force: true });
   }
@@ -111,7 +111,7 @@ test("Schema inspection classifies history and objects without reading migration
   assert.equal((await inspectSchema(fakeCatalog({ history: null }))).status, "not_initialized");
   const pending = await inspectSchema(fakeCatalog({ history: all.slice(0, 9), dropColumn: "tenants.telephony_type" }));
   assert.equal(pending.status, "migrations_pending");
-  assert.deepEqual(pending.pending, ["0009_schema_reconciliation"]);
+  assert.deepEqual(pending.pending, ["0009_schema_reconciliation", "0010_vobiz_sip_configuration"]);
   assert.ok(pending.missing.includes("column tenants.telephony_type"));
   const incomplete = await inspectSchema(fakeCatalog({ history: all, dropColumn: "usage_ledger.currency" }));
   assert.equal(incomplete.status, "schema_incomplete");

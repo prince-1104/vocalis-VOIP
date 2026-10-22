@@ -61,6 +61,7 @@ docs/production-readiness/*
 *.md
 !README.md
 !docs/production-readiness/monitoring-alerting-disaster-recovery.md
+!docs/production-readiness/vobiz-sip-integration.md
 architecture-preview.html
 widget-test.html
 

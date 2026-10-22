@@ -321,6 +321,10 @@ function seedMixedStorage(oldCodec: CredentialCodec) {
   rows.external_crm_configs = [{ id: 1, userId: 10, authValue: CRM_AUTH }];
   rows.crm_api_keys = [{ id: 1, userId: 10, webhookSecret: WEBHOOK_SECRET }];
   rows.sip_trunk_configs = [{ id: 1, tenantId: 1, sipPassword: legacyCbc(SIP_PASSWORD) }];
+  rows.vobiz_sip_configs = [{ id: 1, tenantId: 1,
+    sipUsername: oldCodec.seal("vobizSipUsername", 1, "fake-vobiz-migration-user"),
+    sipPassword: oldCodec.seal("vobizSipPassword", 1, SIP_PASSWORD),
+  }];
   rows.exotel_configs = [{ id: 1, tenantId: 1, apiKey: legacyCbc(EXOTEL_KEY), apiToken: "not-a-cbc-value" }];
 }
 const EXPECTED: Array<[string, number, string, CredentialField, number, string]> = [
@@ -330,6 +334,8 @@ const EXPECTED: Array<[string, number, string, CredentialField, number, string]>
   ["external_crm_configs", 0, "authValue", "crmAuthValue", 10, CRM_AUTH],
   ["crm_api_keys", 0, "webhookSecret", "crmWebhookSecret", 10, WEBHOOK_SECRET],
   ["sip_trunk_configs", 0, "sipPassword", "sipPassword", 1, SIP_PASSWORD],
+  ["vobiz_sip_configs", 0, "sipUsername", "vobizSipUsername", 1, "fake-vobiz-migration-user"],
+  ["vobiz_sip_configs", 0, "sipPassword", "vobizSipPassword", 1, SIP_PASSWORD],
   ["exotel_configs", 0, "apiKey", "exotelApiKey", 1, EXOTEL_KEY],
 ];
 const migrationCodec = () =>

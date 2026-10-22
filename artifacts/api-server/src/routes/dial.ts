@@ -401,6 +401,11 @@ router.get("/dial/calls/:id/live", async (req, res) => {
   });
   const isExotel = tenant?.telephonyType === "EXOTEL";
 
+  if (tenant?.telephonyType === "VOBIZ_SIP") {
+    res.status(503).json({ error: "Vobiz SIP call status requires the LiveKit integration." });
+    return;
+  }
+
   if (!call.endedAt && call.callSid && !isExotel) {
     const agentConfig = await db.query.agentConfigsTable.findFirst({
       where: eq(agentConfigsTable.userId, userId),

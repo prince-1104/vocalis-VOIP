@@ -8,6 +8,7 @@ import { spawn } from "node:child_process";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const output = await mkdtemp(path.join(tmpdir(), "dialog-security-tests-"));
 const allSuites = [
+  "vobiz-sip.test.ts",
   "monitoring.test.ts",
   "security.test.ts",
   "pii-logging.test.ts",

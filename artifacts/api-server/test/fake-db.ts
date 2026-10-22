@@ -13,6 +13,7 @@ export function resetDatabase() {
 }
 const dialect = new PgDialect();
 const UNIQUE_KEYS: Record<string, string | string[]> = {
+  vobiz_sip_configs: "tenantId",
   widget_verification_policies: "tenantId",
   call_suppressions: ["userId", "phoneKey"],
   usage_ledger: ["tenantId", "idempotencyKey"],

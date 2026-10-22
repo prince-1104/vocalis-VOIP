@@ -71,6 +71,13 @@
       "when": 1792686113229,
       "tag": "0009_schema_reconciliation",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1792692703968,
+      "tag": "0010_vobiz_sip_configuration",
+      "breakpoints": true
     }
   ]
 }

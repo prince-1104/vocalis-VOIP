@@ -9,7 +9,7 @@ import { eq } from "drizzle-orm";
 import { readCredential, twilioAuthTokenFor } from "../tenant-credentials";
 import type { ExotelCredentials } from "./exotel-client";
 
-export type TelephonyProvider = "TWILIO" | "SIP_TRUNK" | "EXOTEL";
+export type TelephonyProvider = "TWILIO" | "SIP_TRUNK" | "EXOTEL" | "VOBIZ_SIP";
 
 export interface TwilioTelephonyContext {
   provider: "TWILIO" | "SIP_TRUNK";
@@ -36,6 +36,14 @@ export class TelephonyNotConfiguredError extends Error {
   }
 }
 
+export class TelephonyUnavailableError extends TelephonyNotConfiguredError {
+  readonly code = "livekit_required";
+  constructor() {
+    super("Vobiz SIP call execution requires the LiveKit integration, which is not available.");
+    this.name = "TelephonyUnavailableError";
+  }
+}
+
 /** Resolve active telephony provider and dial parameters for a tenant owner. */
 export async function resolveTelephonyForUser(
   userId: number,
@@ -48,6 +56,10 @@ export async function resolveTelephonyForUser(
   if (!tenant) {
     throw new TelephonyNotConfiguredError("Tenant not found for user.");
   }
+
+  // Vobiz is not the Twilio-mediated SIP_TRUNK path. Fail before credentials,
+  // budget reservations, call logs or provider work, even if set out of band.
+  if (tenant.telephonyType === "VOBIZ_SIP") throw new TelephonyUnavailableError();
 
   const agentConfig = await db.query.agentConfigsTable.findFirst({
     where: eq(agentConfigsTable.userId, userId),

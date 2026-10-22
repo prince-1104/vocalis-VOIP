@@ -4,6 +4,7 @@ import {
   exotelConfigsTable,
   externalCrmConfigsTable,
   sipTrunkConfigsTable,
+  vobizSipConfigsTable,
 } from "@workspace/db";
 import { and, eq } from "drizzle-orm";
 import { CredentialError, type CredentialCodec, type CredentialField } from "./credential-crypto";
@@ -37,6 +38,7 @@ export const CREDENTIAL_TARGETS: Target[] = [
   { table: externalCrmConfigsTable, owner: "userId", columns: [["authValue", "crmAuthValue"]] },
   { table: crmApiKeysTable, owner: "userId", columns: [["webhookSecret", "crmWebhookSecret"]] },
   { table: sipTrunkConfigsTable, owner: "tenantId", columns: [["sipPassword", "sipPassword"]] },
+  { table: vobizSipConfigsTable, owner: "tenantId", columns: [["sipUsername", "vobizSipUsername"], ["sipPassword", "vobizSipPassword"]] },
   {
     table: exotelConfigsTable,
     owner: "tenantId",

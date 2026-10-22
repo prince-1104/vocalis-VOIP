@@ -33,6 +33,7 @@ const STRUCTURAL_KEYS = new Set([
 /** Credential-bearing names; matched as substrings of the normalized key. */
 const SECRET_KEY_PARTS = [
   "password",
+  "sipusername",
   "passwd",
   "secret",
   "token",
