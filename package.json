@@ -7,6 +7,8 @@
     "dev": "dotenv -e .env -- concurrently -n \"API,WEB\" -c \"bgBlue.bold,bgGreen.bold\" \"pnpm --filter @workspace/api-server run dev\" \"cross-env PORT=5173 BASE_PATH=/ pnpm --filter @workspace/sales-sutra run dev\"",
     "build": "pnpm run typecheck && pnpm -r --if-present run build",
     "typecheck:libs": "tsc --build",
+    "check:secrets": "node scripts/check-secrets.mjs",
+    "check:schema-push": "node scripts/check-schema-push.mjs",
     "typecheck": "pnpm run typecheck:libs && pnpm -r --filter \"./artifacts/**\" --filter \"./scripts\" --if-present run typecheck"
   },
   "private": true,

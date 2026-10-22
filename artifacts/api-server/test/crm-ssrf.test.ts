@@ -22,8 +22,11 @@ import {
   resetCrmTestDns,
 } from "./fake-crm-http";
 import {
+  clampTimeout,
   createSafeHttpClient,
   describeOutboundError,
+  MAX_TIMEOUT_MS,
+  MIN_TIMEOUT_MS,
   isPublicAddress,
   OutboundRequestError,
   type OutboundResolver,
@@ -394,9 +397,12 @@ test("slow DNS, slow responses and slow bodies hit the overall deadline", async 
     assert.equal((await rejection(client.request(`${base}${path}`, { timeoutMs: 300 }))).reason, "timeout", path);
     assert.ok(Date.now() - started < 2000, `${path} deadline enforced`);
   }
-  // Tenant timeouts are clamped: an absurdly small value still allows a
-  // response, and a huge value cannot exceed the ceiling.
-  assert.equal((await client.request(`${base}/ok`, { timeoutMs: 1 })).status, 200);
+  // Tenant timeouts are clamped (the request deadline is clampTimeout(timeoutMs)):
+  // an absurdly small value is raised to the floor, a huge one capped. Asserted
+  // directly; a live request against a 250 ms floor is timing-dependent under load.
+  assert.equal(clampTimeout(1), MIN_TIMEOUT_MS);
+  assert.equal(clampTimeout(10 ** 9), MAX_TIMEOUT_MS);
+  assert.equal((await client.request(`${base}/ok`, { timeoutMs: MAX_TIMEOUT_MS * 10 })).status, 200);
 });
 
 test("oversized responses are cut off whether or not Content-Length is declared", async () => {

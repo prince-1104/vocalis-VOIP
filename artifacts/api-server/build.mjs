@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { build as esbuild } from "esbuild";
 import esbuildPluginPino from "esbuild-plugin-pino";
 import { rm } from "node:fs/promises";
+import { missingEntrypoints } from "./deploy-entrypoints.mjs";
 
 // Plugins (e.g. 'esbuild-plugin-pino') may use `require` to resolve dependencies
 globalThis.require = createRequire(import.meta.url);
@@ -113,6 +114,12 @@ async function buildAll() {
     ],
 
   });
+
+  const missing = missingEntrypoints(path.resolve(artifactDir, "../.."));
+  if (missing.length > 0)
+    throw new Error(
+      `Build did not produce configured entrypoints:\n${missing.map((m) => `  ${m.file} (${m.source})`).join("\n")}`,
+    );
 }
 
 buildAll().catch((err) => {

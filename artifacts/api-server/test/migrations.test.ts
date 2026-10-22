@@ -150,7 +150,7 @@ test("Startup: an incompatible schema fails at once; nothing listens and no work
 });
 
 test("Startup: an unreachable database is retried until the deadline, then refused with a sanitized error", async () => {
-  const refused = Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:5432 postgres://admin:hunter2@db/prod"), { code: "ECONNREFUSED" });
+  const refused = Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:5432 postgres://admin:hunter2@db.prod.test/prod"), { code: "ECONNREFUSED" });
   const db = fakeCatalog({ history: all, failWith: refused });
   let clock = 0;
   const retries: string[] = [];
@@ -184,7 +184,7 @@ test("Database error descriptions never carry credentials, URLs or row details",
     detail: "Key (phone)=(+15550001111) already exists.",
   });
   assert.doesNotMatch(describeDatabaseError(unique), /15550001111/);
-  const url = Object.assign(new Error("bad config postgresql://u:secretpw@host:5432/db?sslmode=require"), { code: "XX000" });
+  const url = Object.assign(new Error("bad config postgresql://u:secretpw@host.test:5432/db?sslmode=require"), { code: "XX000" });
   assert.doesNotMatch(describeDatabaseError(url), /secretpw|postgresql:\/\//);
   assert.match(describeDatabaseError(new MigrationError("refused", ["table users"])), /refused: table users/);
 });

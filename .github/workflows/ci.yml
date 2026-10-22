@@ -1,0 +1,159 @@
+# Merge gate for Dialog. Verifies only; it never deploys, never migrates a
+# shared database and uses no repository secrets.
+# See docs/production-readiness/automated-testing-and-ci.md.
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Replit runs nodejs-24 (.replit); pnpm matches the version that wrote pnpm-lock.yaml.
+  NODE_VERSION: "24"
+  PNPM_VERSION: "10.13.1"
+
+jobs:
+  checks:
+    name: Static checks and production builds
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the secret and whitespace checks read the commits under review
+          persist-credentials: false
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install dependencies (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Determine the commits under review
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          base=""
+          if [ "$EVENT" = "pull_request" ]; then
+            base="$PR_BASE"
+          elif [ "$EVENT" = "push" ] && [ -n "$PUSH_BEFORE" ] && ! echo "$PUSH_BEFORE" | grep -qE '^0+$' \
+              && git cat-file -e "$PUSH_BEFORE^{commit}" 2>/dev/null; then
+            base="$PUSH_BEFORE"
+          elif git rev-parse -q --verify HEAD^ >/dev/null; then
+            base="$(git rev-parse HEAD^)"
+          fi
+          echo "REVIEW_RANGE=${base:+$base..$(git rev-parse HEAD)}" >> "$GITHUB_ENV"
+          echo "Commits under review: ${base:+$base..HEAD}"
+
+      - name: Secret scan (current tree and every commit under review)
+        run: |
+          if [ -n "$REVIEW_RANGE" ]; then
+            node scripts/check-secrets.mjs --range "$REVIEW_RANGE"
+          else
+            node scripts/check-secrets.mjs
+          fi
+
+      - name: Schema-push audit of repository automation
+        run: pnpm run check:schema-push
+
+      - name: Whitespace errors in the change (git diff --check)
+        run: |
+          if [ -n "$REVIEW_RANGE" ]; then git diff --check "${REVIEW_RANGE%%..*}" HEAD; else echo "No base commit; skipped."; fi
+
+      - name: Typecheck (libraries and every package)
+        run: pnpm run typecheck
+
+      - name: API production build (fails if a configured deployment entrypoint is missing)
+        run: pnpm --filter @workspace/api-server run build
+
+      - name: Frontend production build
+        run: pnpm --filter @workspace/sales-sutra run build
+        env:
+          BASE_PATH: /
+
+      - name: Install and builds left the tree unchanged
+        run: |
+          if [ -n "$(git status --porcelain --untracked-files=all)" ]; then
+            git status --short --untracked-files=all
+            echo "::error::Install or build modified tracked files or produced unignored output."
+            exit 1
+          fi
+
+  tests:
+    name: Test suite with PostgreSQL 16 (Node 24)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    services:
+      postgres:
+        # Throwaway, test-only database reachable only from this job's runner.
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: dialog_test
+          POSTGRES_PASSWORD: dialog_test_ci_only
+          POSTGRES_DB: dialog_test_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U dialog_test -d dialog_test_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      # Test-only credentials of the service above; never a shared database.
+      TEST_DATABASE_URL: postgres://dialog_test:dialog_test_ci_only@127.0.0.1:5432/dialog_test_ci # secret-scan: allow-fake
+      # Every PostgreSQL-gated test must run; a skip fails the job.
+      DIALOG_REQUIRE_POSTGRES: "1"
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install dependencies (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Build the API (the deployment smoke and migration CLI tests run dist/)
+        run: pnpm --filter @workspace/api-server run build
+
+      - name: Run the complete test suite (unit, security, PostgreSQL, migrations, deployment smoke)
+        run: pnpm --filter @workspace/api-server run test
+
+      - name: Tests left the tree unchanged
+        run: |
+          if [ -n "$(git status --porcelain --untracked-files=all)" ]; then
+            git status --short --untracked-files=all
+            echo "::error::The test suite modified tracked files or produced unignored output."
+            exit 1
+          fi

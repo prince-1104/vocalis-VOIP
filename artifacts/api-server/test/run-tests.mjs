@@ -1,5 +1,5 @@
 import { build } from "esbuild";
-import { mkdtemp, rm } from "node:fs/promises";
+import { appendFile, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -21,12 +21,21 @@ const allSuites = [
   "campaign-dispatch.test.ts",
   "billing.test.ts",
   "migrations.test.ts",
+  "deployment-safety.test.ts",
+  "deployment-smoke.test.ts",
 ];
 // Optional suite names on the command line run only those suites.
 const requested = process.argv.slice(2);
 const unknown = requested.filter((suite) => !allSuites.includes(suite));
 if (unknown.length > 0) throw new Error(`Unknown test suite: ${unknown.join(", ")}`);
 const suites = requested.length > 0 ? requested : allSuites;
+// CI sets this: every PostgreSQL-gated test must run, so a missing or broken
+// database configuration fails the run instead of turning tests into skips.
+const requirePostgres = process.env.DIALOG_REQUIRE_POSTGRES === "1";
+if (requirePostgres && !process.env.TEST_DATABASE_URL) {
+  console.error("DIALOG_REQUIRE_POSTGRES=1 but TEST_DATABASE_URL is not set; refusing to run with database tests skipped.");
+  process.exit(1);
+}
 const captureLogger = path.join(root, "test/capture-logger.ts");
 try {
   await build({
@@ -106,11 +115,19 @@ try {
   env.RATE_LIMIT_HASH_KEY = Buffer.alloc(32, 13).toString("base64");
   // Debug-level events are emitted too, so their redaction is inspected.
   env.LOG_LEVEL = "debug";
+  // Human-readable results on stdout; a TAP copy is parsed for skips below.
+  const tapFile = path.join(output, "results.tap");
   const child = spawn(
     process.execPath,
     [
       "--test",
-      "--test-timeout=30000",
+      // Applies to each test file as a whole as well as each test; the
+      // deployment smoke suite starts several real server processes.
+      "--test-timeout=120000",
+      "--test-reporter=spec",
+      "--test-reporter-destination=stdout",
+      "--test-reporter=tap",
+      `--test-reporter-destination=${tapFile}`,
       ...suites.map((suite) =>
         path.join(output, suite.replace(/\.ts$/, ".cjs")),
       ),
@@ -119,6 +136,34 @@ try {
   );
   const code = await new Promise((resolve) => child.once("exit", resolve));
   process.exitCode = typeof code === "number" ? code : 1;
+
+  const tap = await readFile(tapFile, "utf8").catch(() => "");
+  const skipped = [...tap.matchAll(/^\s*ok \d+ - (.*?) # (SKIP|TODO)\b(.*)$/gm)].map(
+    (m) => `${m[1]} (${m[2].toLowerCase()}${m[3].trim() ? `: ${m[3].trim()}` : ""})`,
+  );
+  const count = (name) => Number(new RegExp(`^# ${name} (\\d+)$`, "m").exec(tap)?.[1] ?? NaN);
+  const totals = { tests: count("tests"), pass: count("pass"), fail: count("fail"), skipped: count("skipped"), cancelled: count("cancelled") };
+  console.log(`\nTotals: ${JSON.stringify(totals)}`);
+  if (skipped.length > 0) console.log(`Skipped tests (${skipped.length}):\n${skipped.map((s) => `  - ${s}`).join("\n")}`);
+  if (!tap) {
+    console.error("No test results were recorded.");
+    process.exitCode = 1;
+  } else if (requirePostgres && skipped.length > 0) {
+    console.error(`DIALOG_REQUIRE_POSTGRES=1: ${skipped.length} test(s) skipped; every test must run.`);
+    process.exitCode = 1;
+  }
+  if (process.env.GITHUB_STEP_SUMMARY) {
+    const lines = [
+      `### API test suite (${requirePostgres ? "PostgreSQL required" : "PostgreSQL optional"})`,
+      "",
+      `| tests | pass | fail | skipped | cancelled |`,
+      `| --- | --- | --- | --- | --- |`,
+      `| ${totals.tests} | ${totals.pass} | ${totals.fail} | ${totals.skipped} | ${totals.cancelled} |`,
+      ...(skipped.length ? ["", "Skipped:", ...skipped.map((s) => `- ${s}`)] : []),
+      "",
+    ];
+    await appendFile(process.env.GITHUB_STEP_SUMMARY, lines.join("\n"));
+  }
 } finally {
   await rm(output, { recursive: true, force: true });
 }

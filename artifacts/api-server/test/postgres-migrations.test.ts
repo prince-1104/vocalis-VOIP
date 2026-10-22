@@ -1,12 +1,5 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createRequire } from "node:module";
-import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import path from "node:path";
-import { randomBytes } from "node:crypto";
-import { drizzle } from "drizzle-orm/node-postgres";
-import { migrate } from "drizzle-orm/node-postgres/migrator";
 import {
   adoptExistingDatabase,
   applyMigrations,
@@ -16,73 +9,7 @@ import {
 } from "@workspace/db/migrations";
 import { runStartup, StartupBlockedError, waitForCompatibleSchema } from "../src/lib/schema-readiness";
 
-// Each scenario gets its own database (the migrator writes the `drizzle` schema
-// and migrations name "public"), created next to TEST_DATABASE_URL's database
-// with the same dialog_test_ prefix and dropped afterwards.
-const configured = process.env.TEST_DATABASE_URL;
-const directory = path.resolve("../../lib/db/drizzle");
-const require = createRequire(path.resolve("../../lib/db/package.json"));
-
-function guardedUrl(): URL {
-  const url = new URL(configured!);
-  assert.ok(["postgres:", "postgresql:"].includes(url.protocol));
-  assert.ok(["127.0.0.1", "localhost", "[::1]"].includes(url.hostname), "Test database must be loopback");
-  assert.match(url.pathname, /^\/dialog_test_[a-zA-Z0-9_]+$/);
-  assert.equal(url.search, "", "No connection option overrides allowed");
-  return url;
-}
-
-async function withDatabase(t: any, run: (connect: () => Promise<any>) => Promise<void>) {
-  const { Client } = require("pg");
-  const base = guardedUrl();
-  const name = `${base.pathname.slice(1, 40)}_m${randomBytes(4).toString("hex")}`;
-  assert.match(name, /^dialog_test_[a-z0-9_]+$/);
-  const admin = new Client({ connectionString: configured });
-  await admin.connect();
-  const opened: any[] = [];
-  try {
-    try {
-      await admin.query(`create database "${name}"`);
-    } catch (err: any) {
-      if (err.code === "42501") return t.skip("TEST_DATABASE_URL role lacks CREATEDB; migration lifecycle not exercised");
-      throw err;
-    }
-    const url = new URL(base);
-    url.pathname = `/${name}`;
-    await run(async () => {
-      const client = new Client({ connectionString: url.toString() });
-      await client.connect();
-      opened.push(client);
-      return client;
-    });
-  } finally {
-    await Promise.all(opened.map((c) => c.end().catch(() => {})));
-    await admin.query(`drop database if exists "${name}" with (force)`).catch(() => {});
-    await admin.end();
-  }
-}
-
-async function rawApply(client: any, tags: string[]) {
-  for (const tag of tags) {
-    const sql = await readFile(path.join(directory, `${tag}.sql`), "utf8");
-    for (const statement of sql.split("--> statement-breakpoint")) if (statement.trim()) await client.query(statement);
-  }
-}
-
-// What a previous release's migrator would have applied: the journal through `last`.
-async function migrateThrough(client: any, last: string) {
-  const copy = await mkdtemp(path.join(tmpdir(), "dialog-migrations-"));
-  try {
-    await cp(directory, copy, { recursive: true });
-    const journalPath = path.join(copy, "meta/_journal.json");
-    const journal = JSON.parse(await readFile(journalPath, "utf8"));
-    journal.entries = journal.entries.slice(0, journal.entries.findIndex((e: any) => e.tag === last) + 1);
-    await writeFile(journalPath, JSON.stringify(journal));
-    await migrate(drizzle(client), { migrationsFolder: copy });
-  } finally {
-    await rm(copy, { recursive: true, force: true });
-  }
-}
+import { configured, directory, migrateThrough, pgRequire, rawApply, withDatabase } from "./pg-databases";
 
 const tags = MIGRATION_JOURNAL.map((m) => m.tag);
 const throughBaseline = tags.slice(0, tags.indexOf("0009_schema_reconciliation"));
@@ -128,6 +55,21 @@ test("PostgreSQL: fresh install from migrations alone is complete, repeatable an
     const column = (await a.query(`select data_type, is_nullable, column_default from information_schema.columns
       where table_schema = 'public' and table_name = 'tenants' and column_name = 'telephony_type'`)).rows[0];
     assert.deepEqual(column, { data_type: "text", is_nullable: "NO", column_default: "'TWILIO'::text" });
+    const checks = (await a.query(`select conname from pg_constraint
+      where contype = 'c' and convalidated and conrelid in
+        ('usage_ledger'::regclass, 'budget_reservations'::regclass, 'tenant_budget_periods'::regclass)
+      order by conname`)).rows.map((r: any) => r.conname);
+    assert.deepEqual(checks, [
+      "budget_reservations_amount_check",
+      "budget_reservations_status_check",
+      "tenant_budget_periods_reserved_check",
+      "usage_ledger_category_check",
+      "usage_ledger_currency_check",
+      "usage_ledger_entry_type_check",
+      "usage_ledger_measurement_check",
+      "usage_ledger_priced_check",
+      "usage_ledger_status_check",
+    ]);
     // Re-running 0009's statements directly is harmless too.
     await rawApply(a, ["0009_schema_reconciliation"]);
     assert.deepEqual((await inspectSchema(a)).status, "ready");
@@ -270,9 +212,9 @@ test("PostgreSQL: adoption refuses a database missing objects that earlier migra
 });
 
 test("PostgreSQL: an unreachable database blocks startup with a sanitized error", { skip }, async () => {
-  const { Pool } = require("pg");
+  const { Pool } = pgRequire("pg");
   // Loopback port 1 refuses connections; the URL carries a password that must not surface.
-  const pool = new Pool({ connectionString: "postgres://dialog_test:not-a-real-secret@127.0.0.1:1/dialog_test_unreachable", connectionTimeoutMillis: 500 });
+  const pool = new Pool({ connectionString: "postgres://dialog_test:not-a-real-secret@127.0.0.1:1/dialog_test_unreachable", connectionTimeoutMillis: 500 }); // secret-scan: allow-fake
   pool.on("error", () => {});
   const retries: string[] = [];
   try {

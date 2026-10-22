@@ -67,6 +67,12 @@ database.sql
 lib/db/check-schema.mjs
 lib/db/seed-demo-user.mjs
 
+# One-off database debug scripts once carried hard-coded connection strings.
+# Removed (Phase 1M-F); `pnpm run check:secrets` fails if a credentialed URL returns.
+artifacts/api-server/query.cjs
+scripts/seed-superadmin.mjs
+lib/db/diagnose_*.mjs
+
 # Seed scripts & KB (contain credentials / tenant-specific data)
 NoeticMinds-KnowledgeBase.txt
 scripts/seed-noeticminds-kb.mjs
