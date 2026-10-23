@@ -31,7 +31,8 @@ export function createLivekitRoutes(env = process.env, sessions = new VoiceSessi
     catch (e) {
       // Never serialize SDK/provider/SQL errors; they may include requests and secrets.
       const status = e instanceof VoiceDenied ? e.status : 503;
-      logger.warn({ event: "livekit_request_denied", status }, "Voice request unavailable");
+      // The route template (never the concrete path) identifies the step without session identifiers.
+      logger.warn({ event: "livekit_request_denied", status, route: typeof req.route?.path === "string" ? req.route.path : undefined }, "Voice request unavailable");
       if (!res.headersSent) res.status(status).json({ error: "Voice session unavailable" }); else res.end();
     }
   };
@@ -142,6 +143,7 @@ export function createLivekitRoutes(env = process.env, sessions = new VoiceSessi
   const reconcile = async () => {
     if (!localVoiceEnabled(env)) return;
     const closed = await sessions.reconcile();
+    if (closed.length) logger.info({ event: "livekit_sessions_expired", count: closed.length }, "Expired voice sessions closed");
     await Promise.allSettled(closed.map(s => removeRoom(s.room)));
     // Persist retryable cleanup separately: a failed delete must not reopen admission.
     const pending = await sessions.pool.query(`select s.id,s.room from livekit_sessions s where s.state='closed'

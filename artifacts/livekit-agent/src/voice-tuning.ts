@@ -11,10 +11,15 @@ export type VoiceTuning = {
   preemptiveLlm: boolean;
   /** LiveKit ttsReadIdleTimeout: longest wait for the next synthesized frame (including the first) before the reply is dropped. */
   ttsIdleTimeoutMs: number;
+  /**
+   * LiveKit aecWarmupDuration: while the agent speaks during this window the SDK replaces STT input
+   * with silence and ignores interruptions. `null` keeps the SDK default (3000 ms, none for outbound SIP); 0 disables it.
+   */
+  aecWarmupMs: number | null;
 };
 
 // Values in effect before Phase 1R tuning, i.e. the installed SDK/plugin defaults.
-export const baselineTuning: VoiceTuning = Object.freeze({ sttEndpointingMs: 25, endpointingMinMs: 500, endpointingMaxMs: 3000, preemptiveLlm: true, ttsIdleTimeoutMs: 10000 });
+export const baselineTuning: VoiceTuning = Object.freeze({ sttEndpointingMs: 25, endpointingMinMs: 500, endpointingMaxMs: 3000, preemptiveLlm: true, ttsIdleTimeoutMs: 10000, aecWarmupMs: null });
 // Phase 1R evidence (docs/production-readiness/real-time-voice-latency.md): minDelay 200 ms split
 // most 450 ms pauses; disabling preemptive generation saved ~20 ms but stalled the first user
 // turn in 4 of 10 sessions (0 of 10 with it enabled), so both stay at baseline.
@@ -35,5 +40,7 @@ export function voiceTuning(env: NodeJS.ProcessEnv = process.env): VoiceTuning {
   const preemptive = env.DIALOG_VOICE_PREEMPTIVE_LLM;
   if (preemptive !== undefined && preemptive !== "" && preemptive !== "on" && preemptive !== "off") throw new Error("Invalid voice tuning: DIALOG_VOICE_PREEMPTIVE_LLM");
   const ttsIdleTimeoutMs = integer(env, "DIALOG_VOICE_TTS_IDLE_TIMEOUT_MS", defaultTuning.ttsIdleTimeoutMs, 2000, 30000);
-  return { sttEndpointingMs, endpointingMinMs, endpointingMaxMs, preemptiveLlm: preemptive ? preemptive === "on" : defaultTuning.preemptiveLlm, ttsIdleTimeoutMs };
+  const aecWarmup = env.DIALOG_VOICE_AEC_WARMUP_MS;
+  const aecWarmupMs = aecWarmup === undefined || aecWarmup === "" ? defaultTuning.aecWarmupMs : integer(env, "DIALOG_VOICE_AEC_WARMUP_MS", 0, 0, 3000);
+  return { sttEndpointingMs, endpointingMinMs, endpointingMaxMs, preemptiveLlm: preemptive ? preemptive === "on" : defaultTuning.preemptiveLlm, ttsIdleTimeoutMs, aecWarmupMs };
 }

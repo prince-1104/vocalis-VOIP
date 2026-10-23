@@ -7,8 +7,8 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const local = path.join(root, '.local', 'livekit');
 const command = process.argv[2];
 // Only named, non-secret tuning/benchmark settings pass through; provider keys never do.
-const tuning = ['DIALOG_VOICE_STT_ENDPOINTING_MS', 'DIALOG_VOICE_ENDPOINTING_MIN_MS', 'DIALOG_VOICE_ENDPOINTING_MAX_MS', 'DIALOG_VOICE_PREEMPTIVE_LLM', 'DIALOG_VOICE_TTS_IDLE_TIMEOUT_MS'];
-const bench = ['VOICE_BENCH_LABEL', 'VOICE_BENCH_ITERATIONS', 'VOICE_BENCH_REPEAT_SESSIONS', 'VOICE_BENCH_WARMUP', 'VOICE_BENCH_FAILURE_RUNS'];
+const tuning = ['DIALOG_VOICE_STT_ENDPOINTING_MS', 'DIALOG_VOICE_ENDPOINTING_MIN_MS', 'DIALOG_VOICE_ENDPOINTING_MAX_MS', 'DIALOG_VOICE_PREEMPTIVE_LLM', 'DIALOG_VOICE_TTS_IDLE_TIMEOUT_MS', 'DIALOG_VOICE_AEC_WARMUP_MS'];
+const bench = ['VOICE_BENCH_LABEL', 'VOICE_BENCH_ITERATIONS', 'VOICE_BENCH_REPEAT_SESSIONS', 'VOICE_BENCH_WARMUP', 'VOICE_BENCH_FAILURE_RUNS', 'VOICE_BENCH_FIRST_TURN'];
 const env = Object.fromEntries(['PATH', 'Path', 'SystemRoot', 'WINDIR', 'USERPROFILE', 'HOME', 'TEMP', 'TMP', 'DOCKER_HOST', 'DOCKER_CONTEXT', 'DOCKER_CONFIG', 'APPDATA', 'LOCALAPPDATA', ...tuning].filter(k => process.env[k]).map(k => [k, process.env[k]]));
 function docker(args, capture = false, overlays = []) {
   const result = spawnSync('docker', ['compose', '--project-name', 'dialog-voice-local', '--env-file', path.join(local, 'compose.env'),

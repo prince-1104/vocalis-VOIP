@@ -57,6 +57,7 @@ services:
       DIALOG_VOICE_ENDPOINTING_MAX_MS: ${DIALOG_VOICE_ENDPOINTING_MAX_MS:-}
       DIALOG_VOICE_PREEMPTIVE_LLM: ${DIALOG_VOICE_PREEMPTIVE_LLM:-}
       DIALOG_VOICE_TTS_IDLE_TIMEOUT_MS: ${DIALOG_VOICE_TTS_IDLE_TIMEOUT_MS:-}
+      DIALOG_VOICE_AEC_WARMUP_MS: ${DIALOG_VOICE_AEC_WARMUP_MS:-}
     command: [sh, -c, 'pnpm --filter @workspace/livekit-agent build && node artifacts/livekit-agent/dist/server.js']
     depends_on: [livekit, fixture-api, mock-providers]
     restart: unless-stopped

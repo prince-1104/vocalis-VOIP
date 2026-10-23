@@ -149,8 +149,12 @@ test("PostgreSQL LiveKit expired/replayed claims, suspended tenants, ownership m
     await assert.rejects(store.claim(s.id, s.room, "worker"));
     await store.reconcile(); s = await store.create(p);
     const admitted = await store.claim(s.id, s.room, "worker");
+    await pool.query("update livekit_sessions set lease_until=now()+interval '2 seconds' where id=$1", [s.id]);
+    await store.validate(s.id, admitted.credential, true);
+    assert.equal((await pool.query("select lease_until > now()+interval '10 seconds' as renewed from livekit_sessions where id=$1", [s.id])).rows[0].renewed, true);
     await pool.query("update livekit_sessions set lease_until=now()-interval '1 second' where id=$1", [s.id]);
-    await assert.rejects(store.validate(s.id, admitted.credential, true));
+    // Workers retry transient renewal failures; a lapsed lease must answer 4xx so they stop instead of retrying.
+    await assert.rejects(store.validate(s.id, admitted.credential, true), (e: any) => e.status === 403);
     await store.reconcile();
     s = await store.create(p);
     await pool.query("update tenants set status='suspended' where id=$1", [p.tenantId]);

@@ -71,9 +71,14 @@ test('voice tuning defaults are the measured baseline unless evidence changed th
   assert.equal(Object.isFrozen(baselineTuning), true);
   assert.deepEqual(voiceTuning({ DIALOG_VOICE_STT_ENDPOINTING_MS: '300', DIALOG_VOICE_ENDPOINTING_MIN_MS: '200', DIALOG_VOICE_ENDPOINTING_MAX_MS: '2500',
     DIALOG_VOICE_PREEMPTIVE_LLM: 'off', DIALOG_VOICE_TTS_IDLE_TIMEOUT_MS: '4000' }),
-    { sttEndpointingMs: 300, endpointingMinMs: 200, endpointingMaxMs: 2500, preemptiveLlm: false, ttsIdleTimeoutMs: 4000 });
+    { sttEndpointingMs: 300, endpointingMinMs: 200, endpointingMaxMs: 2500, preemptiveLlm: false, ttsIdleTimeoutMs: 4000, aecWarmupMs: null });
+  // Unset keeps the SDK's participant-aware AEC warmup (none for outbound SIP); explicit values override it.
+  assert.equal(baselineTuning.aecWarmupMs, null);
+  assert.equal(voiceTuning({ DIALOG_VOICE_AEC_WARMUP_MS: '0' }).aecWarmupMs, 0);
+  assert.equal(voiceTuning({ DIALOG_VOICE_AEC_WARMUP_MS: '1500' }).aecWarmupMs, 1500);
   for (const [name, value] of [['DIALOG_VOICE_STT_ENDPOINTING_MS', '5'], ['DIALOG_VOICE_STT_ENDPOINTING_MS', '300ms'], ['DIALOG_VOICE_ENDPOINTING_MIN_MS', '-1'],
-    ['DIALOG_VOICE_ENDPOINTING_MAX_MS', '9000'], ['DIALOG_VOICE_PREEMPTIVE_LLM', 'yes'], ['DIALOG_VOICE_TTS_IDLE_TIMEOUT_MS', '500'], ['DIALOG_VOICE_TTS_IDLE_TIMEOUT_MS', 'sentinel-secret']]) {
+    ['DIALOG_VOICE_ENDPOINTING_MAX_MS', '9000'], ['DIALOG_VOICE_PREEMPTIVE_LLM', 'yes'], ['DIALOG_VOICE_TTS_IDLE_TIMEOUT_MS', '500'], ['DIALOG_VOICE_TTS_IDLE_TIMEOUT_MS', 'sentinel-secret'],
+    ['DIALOG_VOICE_AEC_WARMUP_MS', '5000'], ['DIALOG_VOICE_AEC_WARMUP_MS', 'off']]) {
     assert.throws(() => voiceTuning({ [name]: value }), e => e.message === `Invalid voice tuning: ${name}` && !e.message.includes(value));
   }
   assert.throws(() => voiceTuning({ DIALOG_VOICE_ENDPOINTING_MIN_MS: '1500', DIALOG_VOICE_ENDPOINTING_MAX_MS: '1000' }));

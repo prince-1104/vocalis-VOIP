@@ -5,8 +5,8 @@ import * as silero from "@livekit/agents-plugin-silero";
 import { RoomEvent } from "@livekit/rtc-node";
 import { ReadableStream } from "node:stream/web";
 import { randomUUID } from "node:crypto";
-import { DialogApi, reference, type Claim } from "./api";
-import { StageClock, forwardToWorker } from "./bench";
+import { DialogApi, DialogDenied, leaseLost, reference, type Claim } from "./api";
+import { StageClock, forwardToWorker, type CloseReason } from "./bench";
 import { voiceTuning } from "./voice-tuning";
 import { DialogSentenceTokenizer } from "./sentences";
 import { logger } from "@workspace/observability/runtime/logger";
@@ -132,6 +132,7 @@ export default defineAgent({
     const id = reference(ctx.job.metadata);
     // The claim is authorized before joining, so ctx.room is not connected yet and
     // its name is still undefined; only the job's room descriptor carries it here.
+    const claimSent = performance.now();
     const claim = await api.json<Claim>("/claim", { id, room: ctx.job.room?.name ?? "", worker: ctx.workerId });
     // Stage events go to the room only for local benchmarking; they contain timings, never content.
     const bench = process.env.DIALOG_VOICE_BENCH === "1" && (claim.mode === "mock" || process.env.DIALOG_LOCAL_VOICE_PROFILE === "manual-live");
@@ -145,25 +146,50 @@ export default defineAgent({
     let ending: Promise<void> | undefined;
     const sttOperation = randomUUID();
     let sttAdmitted = false;
-    const close = (): Promise<void> => ending ??= (async () => {
+    // Event-loop stalls starve the heartbeat and audio pacing; record them (duration only).
+    let tick = performance.now();
+    const loopWatch = setInterval(() => {
+      const now = performance.now(), lag = now - tick - 250; tick = now;
+      if (lag > 300) clock.mark("loop_stall", { ms: Math.round(lag) });
+    }, 250);
+    const close = (reason: CloseReason): Promise<void> => ending ??= (async () => {
       controller.abort();
-      clearTimeout(heartbeat);
+      clearTimeout(heartbeat); clearInterval(loopWatch);
+      clock.mark("session_end", { [reason]: true });
+      await clock.delivered();
       await session?.close().catch(() => undefined);
       if (sttAdmitted) await api.request(`/${id}/usage`, { operationId: sttOperation, outcome: "unknown" }, claim.credential).catch(() => undefined);
       await api.request(`/${id}/close`, {}, claim.credential).catch(() => undefined);
       await clock.flush();
       await ctx.room.disconnect().catch(() => undefined);
-      logger.info({ event: "livekit_session_closed" }, "Voice session closed");
+      logger.info({ event: "livekit_session_closed", reason }, "Voice session closed");
     })();
-    ctx.addShutdownCallback(close);
-    ctx.room.once(RoomEvent.Disconnected, () => { void close(); });
+    ctx.addShutdownCallback(() => close("shutdown"));
+    ctx.room.once(RoomEvent.Disconnected, () => { void close("room_disconnected"); });
+    let lastBeat = performance.now();
+    // Dialog extends the lease to 15 s after it receives a renewal, so a renewal sent at T keeps it until at least T + 15 s.
+    let leaseDeadline = claimSent + 15000;
     const beat = async () => {
       const finish = metrics.operation("livekit_lease", "livekit");
+      const sent = performance.now();
       try {
-        await api.json(`/${id}/heartbeat`, {}, claim.credential, controller.signal);
+        await api.json(`/${id}/heartbeat`, {}, claim.credential, controller.signal, 4000);
+        const now = performance.now();
+        // A renewal gap far beyond the 5 s cadence means the process was starved.
+        if (now - lastBeat > 8000) clock.mark("heartbeat_late", { gapMs: Math.round(now - lastBeat), rttMs: Math.round(now - sent) });
+        lastBeat = now; leaseDeadline = sent + 15000;
         if (!controller.signal.aborted) heartbeat = setTimeout(() => { void beat(); }, 5000);
         finish();
-      } catch { finish("blocked"); await close(); }
+      } catch (error) {
+        finish("blocked");
+        if (controller.signal.aborted) return;
+        if (leaseLost(error, performance.now(), leaseDeadline)) {
+          clock.mark("heartbeat_lost", { status: error instanceof DialogDenied ? error.status : 0, sinceRenewalMs: Math.round(performance.now() - (leaseDeadline - 15000)) });
+          await close("heartbeat"); return;
+        }
+        clock.mark("heartbeat_retry", { rttMs: Math.round(performance.now() - sent) });
+        heartbeat = setTimeout(() => { void beat(); }, 250);
+      }
     };
     try {
       if (!claim.speaker || !claim.sttLanguage || !claim.ttsLanguage) throw new Error("Unsupported voice configuration");
@@ -184,6 +210,7 @@ export default defineAgent({
         targetLanguageCode: claim.ttsLanguage, streaming: true, sentenceTokenizer: new DialogSentenceTokenizer(),
         ...(fixtures ? { baseURL: fixtures.origin } : {}), outputAudioCodec: "linear16", sampleRate: 24000 });
       session = new voice.AgentSession({ stt, tts, vad, ttsReadIdleTimeout: tuning.ttsIdleTimeoutMs,
+        ...(tuning.aecWarmupMs === null ? {} : { aecWarmupDuration: tuning.aecWarmupMs || null }),
         turnHandling: { turnDetection: "stt", endpointing: { minDelay: tuning.endpointingMinMs, maxDelay: tuning.endpointingMaxMs },
           interruption: { mode: "vad", enabled: true }, preemptiveGeneration: { enabled: tuning.preemptiveLlm, preemptiveTts: false } },
         connOptions: { sttConnOptions: { maxRetry: 0, timeoutMs: 8000 }, ttsConnOptions: { maxRetry: 0, timeoutMs: 8000 }, maxUnrecoverableErrors: 1 } });
@@ -212,19 +239,23 @@ export default defineAgent({
         clock.observe("end_of_turn_delay", "livekit", "success", endOfUtteranceDelayMs);
       });
       session.on(voice.AgentSessionEventTypes.AgentFalseInterruption, ev => { clock.mark("false_interruption", { resumed: ev.resumed }); });
-      session.once(voice.AgentSessionEventTypes.Close, () => { void close(); });
+      session.once(voice.AgentSessionEventTypes.Close, () => { void close("session_closed"); });
       session.on(voice.AgentSessionEventTypes.Error, ev => {
         const kind = (ev.error as { type?: string }).type ?? "";
         clock.mark("error", { stt: kind === "stt_error", tts: kind === "tts_error", llm: kind === "llm_error" });
-        void close();
+        void close("session_error");
       });
+      // Agent audio plays out only after the participant subscribes to the published track.
+      ctx.room.once(RoomEvent.LocalTrackPublished, () => { clock.mark("agent_track_published"); });
+      ctx.room.once(RoomEvent.LocalTrackSubscribed, () => { clock.mark("agent_track_subscribed"); });
       await ctx.connect();
       controller.signal.throwIfAborted();
-      clock.mark("session_start", { endpointingMinMs: tuning.endpointingMinMs, endpointingMaxMs: tuning.endpointingMaxMs, sttEndpointingMs: tuning.sttEndpointingMs, preemptiveLlm: tuning.preemptiveLlm, ttsIdleTimeoutMs: tuning.ttsIdleTimeoutMs });
+      clock.mark("session_start", { endpointingMinMs: tuning.endpointingMinMs, endpointingMaxMs: tuning.endpointingMaxMs, sttEndpointingMs: tuning.sttEndpointingMs, preemptiveLlm: tuning.preemptiveLlm, ttsIdleTimeoutMs: tuning.ttsIdleTimeoutMs, aecWarmupMs: tuning.aecWarmupMs ?? -1 });
       await session.start({ agent: new DialogAgent(api, id, claim, controller.signal, clock, turn), room: ctx.room, record: false,
         inputOptions: { participantIdentity: claim.participant, textEnabled: false, videoEnabled: false, closeOnDisconnect: true } });
       controller.signal.throwIfAborted();
-      session.say(claim.greeting, { allowInterruptions: true });
-    } catch { await close(); }
+      const greeting = session.say(claim.greeting, { allowInterruptions: true });
+      void greeting.waitForPlayout().then(() => clock.mark("greeting_done", { interrupted: greeting.interrupted }), () => undefined);
+    } catch { await close("start_failed"); }
   },
 });

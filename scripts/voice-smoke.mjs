@@ -158,11 +158,18 @@ try {
     const before = await (await context.request.get(`${MOCKS}/metrics`)).json();
     // STT audio arrives in 100 ms chunks; speak long enough for a final transcript and a reply.
     await page.waitForTimeout(3000);
+    const spokeAt = await page.evaluate(() => performance.now());
     await page.evaluate(() => window.__voiceInput(4000));
     // APIRequestContext avoids broadening frontend CORS just for fixture observations.
     const deadline = Date.now() + 30000;
     let after;
     do { after = await (await context.request.get(`${MOCKS}/metrics`)).json(); if (after.ttsRequests > before.ttsRequests) break; await new Promise(r => setTimeout(r, 250)); } while (Date.now() < deadline);
+    if (!(after.sttTurns > before.sttTurns && after.ttsRequests > before.ttsRequests)) {
+      // Event names, offsets and counter deltas only.
+      const events = await page.evaluate(() => window.__bench.map(e => [e.e, Math.round(e.rx)]));
+      console.error('DIAG smoke turn:', JSON.stringify(Object.fromEntries(['sttFrames', 'sttLoudFrames', 'sttInterims', 'sttFinals', 'sttTurns', 'ttsRequests'].map(k => [k, (after[k] ?? 0) - (before[k] ?? 0)]))),
+        JSON.stringify(events.map(([e, rx]) => [e, rx - Math.round(spokeAt)])).slice(0, 1500));
+    }
     assert.ok(after.sttTurns > before.sttTurns && after.ttsRequests > before.ttsRequests, 'microphone audio -> official STT plugin -> Dialog LLM -> official TTS plugin');
   }
   console.log('PASS real-room synthetic microphone response');
@@ -180,7 +187,9 @@ async function benchmark(page, context) {
   const config = {
     label: /^[a-z0-9-]{1,40}$/.test(process.env.VOICE_BENCH_LABEL ?? '') ? process.env.VOICE_BENCH_LABEL : 'unlabelled',
     warmupSessions: int('VOICE_BENCH_WARMUP', LIVE ? 0 : 1, 0, LIVE ? 1 : 5),
-    mixedSessions: int('VOICE_BENCH_ITERATIONS', LIVE ? 2 : 10, 1, LIVE ? 3 : 50),
+    mixedSessions: int('VOICE_BENCH_ITERATIONS', LIVE ? 2 : 10, 0, LIVE ? 3 : 50),
+    // Reliability mode: greeting, then a first user turn 150/600/1500 ms after playback ends, then a second turn.
+    firstTurnSessions: LIVE ? 0 : int('VOICE_BENCH_FIRST_TURN', 0, 0, 100),
     repeatSessions: int('VOICE_BENCH_REPEAT_SESSIONS', LIVE ? 1 : 4, 0, LIVE ? 2 : 20),
     repeatTurns: 6,
     failureRuns: LIVE ? 0 : int('VOICE_BENCH_FAILURE_RUNS', 1, 0, 5),
@@ -217,28 +226,32 @@ async function benchmark(page, context) {
     }
     return { playbackMs: responses[0][1] - responses[0][0], gaps, gapMs: Math.round(gapMs), responses: responses.length };
   };
-  async function startSession() {
-    const first = await startSessionOnce();
+  async function startSession(quiet = 600) {
+    const first = await startSessionOnce(quiet);
     if (first.ok || first.reason !== 'no_greeting') return first;
     await stopSession(); await page.waitForTimeout(10000);
-    const second = await startSessionOnce();
-    return second.ok ? { ...second, retried: true } : second;
+    const second = await startSessionOnce(quiet);
+    return second.ok ? { ...second, retried: true } : { ...second, retried: true };
   }
-  async function startSessionOnce() {
+  async function startSessionOnce(quiet) {
     for (let attempt = 0; attempt < 8; attempt++) {
       await page.evaluate(() => { window.__env.segments = []; window.__env.audible = false; window.__env.peak = 0; });
+      const clicked = await now();
       await page.getByRole('button', { name: 'Start preview' }).click();
       const ok = await page.getByRole('status').filter({ hasText: 'Connected' }).waitFor({ timeout: 30000 }).then(() => true).catch(() => false);
       if (ok) {
         const start = await now();
         const greetingOn = await nextOnset(start - 5000, 20000);
         if (greetingOn === null) {
+          // Worker stage events of this attempt: names and worker-clock offsets only.
+          const events = await eventsBetween(clicked, await now());
           console.error('DIAG no greeting:', JSON.stringify(await page.evaluate(() => ({ benchEvents: window.__bench.length, peak: window.__env.peak,
-            audioElements: document.querySelectorAll('audio').length, status: document.querySelector('[role=status]')?.textContent }))));
+            audioElements: document.querySelectorAll('audio').length, status: document.querySelector('[role=status]')?.textContent }))),
+            JSON.stringify(events.map(e => [e.e, Math.round(e.t - (events[0]?.t ?? 0))])).slice(0, 1500));
           return { ok: false, reason: 'no_greeting' };
         }
-        await responseEnd(greetingOn, 600, 20000);
-        return { ok: true, connectToGreetingMs: greetingOn - start };
+        const greetingEnd = await responseEnd(greetingOn, quiet, 20000);
+        return { ok: true, connectToGreetingMs: greetingOn - start, greetingEnd: greetingEnd ?? await now() };
       }
       await stopSession(); await page.waitForTimeout(2000);
     }
@@ -274,7 +287,9 @@ async function benchmark(page, context) {
     record.browser.responsesInWindow = playback(all).responses;
     const events = await eventsBetween(caseStart, caseEnd);
     record.worker = workerStages(events);
-    if (extra && events.length) record.timeline = events.map(e => [e.e, Math.round(e.t - events[0].t)]);
+    // No worker event at all while the user spoke: the job stopped processing (silent session).
+    if (record.outcome === 'timeout_no_response' && !events.length) record.outcome = 'timeout_session_silent';
+    if ((extra || record.outcome !== 'ok') && events.length) record.timeline = events.map(e => [e.e, Math.round(e.t - events[0].t)]);
     // A second synthesized reply in one user turn means the turn was split (premature closure).
     if (record.outcome === 'ok' && !record.interrupted && !record.pausesAllowed && (record.worker.counts.tts_start ?? 0) > 1) record.outcome = 'duplicate_response';
     tuning ??= (await page.evaluate(() => window.__bench.find(e => e.e === 'session_start'))) ?? null;
@@ -321,10 +336,19 @@ async function benchmark(page, context) {
   };
   const run = async (mixed, iteration, measured) => {
     const out = [];
+    const from = await now();
     const started = await startSession();
-    out.push({ case: 'session', iteration, outcome: started.ok ? (started.retried ? 'ok_after_no_greeting_retry' : 'ok') : started.reason,
-      browser: started.ok ? { connectToGreetingMs: started.connectToGreetingMs } : {} });
-    if (!started.ok) { await stopSession(); return out.map(r => ({ ...r, iteration })); }
+    const session = { case: 'session', iteration, outcome: started.ok ? (started.retried ? 'ok_after_no_greeting_retry' : 'ok') : started.reason,
+      retried: Boolean(started.retried), browser: started.ok ? { connectToGreetingMs: started.connectToGreetingMs } : {} };
+    out.push(session);
+    const finish = async () => {
+      const d = sessionDiagnostics(await eventsBetween(from, await now()));
+      delete d._greetingDoneT;
+      session.diagnostics = d; session.browser.sessionMs = Math.round(await now() - from);
+      await stopSession();
+      return out.map(r => ({ ...r, iteration }));
+    };
+    if (!started.ok) return finish();
     if (mixed) {
       out.push(await turn('pause', [[1500, 450], [1500, 0]]));
       out.push(await turn('long', [[3000, 0]], { expectLong: true }));
@@ -338,11 +362,11 @@ async function benchmark(page, context) {
     } else {
       for (let t = 0; t < (measured ? config.repeatTurns : 2); t++) out.push({ ...(await turn('short', [[1200, 0]])), turn: t + 1 });
     }
-    await stopSession();
-    return out.map(r => ({ ...r, iteration }));
+    return finish();
   };
   const mockCounters = async () => (await (await context.request.get(`${MOCKS}/metrics`)).json().catch(() => ({})));
   const COUNTER_KEYS = ['sttConnections', 'sttTurns', 'ttsConnections', 'ttsRequests', 'ttsCancelled', 'injectedFailures'];
+  const STT_KEYS = ['sttFrames', 'sttLoudFrames', 'sttInterims', 'sttFinals'];
   const isDisconnected = timeout => page.getByRole('status').filter({ hasText: 'Disconnected' }).waitFor({ timeout }).then(() => true).catch(() => false);
   const failure = async (kind, mode, iteration) => {
     const before = await mockCounters();
@@ -389,8 +413,48 @@ async function benchmark(page, context) {
     await stopSession();
     return record;
   };
+  // Session-level reliability evidence from worker events (worker clock only).
+  const sessionDiagnostics = events => {
+    const stalls = events.filter(e => e.e === 'loop_stall').map(e => e.ms);
+    const end = events.find(e => e.e === 'session_end');
+    const greetingDone = events.find(e => e.e === 'greeting_done');
+    return { loopStalls: stalls.length, loopStallMaxMs: stalls.length ? Math.max(...stalls) : 0,
+      heartbeatLate: events.filter(e => e.e === 'heartbeat_late').length,
+      heartbeatMaxGapMs: Math.max(0, ...events.filter(e => e.e === 'heartbeat_late').map(e => e.gapMs)),
+      heartbeatRetries: events.filter(e => e.e === 'heartbeat_retry').length,
+      // Any session_end received while the browser is still connected is a premature close.
+      prematureEnd: end ? Object.keys(end).find(k => !['e', 't', 'rx'].includes(k)) ?? 'unknown' : null,
+      greetingDoneSeen: Boolean(greetingDone), greetingInterrupted: greetingDone?.interrupted ?? null, _greetingDoneT: greetingDone?.t,
+      agentTrackPublished: events.some(e => e.e === 'agent_track_published'), agentTrackSubscribed: events.some(e => e.e === 'agent_track_subscribed') };
+  };
+  const FIRST_TURN_GAPS = [150, 600, 1500];
+  const firstTurnSession = async iteration => {
+    const gapMs = FIRST_TURN_GAPS[(iteration - 1) % FIRST_TURN_GAPS.length];
+    const from = await now();
+    const started = await startSession(120);
+    const session = { case: 'first_turn_session', iteration, gapMs, retried: Boolean(started.retried),
+      outcome: started.ok ? (started.retried ? 'ok_after_no_greeting_retry' : 'ok') : started.reason, browser: started.ok ? { connectToGreetingMs: started.connectToGreetingMs } : {} };
+    if (!started.ok) { session.diagnostics = sessionDiagnostics(await eventsBetween(from, await now())); await stopSession(); return [session]; }
+    await page.waitForTimeout(Math.max(0, started.greetingEnd + gapMs - await now()));
+    // Mock STT counters around each turn: did the recognizer receive loud audio and emit results?
+    const sttDelta = async work => {
+      const before = await mockCounters(); const record = await work(); const after = await mockCounters();
+      return { ...record, sttDelta: Object.fromEntries(STT_KEYS.map(k => [k, (after[k] ?? 0) - (before[k] ?? 0)])) };
+    };
+    const first = { ...(await sttDelta(() => turn('first_turn', [[1200, 0]]))), iteration, gapMs };
+    const second = { ...(await sttDelta(() => turn('second_turn', [[1200, 0]]))), iteration, gapMs };
+    const d = sessionDiagnostics(await eventsBetween(from, await now()));
+    // Did the user start speaking (worker VAD) before the worker finished greeting playout?
+    const firstSpeech = (await eventsBetween(from, await now())).find(e => e.e === 'user_speaking');
+    d.userBeforeGreetingDone = d._greetingDoneT !== undefined && firstSpeech ? firstSpeech.t < d._greetingDoneT : null;
+    delete d._greetingDoneT;
+    session.diagnostics = d;
+    await stopSession();
+    return [session, first, second];
+  };
   await control({ reset: true });
   for (let i = 0; i < config.warmupSessions; i++) await run(false, -1 - i, false);
+  for (let i = 0; i < config.firstTurnSessions; i++) samples.push(...await firstTurnSession(i + 1));
   for (let i = 0; i < config.repeatSessions; i++) samples.push(...await run(false, i + 1, true));
   for (let i = 0; i < config.mixedSessions; i++) samples.push(...await run(true, i + 1, true));
   for (let i = 0; i < config.failureRuns; i++) {
@@ -515,8 +579,16 @@ function summarize(samples, meta) {
     const counts = {}; for (const r of recs) for (const [k, v] of Object.entries(r.worker?.counts ?? {})) counts[k] = (counts[k] ?? 0) + v;
     const falseInterruption = {}; for (const r of recs) if (r.falseInterruption) falseInterruption[r.falseInterruption] = (falseInterruption[r.falseInterruption] ?? 0) + 1;
     const mockDelta = {}; for (const r of recs) for (const [k, v] of Object.entries(r.mockDelta ?? {})) mockDelta[k] = (mockDelta[k] ?? 0) + v;
+    const diag = recs.filter(r => r.diagnostics).map(r => r.diagnostics);
+    const tally = list => list.reduce((o, k) => ({ ...o, [k]: (o[k] ?? 0) + 1 }), {});
+    const diagnostics = diag.length ? { sessions: diag.length, retried: recs.filter(r => r.retried).length,
+      prematureEnd: tally(diag.map(d => d.prematureEnd).filter(Boolean)), loopStallOver1s: diag.filter(d => d.loopStallMaxMs > 1000).length,
+      loopStallMaxMs: Math.max(0, ...diag.map(d => d.loopStallMaxMs)), heartbeatLateSessions: diag.filter(d => d.heartbeatLate > 0).length,
+      heartbeatMaxGapMs: Math.max(0, ...diag.map(d => d.heartbeatMaxGapMs)), heartbeatRetries: diag.reduce((n, d) => n + (d.heartbeatRetries ?? 0), 0), greetingDoneMissing: diag.filter(d => !d.greetingDoneSeen).length,
+      userBeforeGreetingDone: diag.filter(d => d.userBeforeGreetingDone === true).length,
+      sessionMaxMs: Math.max(0, ...recs.map(r => r.browser?.sessionMs ?? 0)) } : undefined;
     metrics[name] = { records: recs.length, outcomes, workerEventCounts: counts, ...(Object.keys(falseInterruption).length ? { falseInterruption } : {}),
-      ...(Object.keys(mockDelta).length ? { mockProviderDelta: mockDelta } : {}), metrics: m };
+      ...(Object.keys(mockDelta).length ? { mockProviderDelta: mockDelta } : {}), ...(diagnostics ? { diagnostics } : {}), metrics: m };
   }
   const { tuning } = meta;
   return {
@@ -535,6 +607,7 @@ function markdown(report) {
     `- Percentiles need at least ${report.configuration.percentileMinimumSamples.p50}/${report.configuration.percentileMinimumSamples.p90}/${report.configuration.percentileMinimumSamples.p95} samples for p50/p90/p95; otherwise "n/a".`, ''];
   for (const [name, c] of Object.entries(report.cases)) {
     lines.push(`## ${name} (${c.records} records)`, '', `Outcomes: ${JSON.stringify(c.outcomes)}${c.falseInterruption ? ` · false interruption: ${JSON.stringify(c.falseInterruption)}` : ''}`, '',
+      ...(c.diagnostics ? [`Diagnostics: ${JSON.stringify(c.diagnostics)}`, ''] : []),
       '| Metric | n | missing | p50 | p90 | p95 | min | max |', '| --- | --- | --- | --- | --- | --- | --- | --- |');
     for (const [k, s] of Object.entries(c.metrics)) lines.push(`| ${k} | ${s.n} | ${s.missing} | ${s.p50 ?? 'n/a'} | ${s.p90 ?? 'n/a'} | ${s.p95 ?? 'n/a'} | ${s.min ?? 'n/a'} | ${s.max ?? 'n/a'} |`);
     const counts = c.workerEventCounts;

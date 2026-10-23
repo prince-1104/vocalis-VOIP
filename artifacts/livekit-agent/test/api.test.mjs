@@ -36,8 +36,19 @@ test('worker HTTP adapter rejects denied work and propagates cancellation withou
   t.after(() => { server.closeAllConnections(); server.close(); });
   const client = new api.DialogApi('a'.repeat(43), `http://127.0.0.1:${server.address().port}`);
   assert.deepEqual(await client.json('/allowed', { component: 'stt' }), { allowed: true });
-  await assert.rejects(client.request('/denied', {}), error => !error.message.includes('private'));
+  await assert.rejects(client.request('/denied', {}), error => !error.message.includes('private') && error instanceof api.DialogDenied && error.status === 403);
   const abort = new AbortController();
   const request = client.request('/wait', {}, 'opaque-claim', abort.signal); abort.abort();
-  await assert.rejects(request);
+  await assert.rejects(request, error => !(error instanceof api.DialogDenied));
+  await assert.rejects(client.request('/wait', {}, 'opaque-claim', undefined, 50), error => !(error instanceof api.DialogDenied));
+});
+test('only a Dialog refusal or a lapsed lease ends the session; transient renewal failures retry', () => {
+  const deadline = 15000;
+  assert.equal(api.leaseLost(new api.DialogDenied(403), 1000, deadline), true);
+  assert.equal(api.leaseLost(new api.DialogDenied(401), 1000, deadline), true);
+  assert.equal(api.leaseLost(new api.DialogDenied(503), 1000, deadline), false);
+  assert.equal(api.leaseLost(new DOMException('timeout', 'TimeoutError'), 1000, deadline), false);
+  assert.equal(api.leaseLost(new TypeError('fetch failed'), 1000, deadline), false);
+  assert.equal(api.leaseLost(new TypeError('fetch failed'), deadline, deadline), true);
+  assert.equal(api.leaseLost(new api.DialogDenied(503), deadline + 1, deadline), true);
 });
