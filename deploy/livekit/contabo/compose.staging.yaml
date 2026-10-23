@@ -1,0 +1,45 @@
+# Review-only handoff: no command in Phase 1Q applies this configuration.
+# Supply secrets as mounted files through the operator's approved secret mechanism.
+name: dialog-voice-staging
+services:
+  redis:
+    image: redis:7.4-alpine@sha256:57e4255cc971b1c8d6f8a6ca283ac01bc3ecdd914273ef6bfaede87aaecd6541
+    command: [redis-server, --appendonly, 'yes', --requirepass, '${STAGING_REDIS_PASSWORD:?operator configuration required}']
+    networks: [private]
+    volumes: [redis-data:/data]
+    mem_limit: 512m
+    cpus: 0.5
+    restart: unless-stopped
+  livekit:
+    image: livekit/livekit-server:v1.13.10@sha256:89ca9ce0791e18d6e03bf6e2c49ceb27e1c754eae8bd50c989386c1a5963791a
+    command: [--config, /etc/livekit.yaml]
+    volumes: [./livekit.example.yaml:/etc/livekit.yaml:ro]
+    networks: [private]
+    ports: ['127.0.0.1:7880:7880', '7881:7881/tcp', '50000-50100:50000-50100/udp']
+    mem_limit: 2g
+    cpus: 2
+    restart: unless-stopped
+  sip:
+    image: livekit/sip:v1.14.0@sha256:1487f39ca985f64879cc74b045e1ddc22f7afdb02e8a4739d92d749b9c3c3ad2
+    command: [--config, /etc/sip.yaml]
+    volumes: [./sip.example.yaml:/etc/sip.yaml:ro]
+    networks: [private]
+    # Intentionally no ports until ownership/routing/rates/reconciliation are approved.
+    mem_limit: 1g
+    cpus: 1
+  worker:
+    image: '${DIALOG_WORKER_IMAGE:?reviewed immutable application image required}'
+    networks: [private]
+    env_file: ./worker.operator.env
+    stop_grace_period: 30s
+    mem_limit: 2g
+    cpus: 2
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:8082/readyz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 2s
+      retries: 3
+networks:
+  private: {}
+volumes:
+  redis-data: {}

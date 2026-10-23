@@ -1,0 +1,20 @@
+# Never selected by voice:local:* or CI. Operator creates the two ignored files
+# explicitly; LLM keys belong only in manual-api.env, speech keys in manual-worker.env.
+services:
+  fixture-api:
+    env_file:
+      - ../../.local/livekit/api.env
+      - ../../.local/livekit/manual-api.env
+    environment:
+      DIALOG_LOCAL_VOICE_PROFILE: manual-live
+      LIVEKIT_PROVIDER_MODE: live
+    networks: [voice, manual-egress]
+  worker:
+    env_file:
+      - ../../.local/livekit/worker.env
+      - ../../.local/livekit/manual-worker.env
+    environment:
+      DIALOG_LOCAL_VOICE_PROFILE: manual-live
+    networks: [voice, manual-egress]
+networks:
+  manual-egress: {}

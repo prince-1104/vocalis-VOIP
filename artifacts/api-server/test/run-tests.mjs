@@ -8,6 +8,7 @@ import { spawn } from "node:child_process";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const output = await mkdtemp(path.join(tmpdir(), "dialog-security-tests-"));
 const allSuites = [
+  "livekit.test.ts",
   "vobiz-sip.test.ts",
   "monitoring.test.ts",
   "security.test.ts",
@@ -56,6 +57,9 @@ try {
       {
         name: "isolated-test-adapters",
         setup(builder) {
+          builder.onResolve({ filter: /^@workspace\/observability\// }, args => ({
+            path: path.resolve(root, "../../lib/observability/src", args.path.split("/").at(-1) + ".ts"),
+          }));
           builder.onResolve({ filter: /^@workspace\/db$/ }, () => ({
             path: path.join(root, "test/fake-db.ts"),
           }));

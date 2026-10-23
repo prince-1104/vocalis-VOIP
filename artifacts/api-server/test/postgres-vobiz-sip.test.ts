@@ -19,8 +19,8 @@ test("PostgreSQL: Vobiz migration upgrades 0009 additively, gates readiness and 
   await withDatabase(t, async connect => {
     const c = await connect(); await migrateThrough(c, "0009_schema_reconciliation"); await seed(c);
     await c.query(`insert into sip_trunk_configs(tenant_id,sip_domain,sip_username,sip_password,phone_number) values (1,'sip.fixture.test','fake-user','fake-legacy-value','+15550100009')`);
-    assert.deepEqual((await inspectSchema(c)).pending, ["0010_vobiz_sip_configuration"]);
-    assert.deepEqual(await applyMigrations(c, directory), ["0010_vobiz_sip_configuration"]);
+    assert.deepEqual((await inspectSchema(c)).pending, ["0010_vobiz_sip_configuration", "0011_livekit_sessions"]);
+    assert.deepEqual(await applyMigrations(c, directory), ["0010_vobiz_sip_configuration", "0011_livekit_sessions"]);
     assert.deepEqual(await applyMigrations(c, directory), []); assert.equal((await inspectSchema(c)).status, "ready");
     assert.deepEqual((await c.query(`select telephony_type from tenants order by id`)).rows, [{ telephony_type: "TWILIO" }, { telephony_type: "TWILIO" }]);
     assert.equal((await c.query(`select sip_password from sip_trunk_configs where tenant_id=1`)).rows[0].sip_password, "fake-legacy-value");

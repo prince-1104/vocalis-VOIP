@@ -1,0 +1,545 @@
+import { chromium } from 'playwright';
+import assert from 'node:assert/strict';
+import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import os from 'node:os';
+const credentials = JSON.parse(await readFile('/run/dialog-local/login.json', 'utf8'));
+const BENCH = process.env.VOICE_BENCH === '1';
+const MOCKS = 'http://mock-providers:8090';
+// Manual-live benchmark only (scripts/voice-local.mjs bench-live): real STT cannot transcribe
+// synthetic vowels, so an operator-recorded speech clip replaces the synthesizer. Never logged.
+const LIVE = BENCH && process.env.VOICE_BENCH_PROVIDER_MODE === 'live';
+const LIVE_CLIP = '/app/bench-out/live-utterance.wav';
+// The smoke container shares the gateway network namespace, so 127.0.0.1 reaches the
+// gateway relays (5173 frontend, 7880-7882 LiveKit) and is a secure context, which is
+// required for navigator.mediaDevices to exist at all.
+async function main() {
+const browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--use-fake-ui-for-media-stream', '--autoplay-policy=no-user-gesture-required'] });
+try {
+  const context = await browser.newContext({ permissions: ['microphone'] });
+  const page = await context.newPage();
+  // Only sanitized assertion names go to stdout. No traces, HARs or provider payload logs.
+  // Failure diagnostics print redacted, truncated error text only — never tokens or payloads.
+  const redact = text => String(text).replace(/(token|secret|authorization|key)[=:"'\s]+[^&\s"']+/gi, '$1=***')
+    .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '<id>').replace(/\b(RM|PA|TR)_[A-Za-z0-9]+/g, '$1_<id>').slice(0, 300);
+  page.on('pageerror', error => console.error('DIAG pageerror:', redact(error.message)));
+  page.on('crash', () => console.error('DIAG renderer crashed'));
+  page.on('console', message => { if (message.type() === 'error') console.error('DIAG console:', redact(message.text())); });
+  await page.addInitScript(() => {
+    // Speech-like synthetic microphone (source-filter vowel synthesis): a ~120 Hz glottal pulse
+    // train with pitch drift and vibrato through three formant band-passes whose targets change
+    // every 220 ms syllable, behind a gate scheduled on the audio clock. A plain sawtooth is not
+    // classified as speech by Silero VAD (max probability ~0.07), so barge-in would go untested.
+    const mic = new AudioContext();
+    const harmonics = new Float32Array(40).fill(1); harmonics[0] = 0;
+    const voice = mic.createOscillator(); voice.setPeriodicWave(mic.createPeriodicWave(new Float32Array(40), harmonics)); voice.frequency.value = 120;
+    for (const [rate, depthHz] of [[0.8, 15], [5.1, 6]]) {
+      const lfo = mic.createOscillator(); lfo.frequency.value = rate; const depth = mic.createGain(); depth.gain.value = depthHz;
+      lfo.connect(depth).connect(voice.frequency); lfo.start();
+    }
+    const VOWELS = [[730, 1090, 2440], [270, 2290, 3010], [300, 870, 2240], [530, 1840, 2480], [570, 840, 2410]];
+    const syllable = mic.createGain(); syllable.gain.value = 0;
+    const formants = [[5, 1], [8, 0.6], [10, 0.3]].map(([q, weight], i) => {
+      const band = mic.createBiquadFilter(); band.type = 'bandpass'; band.Q.value = q; band.frequency.value = VOWELS[0][i];
+      const g = mic.createGain(); g.gain.value = weight * 3; voice.connect(band).connect(g).connect(syllable); return band;
+    });
+    const gate = mic.createGain(); gate.gain.value = 0;
+    syllable.connect(gate); voice.start();
+    let vowelIndex = 0;
+    const scheduleSyllables = (from, ms) => {
+      for (let t = 0; t < ms; t += 220) {
+        const at = from + t / 1000, len = Math.min(0.22, (ms - t) / 1000), v = VOWELS[vowelIndex++ % VOWELS.length];
+        formants.forEach((band, i) => band.frequency.setValueAtTime(v[i], at));
+        syllable.gain.setValueAtTime(0.15, at); syllable.gain.linearRampToValueAtTime(1, at + Math.min(0.06, len / 2));
+        syllable.gain.setValueAtTime(1, at + Math.max(len - 0.05, len / 2)); syllable.gain.linearRampToValueAtTime(0.15, at + len);
+      }
+    };
+    // A fresh stream per call: the SDK stops the previous session's track on disconnect.
+    navigator.mediaDevices.getUserMedia = async () => {
+      await mic.resume(); const destination = mic.createMediaStreamDestination(); gate.connect(destination); return destination.stream;
+    };
+    // segments: [[speechMs, silenceMs], ...]. Returns browser-clock (performance.now) speech boundaries.
+    window.__speak = async (segments, level = 0.4) => {
+      await mic.resume();
+      const ctxStart = mic.currentTime + 0.05, perfStart = performance.now() + 50;
+      const bounds = []; let offset = 0;
+      for (const [on, off] of segments) {
+        gate.gain.setValueAtTime(level, ctxStart + offset / 1000); bounds.push([perfStart + offset]);
+        if (clip) {
+          const source = mic.createBufferSource(); source.buffer = clip; source.loop = true; source.connect(gate);
+          source.start(ctxStart + offset / 1000); source.stop(ctxStart + (offset + on) / 1000);
+        } else scheduleSyllables(ctxStart + offset / 1000, on);
+        offset += on;
+        gate.gain.setValueAtTime(0, ctxStart + offset / 1000); bounds[bounds.length - 1].push(perfStart + offset);
+        offset += off;
+      }
+      await new Promise(r => setTimeout(r, offset + 60));
+      return bounds;
+    };
+    let clip = null;
+    window.__setClip = async base64 => { clip = await mic.decodeAudioData(Uint8Array.from(atob(base64), c => c.charCodeAt(0)).buffer); return clip.duration; };
+    window.__voiceInput = async (ms = 1000) => { await window.__speak([[ms, 0]]); return { localPeak: 0.4, contextState: mic.state }; };
+    // Agent audio envelope on the browser clock: audible segments [onset, last audible sample].
+    window.__env = { segments: [], audible: false, onAt: 0, lastLoud: 0, peak: 0 };
+    window.__audioEvidence = { get peak() { return window.__env.peak; } };
+    // Elements may start via autoplay without play(), so watch for new subscribed streams instead.
+    const observed = new Map(); // stream id -> stop()
+    const observe = stream => {
+      const audio = new AudioContext(); const input = audio.createMediaStreamSource(stream);
+      const analyser = audio.createAnalyser(); analyser.fftSize = 256; input.connect(analyser); const data = new Float32Array(analyser.fftSize);
+      const timer = setInterval(() => {
+        analyser.getFloatTimeDomainData(data);
+        let peak = 0; for (const v of data) peak = Math.max(peak, Math.abs(v));
+        const env = window.__env, now = performance.now();
+        env.peak = Math.max(env.peak, peak);
+        if (peak > 0.02) { if (!env.audible) { env.audible = true; env.onAt = now; } env.lastLoud = now; }
+        else if (env.audible && now - env.lastLoud > 25) { env.audible = false; env.segments.push([env.onAt, env.lastLoud]); }
+      }, 5);
+      void audio.resume();
+      return () => { clearInterval(timer); void audio.close(); };
+    };
+    setInterval(() => {
+      const live = new Set();
+      for (const el of document.querySelectorAll('audio')) {
+        const stream = el.srcObject;
+        if (!(stream instanceof MediaStream) || !stream.getAudioTracks().some(t => t.readyState === 'live')) continue;
+        live.add(stream.id);
+        if (!observed.has(stream.id)) observed.set(stream.id, observe(stream));
+      }
+      for (const [id, stop] of observed) if (!live.has(id)) { stop(); observed.delete(id); }
+    }, 50);
+    // Worker stage events: worker-clock `t`; `rx` is only used to assign events to a test case.
+    window.__bench = [];
+    window.addEventListener('dialog-bench', e => { try { window.__bench.push({ ...JSON.parse(e.detail), rx: performance.now() }); } catch {} });
+  });
+  // A freshly recreated Vite dev server pre-bundles dependencies on first request.
+  await page.goto('http://127.0.0.1:5173/login', { timeout: 120000 });
+  const tokens = [];
+  for (const user of credentials) {
+    const response = await context.request.post('http://fixture-api:3003/api/auth/login', { data: user });
+    assert.equal(response.status(), 200, 'fixture password login'); tokens.push((await response.json()).token);
+  }
+  await page.evaluate(token => localStorage.setItem('ss_auth_token', token), tokens[0]);
+  await page.goto('http://127.0.0.1:5173/dev/livekit');
+  if (LIVE) await page.evaluate(clip => window.__setClip(clip), (await readFile(LIVE_CLIP)).toString('base64'));
+  await page.route('**/api/dev/livekit/sessions', async route => {
+    const response = await route.fetch();
+    if (response.status() !== 201) { await route.fulfill({ response }); return; }
+    const data = await response.json();
+    // The browser runs inside the isolated bridge; loopback reaches the gateway relay.
+    data.url = 'ws://127.0.0.1:7880';
+    await route.fulfill({ response, json: data });
+  });
+  // A job that lands on a worker process still initializing (cold SDK import + VAD load) can miss
+  // the greeting window; one bounded retry is allowed and reported, never silently absorbed.
+  for (let attempt = 1; ; attempt++) {
+    await page.getByRole('button', { name: 'Start preview' }).click();
+    try {
+      await page.getByRole('status').filter({ hasText: 'Connected' }).waitFor({ timeout: 60000 });
+    } catch (error) {
+      console.error('DIAG status at timeout:', redact(await page.getByRole('status').textContent().catch(() => 'unreadable')));
+      throw error;
+    }
+    const greeted = await page.waitForFunction(() => window.__audioEvidence.peak > 0.01, undefined, { timeout: 45000 }).then(() => true).catch(() => false);
+    if (greeted) break;
+    if (attempt === 2) throw new Error('No greeting audio after retry');
+    console.error('DIAG no greeting within 45 s; retrying session start once');
+    await page.getByRole('button', { name: 'Stop preview' }).click().catch(() => undefined);
+    await page.getByRole('status').filter({ hasText: 'Stopped' }).waitFor({ timeout: 15000 }).catch(() => undefined);
+    await page.waitForTimeout(15000);
+  }
+  console.log('PASS real-room greeting: non-silent subscribed audio');
+  if (LIVE) {
+    // No mock counters exist in manual-live mode; worker stage events prove the turn instead.
+    await page.waitForTimeout(3000);
+    const seen = await page.evaluate(() => window.__bench.length);
+    await page.evaluate(() => window.__voiceInput(4000));
+    await page.waitForFunction(n => window.__bench.slice(n).some(e => e.e === 'tts_start'), seen, { timeout: 30000 });
+  } else {
+    const before = await (await context.request.get(`${MOCKS}/metrics`)).json();
+    // STT audio arrives in 100 ms chunks; speak long enough for a final transcript and a reply.
+    await page.waitForTimeout(3000);
+    await page.evaluate(() => window.__voiceInput(4000));
+    // APIRequestContext avoids broadening frontend CORS just for fixture observations.
+    const deadline = Date.now() + 30000;
+    let after;
+    do { after = await (await context.request.get(`${MOCKS}/metrics`)).json(); if (after.ttsRequests > before.ttsRequests) break; await new Promise(r => setTimeout(r, 250)); } while (Date.now() < deadline);
+    assert.ok(after.sttTurns > before.sttTurns && after.ttsRequests > before.ttsRequests, 'microphone audio -> official STT plugin -> Dialog LLM -> official TTS plugin');
+  }
+  console.log('PASS real-room synthetic microphone response');
+  await page.getByRole('button', { name: 'Stop preview' }).click();
+  await page.getByRole('status').filter({ hasText: 'Stopped' }).waitFor();
+  console.log('PASS explicit session shutdown');
+  if (BENCH) await benchmark(page, context);
+  await context.close();
+} finally { await browser.close(); }
+}
+
+// ── Latency benchmark (VOICE_BENCH=1) ────────────────────────────────────────
+async function benchmark(page, context) {
+  // Manual-live runs are bounded (paid provider requests) and never inject faults.
+  const config = {
+    label: /^[a-z0-9-]{1,40}$/.test(process.env.VOICE_BENCH_LABEL ?? '') ? process.env.VOICE_BENCH_LABEL : 'unlabelled',
+    warmupSessions: int('VOICE_BENCH_WARMUP', LIVE ? 0 : 1, 0, LIVE ? 1 : 5),
+    mixedSessions: int('VOICE_BENCH_ITERATIONS', LIVE ? 2 : 10, 1, LIVE ? 3 : 50),
+    repeatSessions: int('VOICE_BENCH_REPEAT_SESSIONS', LIVE ? 1 : 4, 0, LIVE ? 2 : 20),
+    repeatTurns: 6,
+    failureRuns: LIVE ? 0 : int('VOICE_BENCH_FAILURE_RUNS', 1, 0, 5),
+    providerMode: LIVE ? 'live' : 'mock',
+  };
+  const control = body => LIVE ? Promise.resolve() : context.request.post(`${MOCKS}/control`, { data: body }).catch(() => undefined);
+  const now = () => page.evaluate(() => performance.now());
+  const status = () => page.getByRole('status').textContent();
+  const samples = [];   // { case, iteration, turn?, browser: {...}, worker: {...}, outcome }
+  let tuning = null;
+  const nextOnset = (after, timeout) => page.waitForFunction(([after]) => {
+    const env = window.__env;
+    const seg = env.segments.find(s => s[0] > after);
+    return seg ? seg[0] : (env.audible && env.onAt > after ? env.onAt : false);
+  }, [after], { timeout, polling: 10 }).then(h => h.jsonValue()).catch(() => null);
+  // End of an agent response: last audible sample followed by `quiet` ms of silence.
+  const responseEnd = (after, quiet, timeout) => page.waitForFunction(([after, quiet]) => {
+    const env = window.__env;
+    if (env.audible || performance.now() - env.lastLoud < quiet) return false;
+    const last = env.segments.at(-1);
+    return last && last[1] > after ? last[1] : false;
+  }, [after, quiet], { timeout, polling: 20 }).then(h => h.jsonValue()).catch(() => null);
+  const segmentsBetween = (from, to) => page.evaluate(([from, to]) => {
+    const env = window.__env, all = [...env.segments, ...(env.audible ? [[env.onAt, env.lastLoud]] : [])];
+    return all.filter(s => s[1] >= from && s[0] <= to);
+  }, [from, to]);
+  const eventsBetween = (from, to) => page.evaluate(([from, to]) => window.__bench.filter(e => e.rx >= from && e.rx <= to), [from, to]);
+  const playback = segs => {
+    if (!segs.length) return { playbackMs: null, gaps: 0, gapMs: 0, responses: 0 };
+    const responses = [[...segs[0]]]; let gaps = 0, gapMs = 0;
+    for (const s of segs.slice(1)) {
+      const cur = responses.at(-1), gap = s[0] - cur[1];
+      if (gap < 400) { if (gap >= 30) { gaps++; gapMs += gap; } cur[1] = s[1]; } else responses.push([...s]);
+    }
+    return { playbackMs: responses[0][1] - responses[0][0], gaps, gapMs: Math.round(gapMs), responses: responses.length };
+  };
+  async function startSession() {
+    const first = await startSessionOnce();
+    if (first.ok || first.reason !== 'no_greeting') return first;
+    await stopSession(); await page.waitForTimeout(10000);
+    const second = await startSessionOnce();
+    return second.ok ? { ...second, retried: true } : second;
+  }
+  async function startSessionOnce() {
+    for (let attempt = 0; attempt < 8; attempt++) {
+      await page.evaluate(() => { window.__env.segments = []; window.__env.audible = false; window.__env.peak = 0; });
+      await page.getByRole('button', { name: 'Start preview' }).click();
+      const ok = await page.getByRole('status').filter({ hasText: 'Connected' }).waitFor({ timeout: 30000 }).then(() => true).catch(() => false);
+      if (ok) {
+        const start = await now();
+        const greetingOn = await nextOnset(start - 5000, 20000);
+        if (greetingOn === null) {
+          console.error('DIAG no greeting:', JSON.stringify(await page.evaluate(() => ({ benchEvents: window.__bench.length, peak: window.__env.peak,
+            audioElements: document.querySelectorAll('audio').length, status: document.querySelector('[role=status]')?.textContent }))));
+          return { ok: false, reason: 'no_greeting' };
+        }
+        await responseEnd(greetingOn, 600, 20000);
+        return { ok: true, connectToGreetingMs: greetingOn - start };
+      }
+      await stopSession(); await page.waitForTimeout(2000);
+    }
+    return { ok: false, reason: 'start_failed' };
+  }
+  async function stopSession() {
+    await page.getByRole('button', { name: 'Stop preview' }).click().catch(() => undefined);
+    await page.getByRole('status').filter({ hasText: 'Stopped' }).waitFor({ timeout: 15000 }).catch(() => undefined);
+    await page.waitForTimeout(1500);
+  }
+  // One user turn: speak, then observe the agent's reply on the browser clock.
+  async function turn(name, segments, { expectLong = false, quiet = 700, extra } = {}) {
+    const caseStart = await now();
+    const bounds = await page.evaluate(s => window.__speak(s), segments);
+    const speechStart = bounds[0][0], speechEnd = bounds.at(-1)[1];
+    const onset = await nextOnset(speechStart, expectLong ? 15000 : 12000);
+    const record = { case: name, browser: {}, outcome: 'ok' };
+    if (onset === null) { record.outcome = 'timeout_no_response'; }
+    else {
+      record.browser.e2eFirstAudioMs = onset - speechEnd;
+      if (onset < speechEnd) record.outcome = 'premature_response';
+      if (extra) { const { browser = {}, ...rest } = await extra(onset, speechEnd); Object.assign(record.browser, browser); Object.assign(record, rest); }
+      const end = record.endAt ?? await responseEnd(onset, quiet, expectLong ? 30000 : 15000);
+      const segs = await segmentsBetween(onset - 1, (end ?? await now()) + 1);
+      const p = playback(segs);
+      record.browser.playbackMs = record.interrupted ? null : p.playbackMs;
+      record.browser.gaps = p.gaps; record.browser.gapMs = p.gapMs; record.browser.responses = p.responses;
+      if (end === null) record.outcome = 'timeout_response_end';
+    }
+    await page.waitForTimeout(800);
+    const caseEnd = await now();
+    const all = await segmentsBetween(caseStart, caseEnd);
+    record.browser.responsesInWindow = playback(all).responses;
+    const events = await eventsBetween(caseStart, caseEnd);
+    record.worker = workerStages(events);
+    if (extra && events.length) record.timeline = events.map(e => [e.e, Math.round(e.t - events[0].t)]);
+    // A second synthesized reply in one user turn means the turn was split (premature closure).
+    if (record.outcome === 'ok' && !record.interrupted && !record.pausesAllowed && (record.worker.counts.tts_start ?? 0) > 1) record.outcome = 'duplicate_response';
+    tuning ??= (await page.evaluate(() => window.__bench.find(e => e.e === 'session_start'))) ?? null;
+    return record;
+  }
+  const interruptExtra = async (onset) => {
+    await page.waitForTimeout(Math.max(0, onset + 1200 - await now()));
+    const bounds = await page.evaluate(() => window.__speak([[1200, 0]]));
+    const userOn = bounds[0][0], userEnd = bounds[0][1];
+    // The obsolete reply stops (an audible segment followed by >= 300 ms of silence);
+    // the interrupting request is then answered rather than suppressed.
+    const stop = await page.waitForFunction(([userOn]) => {
+      const env = window.__env, now = performance.now();
+      const segs = env.segments.filter(s => s[1] >= userOn);
+      for (let i = 0; i < segs.length; i++) {
+        const next = segs[i + 1]?.[0] ?? (env.audible ? env.onAt : Infinity);
+        if (next - segs[i][1] >= 300 && (next !== Infinity || now - segs[i][1] >= 300)) return segs[i][1];
+      }
+      return false;
+    }, [userOn], { timeout: 8000, polling: 10 }).then(h => h.jsonValue()).catch(() => null);
+    const reply = await nextOnset(Math.max(userEnd, stop ?? userEnd), 12000);
+    const replyEnd = reply === null ? null : await responseEnd(reply, 700, 15000);
+    return { interrupted: true, endAt: replyEnd, browser: { interruptStopMs: stop === null ? null : stop - userOn,
+      afterInterruptFirstAudioMs: reply === null ? null : reply - userEnd }, outcome: stop === null ? 'interrupt_not_stopped' : reply === null ? 'interrupt_reply_missing' : 'ok' };
+  };
+  const falseInterruptExtra = async (onset) => {
+    await page.waitForTimeout(Math.max(0, onset + 1200 - await now()));
+    const bounds = await page.evaluate(() => window.__speak([[250, 0]]));
+    const burst = bounds[0][0];
+    const end = await responseEnd(onset, 2600, 40000);
+    const segs = await segmentsBetween(onset - 1, (end ?? await now()) + 1);
+    const pauses = segs.slice(1).map((s, i) => s[0] - segs[i][1]).filter(g => g >= 400);
+    const audible = segs.reduce((n, s) => n + s[1] - s[0], 0);
+    return { endAt: end, pausesAllowed: true, paused: pauses.length > 0, burstAt: burst, browser: { audibleMs: Math.round(audible) } };
+  };
+  // Worker evidence decides the class: a second LLM/TTS turn means the burst became a user turn
+  // (the reply was replaced); an SDK false-interruption event means playout paused and resumed.
+  const classifyFalseInterrupt = r => {
+    const c = r.worker?.counts ?? {};
+    r.falseInterruption = (c.llm_start ?? 0) > 1 || (c.tts_start ?? 0) > 1 ? 'treated_as_turn'
+      : (c.tts_cancelled ?? 0) > 0 ? 'reply_cancelled' : (c.false_interruption ?? 0) > 0 ? 'paused_then_resumed' : r.paused ? 'paused' : 'continued';
+    if (['treated_as_turn', 'reply_cancelled'].includes(r.falseInterruption) && r.outcome === 'ok') r.outcome = 'false_interruption_dropped_reply';
+    return r;
+  };
+  const run = async (mixed, iteration, measured) => {
+    const out = [];
+    const started = await startSession();
+    out.push({ case: 'session', iteration, outcome: started.ok ? (started.retried ? 'ok_after_no_greeting_retry' : 'ok') : started.reason,
+      browser: started.ok ? { connectToGreetingMs: started.connectToGreetingMs } : {} });
+    if (!started.ok) { await stopSession(); return out.map(r => ({ ...r, iteration })); }
+    if (mixed) {
+      out.push(await turn('pause', [[1500, 450], [1500, 0]]));
+      out.push(await turn('long', [[3000, 0]], { expectLong: true }));
+      await page.waitForTimeout(2000); // silence before speech: no response may start
+      const quietWindow = await segmentsBetween(await now() - 2000, await now());
+      const s = await turn('silence', [[1200, 0]], { quiet: 2500 });
+      if (quietWindow.length) s.outcome = 'response_during_silence';
+      out.push(s);
+      out.push(await turn('interrupt', [[3000, 0]], { expectLong: true, extra: interruptExtra }));
+      out.push(classifyFalseInterrupt(await turn('false_interrupt', [[3000, 0]], { expectLong: true, extra: falseInterruptExtra })));
+    } else {
+      for (let t = 0; t < (measured ? config.repeatTurns : 2); t++) out.push({ ...(await turn('short', [[1200, 0]])), turn: t + 1 });
+    }
+    await stopSession();
+    return out.map(r => ({ ...r, iteration }));
+  };
+  const mockCounters = async () => (await (await context.request.get(`${MOCKS}/metrics`)).json().catch(() => ({})));
+  const COUNTER_KEYS = ['sttConnections', 'sttTurns', 'ttsConnections', 'ttsRequests', 'ttsCancelled', 'injectedFailures'];
+  const isDisconnected = timeout => page.getByRole('status').filter({ hasText: 'Disconnected' }).waitFor({ timeout }).then(() => true).catch(() => false);
+  const failure = async (kind, mode, iteration) => {
+    const before = await mockCounters();
+    let t0;
+    if (kind === 'stt') {
+      // The STT socket opens at session start; the fault drops it 1.5 s later.
+      await control({ kind, mode, count: 1 });
+      await page.evaluate(() => { window.__env.segments = []; window.__env.audible = false; });
+      await page.getByRole('button', { name: 'Start preview' }).click();
+      const ok = await page.getByRole('status').filter({ hasText: 'Connected' }).waitFor({ timeout: 30000 }).then(() => true).catch(() => false);
+      if (!ok) { await control({ kind, mode: 'ok', count: 0 }); await stopSession(); return { case: `${kind}_${mode}`, iteration, outcome: 'start_failed', browser: {}, worker: {} }; }
+      t0 = await now();
+    } else {
+      const started = await startSession();
+      if (!started.ok) { await stopSession(); return { case: `${kind}_${mode}`, iteration, outcome: started.reason, browser: {}, worker: {} }; }
+      t0 = await now();
+    }
+    // Faulted turn (TTS faults: the reply to this turn hits the fault; STT fault: the socket already dropped).
+    if (kind === 'tts') await control({ kind, mode, count: 1 });
+    else await page.waitForTimeout(Math.max(0, t0 + 3000 - await now()));
+    const first = await page.evaluate(() => window.__speak([[1200, 0]]));
+    const firstEnd = first[0][1];
+    const firstReply = await nextOnset(first[0][0], 15000);
+    if (firstReply !== null) await responseEnd(firstReply, 700, 20000);
+    let disconnected = await isDisconnected(firstReply === null ? 5000 : 500);
+    // Follow-up turn: does the session recover once the injected fault is spent?
+    let secondReply = null, secondEnd = null;
+    if (!disconnected) {
+      const second = await page.evaluate(() => window.__speak([[1200, 0]]));
+      secondEnd = second[0][1];
+      secondReply = await nextOnset(second[0][0], 15000);
+      if (secondReply !== null) await responseEnd(secondReply, 700, 20000);
+      disconnected = await isDisconnected(500);
+    }
+    const at = await now();
+    const after = await mockCounters();
+    const outcome = firstReply !== null ? (disconnected ? 'reply_then_closed' : 'reply_delivered')
+      : disconnected ? 'session_closed' : secondReply !== null ? 'turn_dropped_then_recovered' : 'turn_dropped_no_recovery';
+    const record = { case: `${kind}_${mode}`, iteration, outcome,
+      browser: { faultedTurnFirstAudioMs: firstReply === null ? null : firstReply - firstEnd, recoveryTurnFirstAudioMs: secondReply === null ? null : secondReply - secondEnd },
+      worker: workerStages(await eventsBetween(t0 - 1, at + 1000)),
+      mockDelta: Object.fromEntries(COUNTER_KEYS.map(k => [k, (after[k] ?? 0) - (before[k] ?? 0)])) };
+    await control({ kind, mode: 'ok', count: 0 });
+    await stopSession();
+    return record;
+  };
+  await control({ reset: true });
+  for (let i = 0; i < config.warmupSessions; i++) await run(false, -1 - i, false);
+  for (let i = 0; i < config.repeatSessions; i++) samples.push(...await run(false, i + 1, true));
+  for (let i = 0; i < config.mixedSessions; i++) samples.push(...await run(true, i + 1, true));
+  for (let i = 0; i < config.failureRuns; i++) {
+    samples.push(await failure('tts', 'refuse', i + 1));
+    samples.push(await failure('tts', 'stall', i + 1));
+    samples.push(await failure('stt', 'drop', i + 1));
+  }
+  const mock = LIVE ? null : await (await context.request.get(`${MOCKS}/metrics`)).json().catch(() => ({}));
+  const report = summarize(samples, { config, tuning, mock, chromium: page.context().browser()?.version() });
+  await mkdir('/app/bench-out', { recursive: true });
+  const stamp = report.timestamp.replace(/[:.]/g, '-');
+  // Manual-live output keeps aggregates only.
+  const name = `${LIVE ? 'live-' : ''}${config.label}-${stamp}`;
+  if (LIVE) delete report.records;
+  await writeFile(`/app/bench-out/${name}.json`, JSON.stringify(report, null, 2));
+  await writeFile(`/app/bench-out/${name}.md`, markdown(report));
+  console.log(`BENCH wrote ${name}.json (${samples.length} records)`);
+  console.log(markdown(report));
+}
+function int(name, fallback, min, max) {
+  const value = Number(process.env[name] ?? fallback);
+  return Number.isInteger(value) && value >= min && value <= max ? value : fallback;
+}
+// Intervals between worker events use only worker-clock timestamps (`t`).
+function workerStages(events) {
+  const first = (name, after = -Infinity, pred = () => true) => events.find(e => e.e === name && e.t >= after && pred(e));
+  const last = (name, before, after = -Infinity) => events.filter(e => e.e === name && e.t <= before && e.t >= after).at(-1);
+  const out = { counts: {} };
+  for (const e of events) out.counts[e.e] = (out.counts[e.e] ?? 0) + 1;
+  out.counts.llm_cancelled = events.filter(e => e.e === 'llm_end' && e.cancelled).length;
+  out.counts.tts_cancelled = events.filter(e => e.e === 'tts_end' && e.cancelled).length;
+  // TTS streams that ended without a single audio frame (provider stalled or refused).
+  const silentEnds = events.filter(e => e.e === 'tts_end' && !e.cancelled).filter(end => {
+    const start = events.filter(e => e.e === 'tts_start' && e.t <= end.t).at(-1);
+    return start && !events.some(e => e.e === 'tts_first_audio' && e.t >= start.t && e.t <= end.t);
+  });
+  out.counts.tts_no_audio = silentEnds.length;
+  if (silentEnds.length) {
+    const end = silentEnds[0], auth = events.filter(e => e.e === 'tts_authorized' && e.t <= end.t).at(-1);
+    if (auth) out.ttsNoAudioGiveUpMs = end.t - auth.t;
+  }
+  const speaking = first('user_speaking');
+  const interim = speaking && first('stt_interim', speaking.t);
+  if (interim) out.sttFirstInterimMs = interim.t - speaking.t;
+  const tts = first('tts_start', speaking?.t ?? -Infinity);
+  if (tts) {
+    const ttsEnd = first('tts_end', tts.t)?.t ?? Infinity;
+    const eou = last('eou', tts.t);
+    if (eou) { out.transcriptionDelayMs = eou.transcriptionDelayMs; out.endOfTurnDelayMs = eou.endOfUtteranceDelayMs; }
+    const llmStart = last('llm_start', tts.t);
+    if (llmStart) {
+      const llmFirst = first('llm_first', llmStart.t), llmEnd = first('llm_end', llmStart.t);
+      const final = last('stt_final', llmStart.t);
+      if (llmFirst) { out.llmFirstTokenMs = llmFirst.t - llmStart.t; if (final) out.finalToLlmFirstTokenMs = llmFirst.t - final.t; }
+      if (llmEnd && !llmEnd.cancelled) out.llmTotalMs = llmEnd.t - llmStart.t;
+      const ttsAudio = first('tts_first_audio', tts.t, e => e.t <= ttsEnd);
+      if (llmFirst && ttsAudio) out.llmFirstToTtsAudioMs = ttsAudio.t - llmFirst.t;
+    }
+    const authorized = first('tts_authorized', tts.t, e => e.t <= ttsEnd), audio = first('tts_first_audio', tts.t, e => e.t <= ttsEnd);
+    if (authorized) out.ttsAuthorizeMs = authorized.t - tts.t;
+    if (authorized && audio) out.ttsFirstAudioMs = audio.t - authorized.t;
+    const spoke = first('agent_speaking', tts.t);
+    if (eou && spoke) out.eouToAgentSpeakingMs = spoke.t - eou.t;
+  }
+  // Barge-in: user speech that starts while the agent is still speaking (no listening state between).
+  const agentOn = first('agent_speaking', speaking?.t ?? -Infinity);
+  const nextBarge = agentOn && first('user_speaking', agentOn.t);
+  const barge = nextBarge && !events.some(e => e.e === 'agent_listening' && e.t >= agentOn.t && e.t <= nextBarge.t) ? nextBarge : undefined;
+  const cancel = barge && first('tts_end', barge.t, e => e.cancelled);
+  if (cancel) out.interruptToTtsCancelMs = cancel.t - barge.t;
+  // Barge-in pauses (or interrupts) playout: the SDK moves the agent to listening.
+  const stopped = barge && first('agent_listening', barge.t);
+  if (barge) out.agentSpeakingToBargeDetectMs = barge.t - agentOn.t;
+  if (stopped) out.bargeToAgentListeningMs = stopped.t - barge.t;
+  return out;
+}
+function stats(values, minN) {
+  const v = values.filter(x => typeof x === 'number' && Number.isFinite(x)).sort((a, b) => a - b);
+  const q = p => v[Math.min(v.length - 1, Math.ceil(p * v.length) - 1)];
+  const r = x => x === undefined ? null : Math.round(x);
+  return { n: v.length, p50: v.length >= minN.p50 ? r(q(0.5)) : null, p90: v.length >= minN.p90 ? r(q(0.9)) : null, p95: v.length >= minN.p95 ? r(q(0.95)) : null,
+    min: r(v[0]), max: r(v.at(-1)), mean: v.length ? r(v.reduce((a, b) => a + b, 0) / v.length) : null };
+}
+const MIN_N = { p50: 5, p90: 10, p95: 20 };
+const DEFINITIONS = {
+  'browser.connectToGreetingMs': 'Browser clock: room connected (status Connected observed) -> first greeting audio. Includes job dispatch, worker process availability, claim and greeting synthesis.',
+  'browser.e2eFirstAudioMs': 'Browser clock: synthetic speech gate closes (end of user speech at the source) -> first agent audio sample above threshold in the subscribed track.',
+  'browser.playbackMs': 'Browser clock: agent audio onset -> last audible sample of the reply (gaps under 400 ms belong to the reply).',
+  'browser.gaps': 'Browser clock: silent gaps of 30-400 ms inside one reply (mock TTS is continuous tone, so each gap is starvation).',
+  'browser.audibleMs': 'Browser clock: total audible agent audio in the reply (false-interruption case: detects truncation).',
+  'browser.interruptStopMs': 'Browser clock: interrupting speech starts -> last audible sample of the obsolete reply.',
+  'browser.afterInterruptFirstAudioMs': 'Browser clock: interrupting speech ends -> first audio of the reply to it.',
+  'browser.faultedTurnFirstAudioMs': 'Browser clock (fault cases): end of the user turn that hits the injected fault -> first agent audio (missing = turn dropped).',
+  'browser.recoveryTurnFirstAudioMs': 'Browser clock (fault cases): end of the follow-up user turn -> first agent audio (missing = no recovery).',
+  'worker.sttFirstInterimMs': 'Worker clock: VAD user_speaking -> first STT interim (or final) transcript event.',
+  'worker.transcriptionDelayMs': 'Worker, SDK EOU metric: end of user speech -> final transcript.',
+  'worker.endOfTurnDelayMs': 'Worker, SDK EOU metric: end of user speech -> turn committed.',
+  'worker.finalToLlmFirstTokenMs': 'Worker clock: last final transcript before the LLM request -> first LLM text chunk received by the worker.',
+  'worker.llmFirstTokenMs': 'Worker clock: llmNode request start -> first LLM text chunk (includes the worker->API hop).',
+  'worker.llmTotalMs': 'Worker clock: llmNode request start -> stream completion (non-cancelled only).',
+  'worker.llmFirstToTtsAudioMs': 'Worker clock: first LLM text chunk -> first synthesized audio frame (includes turn commit wait when generation was preemptive).',
+  'worker.ttsAuthorizeMs': 'Worker clock: ttsNode start -> Dialog operation admission granted.',
+  'worker.ttsFirstAudioMs': 'Worker clock: admission granted -> first synthesized audio frame (connection, config, text tokenization, synthesis).',
+  'worker.eouToAgentSpeakingMs': 'Worker clock: EOU metrics emitted (turn committed) -> agent state speaking (audio playout started).',
+  'worker.interruptToTtsCancelMs': 'Worker clock: user_speaking during agent speech -> obsolete TTS stream cancelled (absent when synthesis already finished).',
+  'worker.agentSpeakingToBargeDetectMs': 'Worker clock: agent speaking -> VAD detects the interrupting user speech (synthetic barge-in starts ~1200 ms after reply onset).',
+  'worker.bargeToAgentListeningMs': 'Worker clock: VAD barge-in -> agent state listening (playout paused or interrupted).',
+  'worker.ttsNoAudioGiveUpMs': 'Worker clock (fault cases): admission granted -> TTS stream ended without producing any audio.',
+};
+function summarize(samples, meta) {
+  const metrics = {};
+  const byCase = {};
+  for (const s of samples) (byCase[s.case] ??= []).push(s);
+  for (const [name, recs] of Object.entries(byCase)) {
+    const m = {};
+    for (const key of Object.keys(DEFINITIONS)) {
+      const [domain, field] = key.split('.');
+      const values = recs.map(r => r[domain]?.[field]);
+      if (values.some(v => typeof v === 'number')) m[key] = { ...stats(values, MIN_N), missing: values.filter(v => typeof v !== 'number').length };
+    }
+    const outcomes = {}; for (const r of recs) outcomes[r.outcome] = (outcomes[r.outcome] ?? 0) + 1;
+    const counts = {}; for (const r of recs) for (const [k, v] of Object.entries(r.worker?.counts ?? {})) counts[k] = (counts[k] ?? 0) + v;
+    const falseInterruption = {}; for (const r of recs) if (r.falseInterruption) falseInterruption[r.falseInterruption] = (falseInterruption[r.falseInterruption] ?? 0) + 1;
+    const mockDelta = {}; for (const r of recs) for (const [k, v] of Object.entries(r.mockDelta ?? {})) mockDelta[k] = (mockDelta[k] ?? 0) + v;
+    metrics[name] = { records: recs.length, outcomes, workerEventCounts: counts, ...(Object.keys(falseInterruption).length ? { falseInterruption } : {}),
+      ...(Object.keys(mockDelta).length ? { mockProviderDelta: mockDelta } : {}), metrics: m };
+  }
+  const { tuning } = meta;
+  return {
+    schema: 'dialog-voice-latency/1', timestamp: new Date().toISOString(), label: meta.config.label,
+    providerMode: meta.config.providerMode, method: 'LiveKit room media: headless Chromium <-> local LiveKit <-> Dialog worker; ' + (meta.config.providerMode === 'mock' ? 'deterministic mock STT/LLM/TTS' : 'manual-live providers'),
+    environment: { node: process.version, chromium: meta.chromium, platform: `${os.platform()} ${os.release()}`, cpus: os.cpus().length, memoryGb: Math.round(os.totalmem() / 2 ** 30) },
+    configuration: { tuning: tuning ? { sttEndpointingMs: tuning.sttEndpointingMs, endpointingMinMs: tuning.endpointingMinMs, endpointingMaxMs: tuning.endpointingMaxMs, preemptiveLlm: tuning.preemptiveLlm, ttsIdleTimeoutMs: tuning.ttsIdleTimeoutMs } : null,
+      iterations: meta.config, ...(meta.config.providerMode === 'mock' ? { mockLlmChunkMs: 20, mockTtsMsPerCharacter: 55 } : { input: 'operator-recorded speech clip (content not recorded)' }),
+      percentileMinimumSamples: MIN_N },
+    definitions: DEFINITIONS, mockProviderCounters: meta.mock, cases: metrics, records: samples,
+  };
+}
+function markdown(report) {
+  const lines = [`# Voice latency benchmark — ${report.label}`, '', `- Timestamp: ${report.timestamp}`, `- Method: ${report.method}`, `- Provider mode: **${report.providerMode}**`,
+    `- Environment: ${JSON.stringify(report.environment)}`, `- Tuning: ${JSON.stringify(report.configuration.tuning)}`,
+    `- Percentiles need at least ${report.configuration.percentileMinimumSamples.p50}/${report.configuration.percentileMinimumSamples.p90}/${report.configuration.percentileMinimumSamples.p95} samples for p50/p90/p95; otherwise "n/a".`, ''];
+  for (const [name, c] of Object.entries(report.cases)) {
+    lines.push(`## ${name} (${c.records} records)`, '', `Outcomes: ${JSON.stringify(c.outcomes)}${c.falseInterruption ? ` · false interruption: ${JSON.stringify(c.falseInterruption)}` : ''}`, '',
+      '| Metric | n | missing | p50 | p90 | p95 | min | max |', '| --- | --- | --- | --- | --- | --- | --- | --- |');
+    for (const [k, s] of Object.entries(c.metrics)) lines.push(`| ${k} | ${s.n} | ${s.missing} | ${s.p50 ?? 'n/a'} | ${s.p90 ?? 'n/a'} | ${s.p95 ?? 'n/a'} | ${s.min ?? 'n/a'} | ${s.max ?? 'n/a'} |`);
+    const counts = c.workerEventCounts;
+    lines.push('', `Worker work counts: llm_start=${counts.llm_start ?? 0}, llm_cancelled=${counts.llm_cancelled ?? 0}, tts_start=${counts.tts_start ?? 0}, tts_cancelled=${counts.tts_cancelled ?? 0}, tts_no_audio=${counts.tts_no_audio ?? 0}, false_interruption=${counts.false_interruption ?? 0}, error=${counts.error ?? 0}`, ...(c.mockProviderDelta ? ['', `Mock provider counter delta: ${JSON.stringify(c.mockProviderDelta)}`] : []), '');
+  }
+  return lines.join('\n');
+}
+await main();

@@ -9,7 +9,15 @@
     "typecheck:libs": "tsc --build",
     "check:secrets": "node scripts/check-secrets.mjs",
     "check:schema-push": "node scripts/check-schema-push.mjs",
-    "typecheck": "pnpm run typecheck:libs && pnpm -r --filter \"./artifacts/**\" --filter \"./scripts\" --if-present run typecheck"
+    "typecheck": "pnpm run typecheck:libs && pnpm -r --filter \"./artifacts/**\" --filter \"./scripts\" --if-present run typecheck",
+    "voice:local:init": "node scripts/voice-local.mjs init",
+    "voice:local:up": "node scripts/voice-local.mjs up",
+    "voice:local:smoke": "node scripts/voice-local.mjs smoke",
+    "voice:local:bench": "node scripts/voice-local.mjs bench",
+    "voice:local:bench:live": "node scripts/voice-local.mjs bench-live",
+    "voice:local:bench:compare": "node scripts/voice-bench-compare.mjs",
+    "voice:local:logs": "node scripts/voice-local.mjs logs",
+    "voice:local:down": "node scripts/voice-local.mjs down"
   },
   "private": true,
   "devDependencies": {
@@ -21,6 +29,7 @@
     "dotenv-cli": "^11.0.0",
     "lightningcss-win32-x64-msvc": "^1.32.0",
     "prettier": "^3.8.1",
-    "typescript": "~5.9.2"
+    "typescript": "~5.9.2",
+    "playwright": "1.64.1"
   }
 }

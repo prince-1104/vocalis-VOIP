@@ -1,0 +1,6 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": { "types": ["node"], "outDir": "dist" },
+  "include": ["src"],
+  "references": [{ "path": "../../lib/observability" }]
+}

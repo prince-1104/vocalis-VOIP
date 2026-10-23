@@ -25,6 +25,7 @@ export const MIGRATION_JOURNAL: readonly { tag: string; when: number }[] = [
   { tag: "0008_usage_ledger_and_budgets", when: 1792681370436 },
   { tag: "0009_schema_reconciliation", when: 1792686113229 },
   { tag: "0010_vobiz_sip_configuration", when: 1792692703968 },
+  { tag: "0011_livekit_sessions", when: 1792719372673 },
 ];
 
 // Drizzle's migrator bookkeeping (drizzle-orm defaults).
@@ -50,6 +51,9 @@ const AFTER_BASELINE = [
   "external_crm_configs.*",
   "widget_chat_sessions.*",
   "vobiz_sip_configs.*",
+  "livekit_sessions.*",
+  "livekit_operations.*",
+  "livekit_trunks.*",
 ];
 
 // Integrity rules that exist only in migration SQL (the TypeScript schema cannot express them).

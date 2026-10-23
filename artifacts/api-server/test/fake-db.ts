@@ -4,6 +4,8 @@ import { getTableColumns, getTableName } from "drizzle-orm";
 import { PgDialect } from "drizzle-orm/pg-core";
 import * as schema from "../../../lib/db/src/schema";
 export * from "../../../lib/db/src/schema";
+// Raw SQL services must inject a real isolated pool or a purpose-built repository.
+export const pool = { query: async () => { throw new Error("No raw SQL test adapter injected"); }, connect: async () => { throw new Error("No raw SQL test adapter injected"); } };
 
 export const rows: Record<string, any[]> = {};
 export let writes = 0;

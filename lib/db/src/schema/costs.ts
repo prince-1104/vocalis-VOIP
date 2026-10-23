@@ -90,6 +90,7 @@ export const DEFAULT_API_RATES: Record<string, number> = {
 // Rates the platform can price but has no default for. Usage that needs one of
 // these is recorded as needs_reconciliation until a super admin sets it.
 export const CONFIGURABLE_RATE_KEYS: readonly string[] = [
+  "stt:deepgram", "telephony:vobiz:inbound", "telephony:vobiz:outbound",
   ...Object.keys(DEFAULT_API_RATES),
   "llm:gpt-4o-mini:cached_input",
   "llm:gpt-4o:cached_input",

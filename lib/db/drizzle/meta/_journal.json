@@ -78,6 +78,13 @@
       "when": 1792692703968,
       "tag": "0010_vobiz_sip_configuration",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1792719372673,
+      "tag": "0011_livekit_sessions",
+      "breakpoints": true
     }
   ]
 }

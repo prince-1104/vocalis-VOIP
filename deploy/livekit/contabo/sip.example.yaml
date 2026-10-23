@@ -1,0 +1,11 @@
+api_key: REPLACE_WITH_OPERATOR_KEY
+api_secret: REPLACE_WITH_OPERATOR_SECRET
+ws_url: wss://REPLACE_WITH_APPROVED_LIVEKIT_DOMAIN
+redis:
+  address: redis:6379
+  password: REPLACE_WITH_OPERATOR_SECRET
+sip_port: 5060
+rtp_port: 10000-10100
+use_external_ip: true
+logging:
+  level: error

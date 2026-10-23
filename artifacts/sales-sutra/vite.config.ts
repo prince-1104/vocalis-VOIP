@@ -45,7 +45,7 @@ export default defineConfig({
     allowedHosts: true,
     proxy: {
       "/api": {
-        target: "http://localhost:3003",
+        target: process.env.DIALOG_LOCAL_VOICE === "1" ? "http://fixture-api:3003" : "http://localhost:3003",
         changeOrigin: true,
       },
     },

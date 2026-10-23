@@ -174,10 +174,10 @@ test(
         insert into tenants (id, name, slug, owner_id, commission_pct) values (1, 'Tenant A', 'a', 10, 20);`);
       const pending = await cli(url, "status");
       assert.equal(pending.code, 3);
-      assert.deepEqual(pending.json().pending, ["0009_schema_reconciliation", "0010_vobiz_sip_configuration"]);
+      assert.deepEqual(pending.json().pending, ["0009_schema_reconciliation", "0010_vobiz_sip_configuration", "0011_livekit_sessions"]);
       const apply = await cli(url, "apply");
       assert.equal(apply.code, 0, apply.output);
-      assert.deepEqual(apply.json().applied, ["0009_schema_reconciliation", "0010_vobiz_sip_configuration"]);
+      assert.deepEqual(apply.json().applied, ["0009_schema_reconciliation", "0010_vobiz_sip_configuration", "0011_livekit_sessions"]);
       assert.equal(apply.report().status, "ready");
       assert.equal((await cli(url, "status")).code, 0);
       assert.deepEqual(await validatedChecks(c), REQUIRED_CHECKS);

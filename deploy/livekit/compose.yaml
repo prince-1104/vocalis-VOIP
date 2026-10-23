@@ -1,0 +1,118 @@
+name: dialog-voice-local
+x-node: &node
+  image: dialog-voice-local-node
+  build:
+    context: ../..
+    dockerfile: deploy/livekit/Dockerfile
+    target: runtime
+  networks: [voice]
+  init: true
+  security_opt: [no-new-privileges:true]
+  # Source binds support local development without copying host node_modules or .env.
+  volumes:
+    - ../../artifacts/api-server/src:/app/artifacts/api-server/src:ro
+    - ../../lib/db/src:/app/lib/db/src:ro
+    - ../../lib/db/drizzle:/app/lib/db/drizzle:ro
+    - ../../lib/observability/src:/app/lib/observability/src:ro
+    - ../../lib/observability/package.json:/app/lib/observability/package.json:ro
+    - ../../artifacts/livekit-agent/src:/app/artifacts/livekit-agent/src:ro
+    - ../../artifacts/livekit-agent/build.mjs:/app/artifacts/livekit-agent/build.mjs:ro
+    - ../../artifacts/sales-sutra/src:/app/artifacts/sales-sutra/src:ro
+    - ../../artifacts/sales-sutra/vite.config.ts:/app/artifacts/sales-sutra/vite.config.ts:ro
+    - ./mock-providers.mjs:/app/deploy/livekit/mock-providers.mjs:ro
+services:
+  gateway:
+    image: node:24-bookworm@sha256:6449e19d8184d84062525b6a7524def03146c2cb04a7f08b076680d0e8e4240a
+    command: [node, /gateway.mjs]
+    volumes: [./gateway.mjs:/gateway.mjs:ro]
+    networks: [voice, ingress]
+    ports: [127.0.0.1:7880:7880, 127.0.0.1:7881:7881, 127.0.0.1:7882:7882/udp, 127.0.0.1:3003:3003, 127.0.0.1:5173:5173, 127.0.0.1:55439:55439]
+  redis:
+    image: redis:7.4-alpine@sha256:57e4255cc971b1c8d6f8a6ca283ac01bc3ecdd914273ef6bfaede87aaecd6541
+    command: [redis-server, --save, "", --appendonly, "no", --loglevel, warning]
+    networks: [voice]
+    healthcheck: {test: [CMD, redis-cli, ping], interval: 3s, timeout: 2s, retries: 20}
+  livekit:
+    image: livekit/livekit-server:v1.13.10@sha256:89ca9ce0791e18d6e03bf6e2c49ceb27e1c754eae8bd50c989386c1a5963791a
+    command: [--config, /etc/livekit.yaml]
+    volumes: [../../.local/livekit/livekit.yaml:/etc/livekit.yaml:ro]
+    networks: [voice]
+    depends_on:
+      redis: {condition: service_healthy}
+  sip:
+    image: livekit/sip:v1.14.0@sha256:1487f39ca985f64879cc74b045e1ddc22f7afdb02e8a4739d92d749b9c3c3ad2
+    command: [--config, /etc/sip.yaml]
+    volumes: [../../.local/livekit/sip.yaml:/etc/sip.yaml:ro]
+    networks: [voice]
+    depends_on: [livekit]
+    # No published SIP or RTP ports. No external trunk is provisioned.
+  worker:
+    <<: *node
+    env_file: ../../.local/livekit/worker.env
+    # Non-secret tuning forwarded by scripts/voice-local.mjs; empty means the code default.
+    environment:
+      DIALOG_VOICE_BENCH: '1'
+      DIALOG_VOICE_STT_ENDPOINTING_MS: ${DIALOG_VOICE_STT_ENDPOINTING_MS:-}
+      DIALOG_VOICE_ENDPOINTING_MIN_MS: ${DIALOG_VOICE_ENDPOINTING_MIN_MS:-}
+      DIALOG_VOICE_ENDPOINTING_MAX_MS: ${DIALOG_VOICE_ENDPOINTING_MAX_MS:-}
+      DIALOG_VOICE_PREEMPTIVE_LLM: ${DIALOG_VOICE_PREEMPTIVE_LLM:-}
+      DIALOG_VOICE_TTS_IDLE_TIMEOUT_MS: ${DIALOG_VOICE_TTS_IDLE_TIMEOUT_MS:-}
+    command: [sh, -c, 'pnpm --filter @workspace/livekit-agent build && node artifacts/livekit-agent/dist/server.js']
+    depends_on: [livekit, fixture-api, mock-providers]
+    restart: unless-stopped
+    stop_grace_period: 30s
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:8081/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  fixture-db:
+    profiles: [fixture]
+    image: postgres:16-alpine@sha256:f4610795587492cd4fb887c2dc3de301b813278bb6f616992061141b5f15ac36
+    env_file: ../../.local/livekit/database.env
+    volumes: [fixture-data:/var/lib/postgresql/data]
+    networks: [voice]
+    healthcheck: {test: [CMD-SHELL, "pg_isready -U dialog_test -d dialog_test_livekit"], interval: 3s, timeout: 2s, retries: 30}
+  fixture-api:
+    <<: *node
+    profiles: [fixture]
+    env_file: ../../.local/livekit/api.env
+    command: [pnpm, --filter, '@workspace/scripts', exec, tsx, ../artifacts/api-server/src/livekit-fixture.ts]
+    volumes:
+      - ../../artifacts/api-server/src:/app/artifacts/api-server/src:ro
+      - ../../lib/db/src:/app/lib/db/src:ro
+      - ../../lib/db/drizzle:/app/lib/db/drizzle:ro
+      - ../../lib/observability/src:/app/lib/observability/src:ro
+      - ../../.local/livekit/login.json:/run/dialog-local/login.json:ro
+    depends_on:
+      fixture-db: {condition: service_healthy}
+  frontend:
+    <<: *node
+    profiles: [fixture]
+    environment: {DIALOG_LOCAL_VOICE: '1', PORT: '5173', BASE_PATH: /}
+    command: [pnpm, --filter, '@workspace/sales-sutra', dev]
+    depends_on: [fixture-api]
+  mock-providers:
+    <<: *node
+    profiles: [fixture]
+    command: [pnpm, --filter, '@workspace/api-server', exec, node, ../../deploy/livekit/mock-providers.mjs]
+  smoke:
+    profiles: [smoke]
+    image: mcr.microsoft.com/playwright:v1.64.1-noble@sha256:47b510dd9230bf0b9bfc9b20102241e577ea7a99334ab4c3ca19f19770e9b8ea
+    working_dir: /app
+    entrypoint: [node, scripts/voice-smoke.mjs]
+    volumes:
+      - ../../scripts/voice-smoke.mjs:/app/scripts/voice-smoke.mjs:ro
+      - ../../node_modules/.pnpm/playwright@1.64.1/node_modules/playwright:/app/node_modules/playwright:ro
+      - ../../node_modules/.pnpm/playwright-core@1.64.1/node_modules/playwright-core:/app/node_modules/playwright-core:ro
+      - ../../.local/livekit/login.json:/run/dialog-local/login.json:ro
+      - ../../.local/livekit/bench:/app/bench-out
+    network_mode: service:gateway
+    ipc: private
+    shm_size: 1gb
+networks:
+  ingress: {}
+  voice:
+    internal: true
+volumes:
+  fixture-data:

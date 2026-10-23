@@ -111,7 +111,7 @@ test("Schema inspection classifies history and objects without reading migration
   assert.equal((await inspectSchema(fakeCatalog({ history: null }))).status, "not_initialized");
   const pending = await inspectSchema(fakeCatalog({ history: all.slice(0, 9), dropColumn: "tenants.telephony_type" }));
   assert.equal(pending.status, "migrations_pending");
-  assert.deepEqual(pending.pending, ["0009_schema_reconciliation", "0010_vobiz_sip_configuration"]);
+  assert.deepEqual(pending.pending, ["0009_schema_reconciliation", "0010_vobiz_sip_configuration", "0011_livekit_sessions"]);
   assert.ok(pending.missing.includes("column tenants.telephony_type"));
   const incomplete = await inspectSchema(fakeCatalog({ history: all, dropColumn: "usage_ledger.currency" }));
   assert.equal(incomplete.status, "schema_incomplete");

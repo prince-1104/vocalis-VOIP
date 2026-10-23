@@ -1,3 +1,4 @@
+import { streamTarget } from "./voice-models";
 import { createMediaUpgrade, rejectMediaUpgrade, type ActiveMediaContext } from "./media-ws-auth";
 import { guardDatabase, guardEffect } from "./media-effects";
 import { WebSocket } from "ws";
@@ -592,23 +593,6 @@ async function generateSentenceTTS(
 const STREAM_MAX_OUTPUT_TOKENS = 200;
 /** Allowance for the system prompt (agent instructions, script, training) when sizing a turn hold. */
 const TURN_PROMPT_TOKENS = 4000;
-
-const OPENAI_MODEL_MAP: Record<string, string> = {
-  "gpt-4o-mini":          "gpt-4o-mini",
-  "gpt-4o":               "gpt-4o",
-  "gpt-5.2":              "gpt-4o",
-  "gemini-1.5-pro":       "gpt-4o-mini",
-  "llama-3.3-8b-private": "gpt-4o-mini",
-  "bharatgpt":            "gpt-4o-mini",
-  "bolna-ai":             "gpt-4o-mini",
-};
-
-/** Provider and exact model a configured (UI) model name is sent to. */
-function streamTarget(aiModel: string): { provider: "openai" | "deepseek" | "sarvam"; model: string } {
-  if (aiModel === "deepseek-chat" || aiModel === "deepseek-v3") return { provider: "deepseek", model: "deepseek-chat" };
-  if (aiModel === "sarvam-m" || aiModel === "sarvam-1-2b") return { provider: "sarvam", model: "sarvam-m" };
-  return { provider: "openai", model: OPENAI_MODEL_MAP[aiModel] ?? "gpt-4o-mini" };
-}
 
 const streamModelFor = (aiModel: string) => streamTarget(aiModel).model;
 

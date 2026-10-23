@@ -4,7 +4,7 @@
 
 This phase implements backend configuration handling and a disabled execution boundary. A validated saved configuration is `configured_unverified`, never connected, verified, enabled or operational. No Vobiz credential was sent to a real service. No trunk, number, LiveKit resource, SIP participant, dispatch rule or call was created. Twilio remains the existing default. Exotel behavior was not changed.
 
-The backend contract is locally testable independently of LiveKit. Vobiz calling, inbound routing, media, transfer and provider billing verification remain blocked until Phase 1Q. There is no new settings UI because the existing tenant telephony interface primarily configures legacy providers through superadmin routes and does not yet represent this disabled foundation honestly. No LiveKit implementation or dependency is added.
+The backend contract is locally testable independently of LiveKit. Vobiz calling, inbound routing, media, transfer and provider billing verification remain blocked until Phase 1Q (local media architecture: see `livekit-media-architecture.md`; real Vobiz execution remains blocked beyond it). There is no new settings UI because the existing tenant telephony interface primarily configures legacy providers through superadmin routes and does not yet represent this disabled foundation honestly. No LiveKit implementation or dependency is added.
 
 ## Documentation consulted, 2026-10-22
 

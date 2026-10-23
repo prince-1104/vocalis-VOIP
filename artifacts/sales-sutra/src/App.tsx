@@ -35,6 +35,8 @@ import BbmpDemo from "@/pages/BbmpDemo";
 import NmcDemo from "@/pages/NmcDemo";
 import Forbidden from "@/pages/superadmin/Forbidden";
 import { useAuth } from "@/hooks/use-auth";
+import { lazy, Suspense } from "react";
+const LivekitPreview = import.meta.env.DEV ? lazy(() => import("@/pages/LivekitPreview")) : () => null;
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -66,6 +68,7 @@ function AuthGuard({ children }: { children: React.ReactNode }) {
 function Router() {
   return (
     <Switch>
+      {import.meta.env.DEV && <Route path="/dev/livekit"><AuthGuard><Suspense fallback={null}><LivekitPreview /></Suspense></AuthGuard></Route>}
       <Route path="/test" component={WidgetTest} />
       <Route path="/test/" component={WidgetTest} />
       <Route path="/widget-test" component={WidgetTest} />

@@ -29,7 +29,9 @@
     "pino": "^9",
     "pino-http": "^10",
     "twilio": "^5.13.0",
-    "ws": "^8.18.0"
+    "ws": "^8.18.0",
+    "livekit-server-sdk": "2.19.2",
+    "@workspace/observability": "workspace:*"
   },
   "devDependencies": {
     "@types/bcryptjs": "^3.0.0",

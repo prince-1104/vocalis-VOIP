@@ -86,7 +86,7 @@ test("PostgreSQL: upgrade from 0008 with data; startup refuses until 0009 is app
 
     const before = await inspectSchema(c);
     assert.equal(before.status, "migrations_pending");
-    assert.deepEqual(before.pending, ["0009_schema_reconciliation", "0010_vobiz_sip_configuration"]);
+    assert.deepEqual(before.pending, ["0009_schema_reconciliation", "0010_vobiz_sip_configuration", "0011_livekit_sessions"]);
     assert.ok(before.missing.includes("column tenants.telephony_type"));
     const events: string[] = [];
     await assert.rejects(
@@ -102,7 +102,7 @@ test("PostgreSQL: upgrade from 0008 with data; startup refuses until 0009 is app
     );
     assert.deepEqual(events, []);
 
-    assert.deepEqual(await applyMigrations(c, directory), ["0009_schema_reconciliation", "0010_vobiz_sip_configuration"]);
+    assert.deepEqual(await applyMigrations(c, directory), ["0009_schema_reconciliation", "0010_vobiz_sip_configuration", "0011_livekit_sessions"]);
     await assertSeedIntact(c);
     assert.equal((await inspectSchema(c)).status, "ready");
     await waitForCompatibleSchema(c);
@@ -147,7 +147,7 @@ test("PostgreSQL: a database built by the former startup DDL is adopted, then re
     await assert.rejects(applyMigrations(c, directory), (err: unknown) => err instanceof MigrationError && /adopt/.test(err.message));
     assert.deepEqual(await adoptExistingDatabase(c, directory), throughBaseline);
     await assert.rejects(adoptExistingDatabase(c, directory), /already has migration history/);
-    assert.deepEqual(await applyMigrations(c, directory), ["0009_schema_reconciliation", "0010_vobiz_sip_configuration"]);
+    assert.deepEqual(await applyMigrations(c, directory), ["0009_schema_reconciliation", "0010_vobiz_sip_configuration", "0011_livekit_sessions"]);
 
     const report = await inspectSchema(c);
     assert.deepEqual(report, { status: "ready", pending: [], newerThanCode: 0, missing: [] });
@@ -190,7 +190,7 @@ test("PostgreSQL: a push-built database is adopted and gains 0008's integrity ru
     assert.ok(blocked.missing.includes("trigger billing_rate_cards_no_update"));
 
     await c.query(`update tenant_budget_periods set reserved_amount = 0 where reserved_amount < 0`);
-    assert.deepEqual(await applyMigrations(c, directory), ["0009_schema_reconciliation", "0010_vobiz_sip_configuration"]);
+    assert.deepEqual(await applyMigrations(c, directory), ["0009_schema_reconciliation", "0010_vobiz_sip_configuration", "0011_livekit_sessions"]);
     assert.equal((await inspectSchema(c)).status, "ready");
     await assertSeedIntact(c);
     await assert.rejects(c.query(`insert into usage_ledger (tenant_id, user_id, source, category, provider, model, idempotency_key, measurement, unit, status, event_at)

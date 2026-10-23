@@ -1,0 +1,29 @@
+{
+  "name": "@workspace/livekit-agent",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@livekit/agents": "1.9.3",
+    "@livekit/agents-plugin-deepgram": "1.9.3",
+    "@livekit/agents-plugin-sarvam": "1.9.3",
+    "@livekit/agents-plugin-silero": "1.9.3",
+    "@livekit/rtc-node": "1.1.0",
+    "livekit-server-sdk": "2.19.2",
+    "zod": "catalog:",
+    "@workspace/observability": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "esbuild": "0.27.3",
+    "typescript": "~5.9.2"
+  }
+}

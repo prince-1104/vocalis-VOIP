@@ -154,6 +154,20 @@ test("session cleanup and operation completion are idempotent; errors/timeouts a
   assert.match(output, /operation="stt",provider="sarvam",outcome="timeout"/);
 });
 
+test("voice stage latency uses fixed labels and voice buckets; identifiers, unknown labels and invalid durations are dropped", () => {
+  const registry = new OperationalMetrics();
+  registry.stage("llm_first_token", "internal", "mock", "success", 0.042);
+  registry.stage("tts_total", "sarvam", "live", "cancelled", 1.2);
+  for (const [stage, provider, mode, outcome, seconds] of [["llm_first_token", "internal", "mock", "success", -1], ["llm_first_token", "internal", "mock", "success", Number.NaN],
+    ["llm_first_token", "internal", "mock", "success", 601], [randomUUID(), "internal", "mock", "success", 1], ["llm_total", randomUUID(), "mock", "success", 1],
+    ["llm_total", "internal", "staging", "success", 1], ["llm_total", "internal", "mock", randomUUID(), 1]] as const) registry.stage(stage as any, provider as any, mode as any, outcome as any, seconds);
+  const output = registry.render();
+  assert.match(output, /dialog_voice_stage_duration_seconds_bucket\{stage="llm_first_token",provider="internal",mode="mock",outcome="success",le="0.05"\} 1/);
+  assert.match(output, /dialog_voice_stage_duration_seconds_count\{stage="tts_total",provider="sarvam",mode="live",outcome="cancelled"\} 1/);
+  assert.doesNotMatch(output, /[0-9a-f]{8}-[0-9a-f]{4}-|staging|_count\{stage="llm_total"/);
+  assert.equal((output.match(/dialog_voice_stage_duration_seconds_count/g) ?? []).length, 2);
+});
+
 test("infrastructure sampling reuses pool, exposes aggregate pressure and removes listener", () => {
   const registry = new OperationalMetrics();
   const pool = Object.assign(new EventEmitter(), { totalCount: 2, idleCount: 0, waitingCount: 1, options: { max: 2 } });

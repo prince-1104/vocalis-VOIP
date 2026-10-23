@@ -1,0 +1,16 @@
+port: 7880
+bind_addresses: ['0.0.0.0']
+rtc:
+  tcp_port: 7881
+  port_range_start: 50000
+  port_range_end: 50100
+  use_external_ip: true
+redis:
+  address: redis:6379
+  password: REPLACE_WITH_OPERATOR_SECRET
+keys:
+  REPLACE_WITH_OPERATOR_KEY: REPLACE_WITH_OPERATOR_SECRET
+logging:
+  level: error
+# Reverse proxy must terminate TLS at the approved WSS domain, with validated
+# certificates and untouched signed webhook bodies to Dialog's API.

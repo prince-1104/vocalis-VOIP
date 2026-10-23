@@ -5,6 +5,7 @@ import { createHttpLogger } from "./lib/http-logger";
 import { metrics } from "./lib/operational-metrics";
 import { createMetricsRouter } from "./routes/metrics";
 import { createVobizSipRouter } from "./routes/vobiz-sip";
+import { createLivekitRoutes } from "./routes/livekit";
 import { safeErrorHandler } from "./lib/error-handler";
 import { parseTrustProxy } from "./lib/trusted-proxy";
 import { resolveUser, requireRole, requireSuperadmin } from "./middleware/auth";
@@ -40,6 +41,8 @@ app.set("trust proxy", parseTrustProxy(process.env));
 app.use(createHttpLogger());
 app.use(metrics.http());
 installHttpSecurity(app, process.env);
+export const livekitRoutes = createLivekitRoutes();
+app.use("/api", livekitRoutes.internal);
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -51,6 +54,7 @@ app.use("/api", widgetRouter);
 app.use("/api", crmRouter);            // CRM routes use their own API-key auth
 
 app.use("/api", resolveUser);
+app.use("/api", livekitRoutes.preview);
 app.use("/api", createMetricsRouter());
 app.use("/api", createVobizSipRouter());
 

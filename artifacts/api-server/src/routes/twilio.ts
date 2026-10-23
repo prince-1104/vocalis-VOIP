@@ -1,3 +1,4 @@
+import { BULBUL_VOICE_FOR_LANG } from "../lib/voice-models";
 import { Router, type IRouter } from "express";
 import twilio from "twilio";
 import { db, agentConfigsTable, callLogsTable, trainingDataTable, callingScriptsTable, tenantsTable, intentTrainingTable, campaignsTable, campaignContactsTable } from "@workspace/db";
@@ -635,13 +636,7 @@ async function callSarvamLLM(
 
 // Sarvam Bulbul v3 voices, language-tuned for natural prosody.
 // Kannada → "manan" is Sarvam's recommended showcase voice for clarity & accuracy.
-const BULBUL_VOICE_FOR_LANG: Record<string, string> = {
-  "hi-IN": "kavya",
-  "kn-IN": "manan",
-  "ta-IN": "priya",
-  "te-IN": "pooja",
-  "mr-IN": "simran",
-};
+
 
 // ── TTS pronunciation normalization ─────────────────────────────────────
 // Sarvam Bulbul v3 reads Latin "e-Khata" as "ee-kkata". Rewrite brand
