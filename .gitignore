@@ -62,6 +62,7 @@ docs/production-readiness/*
 !README.md
 !docs/production-readiness/monitoring-alerting-disaster-recovery.md
 !docs/production-readiness/vobiz-sip-integration.md
+!docs/production-readiness/real-time-voice-latency.md
 architecture-preview.html
 widget-test.html
 

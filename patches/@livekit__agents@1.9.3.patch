@@ -1,0 +1,114 @@
+--- a/src/ipc/proc_pool.ts
++++ b/src/ipc/proc_pool.ts
+@@ -114,7 +114,10 @@
+ 
+       const unlock = await this.initMutex.lock();
+       let initReleased = false;
+-      let procUnlockTransferred = false;
++      let slotReleased = false;
++      const releaseSlot = () => {
++        if (!slotReleased) { slotReleased = true; procUnlock(); }
++      };
+       try {
+         if (this.closed) {
+           return;
+@@ -123,8 +126,7 @@
+         await proc.start();
+         try {
+           await proc.initialize({ sessionEndTimeout: this.sessionEndTimeout });
+-          await this.warmedProcQueue.put({ proc, unlock: procUnlock });
+-          procUnlockTransferred = true;
++          await this.warmedProcQueue.put({ proc, unlock: releaseSlot });
+           // Release initMutex after enqueue — holding it through join() serialises
+           // the pool to concurrency 1 since child procs are one-shot.
+           unlock();
+@@ -138,9 +140,10 @@
+         if (!initReleased) {
+           unlock();
+         }
+-        if (!procUnlockTransferred) {
+-          procUnlock();
+-        }
++        // Remove an idle process that exited before dispatch and restore pool capacity.
++        const queuedIndex = this.warmedProcQueue.items.findIndex(entry => entry.proc === proc);
++        if (queuedIndex !== -1) this.warmedProcQueue.items.splice(queuedIndex, 1);
++        releaseSlot();
+       }
+     } finally {
+       const procIndex = this.executors.indexOf(proc);
+--- a/dist/ipc/proc_pool.js
++++ b/dist/ipc/proc_pool.js
+@@ -87,7 +87,10 @@
+       this.executors.push(proc);
+       const unlock = await this.initMutex.lock();
+       let initReleased = false;
+-      let procUnlockTransferred = false;
++      let slotReleased = false;
++      const releaseSlot = () => {
++        if (!slotReleased) { slotReleased = true; procUnlock(); }
++      };
+       try {
+         if (this.closed) {
+           return;
+@@ -95,8 +98,7 @@
+         await proc.start();
+         try {
+           await proc.initialize({ sessionEndTimeout: this.sessionEndTimeout });
+-          await this.warmedProcQueue.put({ proc, unlock: procUnlock });
+-          procUnlockTransferred = true;
++          await this.warmedProcQueue.put({ proc, unlock: releaseSlot });
+           unlock();
+           initReleased = true;
+         } catch {
+@@ -106,9 +108,10 @@
+         if (!initReleased) {
+           unlock();
+         }
+-        if (!procUnlockTransferred) {
+-          procUnlock();
+-        }
++        // Remove an idle process that exited before dispatch and restore pool capacity.
++        const queuedIndex = this.warmedProcQueue.items.findIndex(entry => entry.proc === proc);
++        if (queuedIndex !== -1) this.warmedProcQueue.items.splice(queuedIndex, 1);
++        releaseSlot();
+       }
+     } finally {
+       const procIndex = this.executors.indexOf(proc);
+--- a/dist/ipc/proc_pool.cjs
++++ b/dist/ipc/proc_pool.cjs
+@@ -110,7 +110,10 @@
+       this.executors.push(proc);
+       const unlock = await this.initMutex.lock();
+       let initReleased = false;
+-      let procUnlockTransferred = false;
++      let slotReleased = false;
++      const releaseSlot = () => {
++        if (!slotReleased) { slotReleased = true; procUnlock(); }
++      };
+       try {
+         if (this.closed) {
+           return;
+@@ -118,8 +121,7 @@
+         await proc.start();
+         try {
+           await proc.initialize({ sessionEndTimeout: this.sessionEndTimeout });
+-          await this.warmedProcQueue.put({ proc, unlock: procUnlock });
+-          procUnlockTransferred = true;
++          await this.warmedProcQueue.put({ proc, unlock: releaseSlot });
+           unlock();
+           initReleased = true;
+         } catch {
+@@ -129,9 +131,10 @@
+         if (!initReleased) {
+           unlock();
+         }
+-        if (!procUnlockTransferred) {
+-          procUnlock();
+-        }
++        // Remove an idle process that exited before dispatch and restore pool capacity.
++        const queuedIndex = this.warmedProcQueue.items.findIndex(entry => entry.proc === proc);
++        if (queuedIndex !== -1) this.warmedProcQueue.items.splice(queuedIndex, 1);
++        releaseSlot();
+       }
+     } finally {
+       const procIndex = this.executors.indexOf(proc);

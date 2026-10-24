@@ -1,6 +1,6 @@
 import { chromium } from 'playwright';
 import assert from 'node:assert/strict';
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, appendFile } from 'node:fs/promises';
 import os from 'node:os';
 const credentials = JSON.parse(await readFile('/run/dialog-local/login.json', 'utf8'));
 const BENCH = process.env.VOICE_BENCH === '1';
@@ -109,7 +109,9 @@ try {
     }, 50);
     // Worker stage events: worker-clock `t`; `rx` is only used to assign events to a test case.
     window.__bench = [];
-    window.addEventListener('dialog-bench', e => { try { window.__bench.push({ ...JSON.parse(e.detail), rx: performance.now() }); } catch {} });
+    window.addEventListener('dialog-bench', e => { try { window.__bench.push({ ...JSON.parse(e.detail), rx: performance.now() }); if (window.__bench.length > 20000) window.__bench.shift(); } catch {} });
+    window.__media = [];
+    window.addEventListener('dialog-media', e => { window.__media.push(e.detail); if (window.__media.length > 2000) window.__media.shift(); });
   });
   // A freshly recreated Vite dev server pre-bundles dependencies on first request.
   await page.goto('http://127.0.0.1:5173/login', { timeout: 120000 });
@@ -129,6 +131,8 @@ try {
     data.url = 'ws://127.0.0.1:7880';
     await route.fulfill({ response, json: data });
   });
+  // Mock benchmark populations include every session, without an unrecorded warming preflight.
+  if (!(BENCH && !LIVE)) {
   // A job that lands on a worker process still initializing (cold SDK import + VAD load) can miss
   // the greeting window; one bounded retry is allowed and reported, never silently absorbed.
   for (let attempt = 1; ; attempt++) {
@@ -176,6 +180,7 @@ try {
   await page.getByRole('button', { name: 'Stop preview' }).click();
   await page.getByRole('status').filter({ hasText: 'Stopped' }).waitFor();
   console.log('PASS explicit session shutdown');
+  }
   if (BENCH) await benchmark(page, context);
   await context.close();
 } finally { await browser.close(); }
@@ -199,6 +204,8 @@ async function benchmark(page, context) {
   const now = () => page.evaluate(() => performance.now());
   const status = () => page.getByRole('status').textContent();
   const samples = [];   // { case, iteration, turn?, browser: {...}, worker: {...}, outcome }
+  await mkdir('/app/bench-out', { recursive: true });
+  const attemptLedger = `/app/bench-out/attempts-${config.label}-${Date.now()}.jsonl`;
   let tuning = null;
   const nextOnset = (after, timeout) => page.waitForFunction(([after]) => {
     const env = window.__env;
@@ -227,14 +234,11 @@ async function benchmark(page, context) {
     return { playbackMs: responses[0][1] - responses[0][0], gaps, gapMs: Math.round(gapMs), responses: responses.length };
   };
   async function startSession(quiet = 600) {
-    const first = await startSessionOnce(quiet);
-    if (first.ok || first.reason !== 'no_greeting') return first;
-    await stopSession(); await page.waitForTimeout(10000);
-    const second = await startSessionOnce(quiet);
-    return second.ok ? { ...second, retried: true } : { ...second, retried: true };
+    // One invocation is one attempt. Never replace a failed session with a successful retry.
+    return startSessionOnce(quiet);
   }
   async function startSessionOnce(quiet) {
-    for (let attempt = 0; attempt < 8; attempt++) {
+    for (let attempt = 0; attempt < 1; attempt++) {
       await page.evaluate(() => { window.__env.segments = []; window.__env.audible = false; window.__env.peak = 0; });
       const clicked = await now();
       await page.getByRole('button', { name: 'Start preview' }).click();
@@ -423,8 +427,10 @@ async function benchmark(page, context) {
       heartbeatMaxGapMs: Math.max(0, ...events.filter(e => e.e === 'heartbeat_late').map(e => e.gapMs)),
       heartbeatRetries: events.filter(e => e.e === 'heartbeat_retry').length,
       // Any session_end received while the browser is still connected is a premature close.
-      prematureEnd: end ? Object.keys(end).find(k => !['e', 't', 'rx'].includes(k)) ?? 'unknown' : null,
+      prematureEnd: end ? Object.keys(end).find(k => !['e', 't', 'rx', 'correlation'].includes(k)) ?? 'unknown' : null,
       greetingDoneSeen: Boolean(greetingDone), greetingInterrupted: greetingDone?.interrupted ?? null, _greetingDoneT: greetingDone?.t,
+      publication: Object.fromEntries(['publication_started', 'publication_resolved', 'publication_rejected', 'publication_timeout', 'subscription_timeout', 'subscription_ready'].map(name => [name, events.find(e => e.e === name)?.t ?? null])),
+      publicationToSubscriptionMs: (() => { const p = events.find(e => e.e === 'publication_resolved'), s = events.find(e => e.e === 'subscription_ready'); return p && s ? s.t - p.t : null; })(),
       agentTrackPublished: events.some(e => e.e === 'agent_track_published'), agentTrackSubscribed: events.some(e => e.e === 'agent_track_subscribed') };
   };
   const FIRST_TURN_GAPS = [150, 600, 1500];
@@ -434,6 +440,7 @@ async function benchmark(page, context) {
     const started = await startSession(120);
     const session = { case: 'first_turn_session', iteration, gapMs, retried: Boolean(started.retried),
       outcome: started.ok ? (started.retried ? 'ok_after_no_greeting_retry' : 'ok') : started.reason, browser: started.ok ? { connectToGreetingMs: started.connectToGreetingMs } : {} };
+    session.media = await page.evaluate(from => window.__media.filter(e => e.t >= from), from);
     if (!started.ok) { session.diagnostics = sessionDiagnostics(await eventsBetween(from, await now())); await stopSession(); return [session]; }
     await page.waitForTimeout(Math.max(0, started.greetingEnd + gapMs - await now()));
     // Mock STT counters around each turn: did the recognizer receive loud audio and emit results?
@@ -454,7 +461,18 @@ async function benchmark(page, context) {
   };
   await control({ reset: true });
   for (let i = 0; i < config.warmupSessions; i++) await run(false, -1 - i, false);
-  for (let i = 0; i < config.firstTurnSessions; i++) samples.push(...await firstTurnSession(i + 1));
+  for (let i = 0; i < config.firstTurnSessions; i++) {
+    let records;
+    try { records = await firstTurnSession(i + 1); }
+    catch {
+      records = [{ case: 'first_turn_session', iteration: i + 1, outcome: 'harness_error', browser: {}, worker: {} }];
+      await stopSession().catch(() => undefined);
+    }
+    samples.push(...records);
+    // Retain completed attempts even if a subsequent attempt or report generation crashes.
+    if (!LIVE) await appendFile(attemptLedger, JSON.stringify({ attempt: i + 1, records }) + '\n');
+    if (page.isClosed()) break; // Remaining planned attempts were not executed.
+  }
   for (let i = 0; i < config.repeatSessions; i++) samples.push(...await run(false, i + 1, true));
   for (let i = 0; i < config.mixedSessions; i++) samples.push(...await run(true, i + 1, true));
   for (let i = 0; i < config.failureRuns; i++) {
@@ -462,7 +480,7 @@ async function benchmark(page, context) {
     samples.push(await failure('tts', 'stall', i + 1));
     samples.push(await failure('stt', 'drop', i + 1));
   }
-  const mock = LIVE ? null : await (await context.request.get(`${MOCKS}/metrics`)).json().catch(() => ({}));
+  const mock = LIVE ? null : await context.request.get(`${MOCKS}/metrics`).then(response => response.json()).catch(() => ({}));
   const report = summarize(samples, { config, tuning, mock, chromium: page.context().browser()?.version() });
   await mkdir('/app/bench-out', { recursive: true });
   const stamp = report.timestamp.replace(/[:.]/g, '-');

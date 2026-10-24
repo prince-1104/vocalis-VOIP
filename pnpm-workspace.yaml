@@ -6,6 +6,9 @@ packages:
 
 autoInstallPeers: false
 
+patchedDependencies:
+  '@livekit/agents@1.9.3': patches/@livekit__agents@1.9.3.patch
+
 catalog:
   '@replit/vite-plugin-cartographer': ^0.5.1
   '@replit/vite-plugin-dev-banner': ^0.1.1

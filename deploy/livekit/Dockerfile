@@ -2,6 +2,7 @@ FROM node:24-bookworm@sha256:6449e19d8184d84062525b6a7524def03146c2cb04a7f08b076
 RUN corepack enable && corepack prepare pnpm@10.13.1 --activate
 WORKDIR /app
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY patches ./patches
 COPY artifacts/api-server/package.json artifacts/api-server/package.json
 COPY artifacts/livekit-agent/package.json artifacts/livekit-agent/package.json
 COPY artifacts/sales-sutra/package.json artifacts/sales-sutra/package.json

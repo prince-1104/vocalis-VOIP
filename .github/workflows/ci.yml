@@ -92,6 +92,9 @@ jobs:
         env:
           BASE_PATH: /
 
+      - name: LiveKit worker production build
+        run: pnpm --filter @workspace/livekit-agent run build
+
       - name: Install and builds left the tree unchanged
         run: |
           if [ -n "$(git status --porcelain --untracked-files=all)" ]; then
@@ -149,6 +152,9 @@ jobs:
 
       - name: Run the complete test suite (unit, security, PostgreSQL, migrations, deployment smoke)
         run: pnpm --filter @workspace/api-server run test
+
+      - name: Run LiveKit worker lifecycle and provider-adapter tests
+        run: pnpm --filter @workspace/livekit-agent run test
 
       - name: Tests left the tree unchanged
         run: |

@@ -12,7 +12,7 @@ initializeLogger({ level: 'silent', pretty: false });
 const output = await mkdtemp(path.resolve('test', '.voice-build-'));
 const modules = {};
 try {
-  for (const name of ['sentences', 'voice-tuning', 'bench']) {
+  for (const name of ['sentences', 'voice-tuning', 'bench', 'media-readiness', 'process-readiness']) {
     await build({ entryPoints: [`src/${name}.ts`], outfile: path.join(output, `${name}.mjs`), bundle: true, platform: 'node', format: 'esm', packages: 'external' });
     modules[name] = await import(pathToFileURL(path.join(output, `${name}.mjs`)).href);
   }
@@ -20,6 +20,98 @@ try {
 const { splitSentences, DialogSentenceTokenizer } = modules.sentences;
 const { voiceTuning, baselineTuning, defaultTuning } = modules['voice-tuning'];
 const { StageClock } = modules.bench;
+const { observePublication } = modules['media-readiness'];
+const { ProcessReadiness } = modules['process-readiness'];
+
+test('cold admission rejects before prewarm, reserves once, and discards dead processes', () => {
+  const live = new Set([10, 11]);
+  const pool = new ProcessReadiness(pid => live.has(pid));
+  assert.equal(pool.reserve(), false);
+  assert.equal(pool.register(10), true);
+  assert.equal(pool.reserve(), true);
+  assert.equal(pool.reserve(), false, 'two dispatches cannot reserve one ready process');
+  assert.equal(pool.register(11), true); live.delete(11);
+  assert.equal(pool.available(), false);
+  assert.equal(pool.register(-1), false);
+  assert.equal(pool.register(12), false);
+});
+
+test('publication readiness observes resolution independently of room events and waits for subscription', async () => {
+  const events = [], controller = new AbortController();
+  let subscribed;
+  const subscription = new Promise(resolve => { subscribed = resolve; });
+  let calls = 0;
+  const participant = { async publishTrack() { calls++; return { waitForSubscription: () => subscription }; } };
+  const original = participant.publishTrack;
+  const guard = observePublication(participant, e => events.push(e), controller.signal, 1000);
+  await participant.publishTrack();
+  assert.deepEqual(events, ['audio_track_created', 'publication_started', 'publication_resolved']);
+  subscribed(); await guard.ready;
+  assert.equal(events.at(-1), 'subscription_ready');
+  await assert.rejects(participant.publishTrack(), /publication_rejected/);
+  assert.equal(calls, 1);
+  guard.dispose(); assert.equal(participant.publishTrack, original);
+});
+
+test('hung publication and subscription fail boundedly; late publication cannot make readiness succeed', async () => {
+  for (const hang of ['publication', 'subscription']) {
+    let published;
+    const pending = new Promise(resolve => { published = resolve; });
+    const publication = { waitForSubscription: () => new Promise(() => {}) };
+    const participant = { publishTrack: () => hang === 'publication' ? pending : Promise.resolve(publication) };
+    const events = [], controller = new AbortController();
+    const guard = observePublication(participant, e => events.push(e), controller.signal, 20);
+    const attempt = participant.publishTrack();
+    await assert.rejects(guard.ready, /media_timeout/);
+    published(publication); await attempt;
+    assert.equal(events.filter(e => e === (hang === 'publication' ? 'publication_timeout' : 'subscription_timeout')).length, 1);
+    assert.ok(!events.includes('subscription_ready'));
+    guard.dispose();
+  }
+});
+
+test('readiness timeout distinguishes an SDK that never invoked publication from a pending promise', async () => {
+  let calls = 0;
+  const participant = { async publishTrack() { calls++; return { async waitForSubscription() {} }; } };
+  const events = [], controller = new AbortController();
+  const guard = observePublication(participant, (event, state) => events.push({ event, state }), controller.signal, 20);
+  await assert.rejects(guard.ready, /media_timeout/);
+  assert.deepEqual(events, [{ event: 'publication_timeout', state: { started: false, published: false } }]);
+  assert.equal(calls, 0);
+  guard.dispose();
+});
+
+test('publication rejection and cancellation settle once without retries', async () => {
+  for (const rejected of [true, false]) {
+    const controller = new AbortController(), events = [];
+    const participant = { async publishTrack() { if (rejected) throw new Error('private SDK detail'); return { waitForSubscription: () => new Promise(() => {}) }; } };
+    const guard = observePublication(participant, e => events.push(e), controller.signal, 1000);
+    await participant.publishTrack().catch(() => undefined);
+    if (!rejected) controller.abort();
+    await assert.rejects(guard.ready, rejected ? /publication_rejected/ : /media_cancelled/);
+    guard.dispose();
+    assert.ok(!events.includes('publication_timeout'));
+  }
+});
+
+test('publication timeout triggers one teardown and disconnect cancellation releases the pending call', async () => {
+  const controller = new AbortController();
+  let cleanupCount = 0, calls = 0;
+  const participant = { publishTrack() {
+    calls++;
+    return new Promise((_, reject) => controller.signal.addEventListener('abort', () => reject(new Error('disconnected')), { once: true }));
+  } };
+  const original = participant.publishTrack;
+  const guard = observePublication(participant, () => {}, controller.signal, 20);
+  const cleanup = guard.ready.catch(() => { cleanupCount++; controller.abort(); guard.dispose(); });
+  const publishing = participant.publishTrack();
+  await cleanup;
+  await assert.rejects(publishing, /disconnected/);
+  assert.equal(calls, 1);
+  assert.equal(cleanupCount, 1);
+  assert.equal(participant.publishTrack, original);
+  await assert.rejects(guard.ready, /media_timeout/);
+});
 
 const LONG = 'Your order total is Rs. 1,250.50 and it ships on 12.05.2026. Dr. Rao will call at 3.30 p.m. to confirm the delivery window. '
   + 'You can track it at https://dialog.example.com/track?id=4 at any time. Is there anything else I can help you with today?';

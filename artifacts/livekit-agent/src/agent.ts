@@ -3,12 +3,14 @@ import * as deepgram from "@livekit/agents-plugin-deepgram";
 import * as sarvam from "@livekit/agents-plugin-sarvam";
 import * as silero from "@livekit/agents-plugin-silero";
 import { RoomEvent } from "@livekit/rtc-node";
+import { RoomServiceClient } from "livekit-server-sdk";
 import { ReadableStream } from "node:stream/web";
 import { randomUUID } from "node:crypto";
 import { DialogApi, DialogDenied, leaseLost, reference, type Claim } from "./api";
 import { StageClock, forwardToWorker, type CloseReason } from "./bench";
 import { voiceTuning } from "./voice-tuning";
 import { DialogSentenceTokenizer } from "./sentences";
+import { observePublication, MediaReadinessError } from "./media-readiness";
 import { logger } from "@workspace/observability/runtime/logger";
 import { metrics } from "@workspace/observability/runtime/operational-metrics";
 
@@ -123,27 +125,44 @@ export default defineAgent({
   // the entry starved the heartbeat loop long enough to expire the lease on slow machines.
   prewarm: async proc => {
     const started = performance.now();
-    proc.userData.vad = await silero.VAD.load({ forceCPU: true });
-    logger.info({ event: "livekit_process_ready", vadLoadMs: Math.round(performance.now() - started), uptimeMs: Math.round(process.uptime() * 1000) }, "Voice job process ready");
+    logger.info({ event: "livekit_process_initializing", uptimeMs: Math.round(process.uptime() * 1000) }, "Voice process prewarm started");
+    try {
+      proc.userData.vad = await silero.VAD.load({ forceCPU: true });
+      const vadLoaded = performance.now();
+      const ready = await fetch(`http://127.0.0.1:8082/process-ready/${process.pid}`, {
+        method: "POST", headers: { authorization: `Bearer ${process.env.LIVEKIT_WORKER_SECRET}` }, signal: AbortSignal.timeout(2000),
+      });
+      if (!ready.ok) { await ready.body?.cancel(); throw new Error("Process readiness unavailable"); }
+      logger.info({ event: "livekit_process_ready", vadLoadMs: Math.round(vadLoaded - started), registrationMs: Math.round(performance.now() - vadLoaded), uptimeMs: Math.round(process.uptime() * 1000) }, "Voice job process ready");
+    } catch {
+      logger.warn({ event: "livekit_process_failed", elapsedMs: Math.round(performance.now() - started) }, "Voice process initialization failed");
+      throw new Error("Voice process initialization failed");
+    }
   },
   entry: async ctx => {
     initializeLogger({ level: "silent", pretty: false });
     const api = new DialogApi();
     const id = reference(ctx.job.metadata);
+    if (!ctx.proc.userData.vad) throw new Error("VAD not prewarmed");
+    const diagnosticId = ctx.info.acceptArguments.attributes?.["dialog.diagnostic"] ?? randomUUID();
+    logger.info({ event: "livekit_job_entry", diagnosticId }, "Voice job entered prewarmed process");
     // The claim is authorized before joining, so ctx.room is not connected yet and
     // its name is still undefined; only the job's room descriptor carries it here.
     const claimSent = performance.now();
     const claim = await api.json<Claim>("/claim", { id, room: ctx.job.room?.name ?? "", worker: ctx.workerId });
+    logger.info({ event: "livekit_job_claimed", diagnosticId, claimMs: Math.round(performance.now() - claimSent) }, "Voice job claimed");
     // Stage events go to the room only for local benchmarking; they contain timings, never content.
     const bench = process.env.DIALOG_VOICE_BENCH === "1" && (claim.mode === "mock" || process.env.DIALOG_LOCAL_VOICE_PROFILE === "manual-live");
     const clock = new StageClock(claim.mode,
       bench ? async payload => { await ctx.room.localParticipant?.publishData(payload, { reliable: true, topic: "dialog.bench" }); } : undefined,
-      forwardToWorker(process.env.LIVEKIT_WORKER_SECRET));
+      forwardToWorker(process.env.LIVEKIT_WORKER_SECRET), diagnosticId);
     const turn: TurnState = { agentSpeaking: false };
     const controller = new AbortController();
     let session: voice.AgentSession | undefined;
     let heartbeat: NodeJS.Timeout | undefined;
+    let connectDeadline: NodeJS.Timeout | undefined;
     let ending: Promise<void> | undefined;
+    let media: ReturnType<typeof observePublication> | undefined;
     const sttOperation = randomUUID();
     let sttAdmitted = false;
     // Event-loop stalls starve the heartbeat and audio pacing; record them (duration only).
@@ -153,16 +172,39 @@ export default defineAgent({
       if (lag > 300) clock.mark("loop_stall", { ms: Math.round(lag) });
     }, 250);
     const close = (reason: CloseReason): Promise<void> => ending ??= (async () => {
+      const closingAt = performance.now();
       controller.abort();
-      clearTimeout(heartbeat); clearInterval(loopWatch);
+      media?.dispose();
+      clearTimeout(heartbeat); clearTimeout(connectDeadline); clearInterval(loopWatch);
       clock.mark("session_end", { [reason]: true });
+      const closing = { event: "livekit_session_closing", diagnosticId, reason };
+      if (["media_timeout", "publication_rejected", "connection_timeout", "heartbeat", "session_error", "start_failed"].includes(reason)) logger.warn(closing, "Voice session closing");
+      else logger.info(closing, "Voice session closing");
+      if (reason === "media_timeout" || reason === "publication_rejected") {
+        // Independent server view. Log counts only; never room/participant/track IDs.
+        try {
+          const rooms = new RoomServiceClient((process.env.LIVEKIT_URL ?? "").replace(/^ws/, "http"),
+            process.env.LIVEKIT_API_KEY, process.env.LIVEKIT_API_SECRET, { requestTimeout: 1, failover: false });
+          const participants = await rooms.listParticipants(ctx.job.room?.name ?? "");
+          const local = participants.find(p => p.attributes["dialog.diagnostic"] === diagnosticId);
+          logger.warn({ event: "livekit_server_media_state", diagnosticId, participantCount: participants.length,
+            agentPresent: Boolean(local), agentPublicationCount: local?.tracks.length ?? 0 }, "Server media state");
+        } catch { logger.warn({ event: "livekit_server_media_state", diagnosticId, unavailable: true }, "Server media state unavailable"); }
+      }
       await clock.delivered();
-      await session?.close().catch(() => undefined);
+      // Disconnect first: rtc-node publication waits are cancelled by its disconnect signal.
+      const bounded = async (work: Promise<unknown>) => {
+        let timer: NodeJS.Timeout | undefined;
+        try { await Promise.race([work.catch(() => undefined), new Promise(resolve => { timer = setTimeout(resolve, 2000); })]); }
+        finally { clearTimeout(timer); }
+      };
+      await bounded(ctx.room.disconnect());
+      if (session) await bounded(session.close());
       if (sttAdmitted) await api.request(`/${id}/usage`, { operationId: sttOperation, outcome: "unknown" }, claim.credential).catch(() => undefined);
       await api.request(`/${id}/close`, {}, claim.credential).catch(() => undefined);
       await clock.flush();
-      await ctx.room.disconnect().catch(() => undefined);
-      logger.info({ event: "livekit_session_closed", reason }, "Voice session closed");
+      logger.info({ event: "livekit_session_closed", diagnosticId, reason, cleanupMs: Math.round(performance.now() - closingAt) }, "Voice session closed");
+      ctx.shutdown(reason);
     })();
     ctx.addShutdownCallback(() => close("shutdown"));
     ctx.room.once(RoomEvent.Disconnected, () => { void close("room_disconnected"); });
@@ -214,6 +256,7 @@ export default defineAgent({
         turnHandling: { turnDetection: "stt", endpointing: { minDelay: tuning.endpointingMinMs, maxDelay: tuning.endpointingMaxMs },
           interruption: { mode: "vad", enabled: true }, preemptiveGeneration: { enabled: tuning.preemptiveLlm, preemptiveTts: false } },
         connOptions: { sttConnOptions: { maxRetry: 0, timeoutMs: 8000 }, ttsConnOptions: { maxRetry: 0, timeoutMs: 8000 }, maxUnrecoverableErrors: 1 } });
+      session.input.setAudioEnabled(false);
       let interimFrom: number | undefined;
       session.on(voice.AgentSessionEventTypes.UserStateChanged, ev => {
         if (ev.newState === "speaking") {
@@ -248,14 +291,30 @@ export default defineAgent({
       // Agent audio plays out only after the participant subscribes to the published track.
       ctx.room.once(RoomEvent.LocalTrackPublished, () => { clock.mark("agent_track_published"); });
       ctx.room.once(RoomEvent.LocalTrackSubscribed, () => { clock.mark("agent_track_subscribed"); });
+      connectDeadline = setTimeout(() => { void close("connection_timeout"); }, 12000);
       await ctx.connect();
+      clearTimeout(connectDeadline);
       controller.signal.throwIfAborted();
+      clock.mark("agent_connected");
+      if (!ctx.room.localParticipant) throw new Error("Missing local participant");
+      const mediaOrigin = performance.now();
+      media = observePublication(ctx.room.localParticipant, (event, state) => {
+        clock.mark(event, state);
+        const fields = { event, diagnosticId, elapsedMs: Math.round(performance.now() - mediaOrigin), ...state };
+        if (["publication_timeout", "subscription_timeout", "publication_rejected"].includes(event)) logger.warn(fields, "Voice media readiness failed");
+        else logger.info(fields, "Voice media readiness");
+      }, controller.signal);
+      // Close immediately even when session.start itself is still pending.
+      void media.ready.catch(error => close(error instanceof MediaReadinessError ? error.reason : "start_failed"));
       clock.mark("session_start", { endpointingMinMs: tuning.endpointingMinMs, endpointingMaxMs: tuning.endpointingMaxMs, sttEndpointingMs: tuning.sttEndpointingMs, preemptiveLlm: tuning.preemptiveLlm, ttsIdleTimeoutMs: tuning.ttsIdleTimeoutMs, aecWarmupMs: tuning.aecWarmupMs ?? -1 });
       await session.start({ agent: new DialogAgent(api, id, claim, controller.signal, clock, turn), room: ctx.room, record: false,
         inputOptions: { participantIdentity: claim.participant, textEnabled: false, videoEnabled: false, closeOnDisconnect: true } });
       controller.signal.throwIfAborted();
+      await media.ready;
+      controller.signal.throwIfAborted();
+      session.input.setAudioEnabled(true);
       const greeting = session.say(claim.greeting, { allowInterruptions: true });
       void greeting.waitForPlayout().then(() => clock.mark("greeting_done", { interrupted: greeting.interrupted }), () => undefined);
-    } catch { await close("start_failed"); }
+    } catch (error) { await close(error instanceof MediaReadinessError ? error.reason : "start_failed"); }
   },
 });
