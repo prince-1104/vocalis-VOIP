@@ -6,13 +6,14 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { initializeLogger } from '@livekit/agents';
+import { initializeLogger, voice } from '@livekit/agents';
+import { LocalAudioTrack } from '@livekit/rtc-node';
 initializeLogger({ level: 'silent', pretty: false });
 // Inside the package so the external @livekit/agents import resolves from its node_modules.
 const output = await mkdtemp(path.resolve('test', '.voice-build-'));
 const modules = {};
 try {
-  for (const name of ['sentences', 'voice-tuning', 'bench', 'media-readiness', 'process-readiness']) {
+  for (const name of ['sentences', 'voice-tuning', 'bench', 'media-readiness', 'process-readiness', 'audio-diagnostics']) {
     await build({ entryPoints: [`src/${name}.ts`], outfile: path.join(output, `${name}.mjs`), bundle: true, platform: 'node', format: 'esm', packages: 'external' });
     modules[name] = await import(pathToFileURL(path.join(output, `${name}.mjs`)).href);
   }
@@ -22,6 +23,42 @@ const { voiceTuning, baselineTuning, defaultTuning } = modules['voice-tuning'];
 const { StageClock } = modules.bench;
 const { observePublication } = modules['media-readiness'];
 const { ProcessReadiness } = modules['process-readiness'];
+const { observeAudioPipeline } = modules['audio-diagnostics'];
+
+test('audio probes preserve source/track/frame ownership, errors and bounded numeric diagnostics', async () => {
+  const events = [], frames = [], controller = new AbortController();
+  const clock = { now: () => performance.now(), mark: (e, fields = {}) => { events.push({ e, ...fields }); return performance.now(); } };
+  let clears = 0, rejected = false;
+  const failure = new Error('private provider detail must never enter diagnostics');
+  const source = { captureFrame: async frame => { if (rejected) throw failure; frames.push(frame); }, clearQueue: () => { clears++; }, waitForPlayout: async () => {} };
+  const frame = { data: Int16Array.from([0, 7000, -7000]), samplesPerChannel: 3, sampleRate: 24000, channels: 1 };
+  const track = {}, factory = LocalAudioTrack.createAudioTrack, capture = source.captureFrame;
+  LocalAudioTrack.createAudioTrack = (_name, value) => { assert.equal(value, source); return track; };
+  const probe = observeAudioPipeline(clock, controller.signal);
+  try {
+    assert.equal(LocalAudioTrack.createAudioTrack('private track name', source), track);
+    probe.published(track);
+    class Sink extends voice.AudioOutput {
+      async captureFrame(frame) { await super.captureFrame(frame); await source.captureFrame(frame); }
+      clearBuffer() { source.clearQueue(); }
+    }
+    const sink = new Sink(24000); probe.output(sink);
+    await sink.captureFrame(frame);
+    assert.equal(frames[0], frame, 'observer must forward the original frame once');
+    assert.equal(events.find(event => event.e === 'published_source_link').matched, true);
+    assert.equal(events.find(event => event.e === 'source_captured').completed, 1);
+    rejected = true;
+    await assert.rejects(sink.captureFrame(frame), error => error === failure);
+    assert.ok(events.some(event => event.e === 'source_capture_error'));
+    for (let i = 0; i < 2500; i++) sink.clearBuffer();
+    assert.equal(clears, 2500, 'buffer cleanup must continue when diagnostics are full');
+    assert.ok(events.length <= 2000);
+    for (const event of events) for (const [key, value] of Object.entries(event))
+      assert.ok(key === 'e' ? typeof value === 'string' : typeof value === 'number' || typeof value === 'boolean');
+    assert.equal(JSON.stringify(events).includes('private'), false);
+  } finally { probe.dispose(); LocalAudioTrack.createAudioTrack = factory; }
+  assert.equal(source.captureFrame, capture);
+});
 
 test('cold admission rejects before prewarm, reserves once, and discards dead processes', () => {
   const live = new Set([10, 11]);

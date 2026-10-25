@@ -24,7 +24,7 @@ services:
   gateway:
     image: node:24-bookworm@sha256:6449e19d8184d84062525b6a7524def03146c2cb04a7f08b076680d0e8e4240a
     command: [node, /gateway.mjs]
-    volumes: [./gateway.mjs:/gateway.mjs:ro]
+    volumes: [./gateway.mjs:/gateway.mjs:ro, ./udp-peer.mjs:/udp-peer.mjs:ro]
     networks: [voice, ingress]
     ports: [127.0.0.1:7880:7880, 127.0.0.1:7881:7881, 127.0.0.1:7882:7882/udp, 127.0.0.1:3003:3003, 127.0.0.1:5173:5173, 127.0.0.1:55439:55439]
   redis:
@@ -104,6 +104,7 @@ services:
     entrypoint: [node, scripts/voice-smoke.mjs]
     volumes:
       - ../../scripts/voice-smoke.mjs:/app/scripts/voice-smoke.mjs:ro
+      - ../../scripts/voice-audio-boundary.mjs:/app/scripts/voice-audio-boundary.mjs:ro
       - ../../node_modules/.pnpm/playwright@1.64.1/node_modules/playwright:/app/node_modules/playwright:ro
       - ../../node_modules/.pnpm/playwright-core@1.64.1/node_modules/playwright-core:/app/node_modules/playwright-core:ro
       - ../../.local/livekit/login.json:/run/dialog-local/login.json:ro

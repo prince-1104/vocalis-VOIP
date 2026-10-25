@@ -34,7 +34,7 @@ const server = new AgentServer(new ServerOptions({
       const diagnosticId = randomUUID();
       await request.accept("Dialog", `agent-${randomUUID()}`, "", { "dialog.diagnostic": diagnosticId });
       finish();
-      logger.info({ event: "livekit_job_accepted", diagnosticId }, "Voice job accepted");
+      logger.info({ event: "livekit_job_accepted", diagnosticId, uptimeMs: Math.round(performance.now()) }, "Voice job accepted");
     } catch { finish("blocked"); await request.reject(); logger.warn({ event: "livekit_job_denied" }, "Voice job denied"); }
   },
 }));

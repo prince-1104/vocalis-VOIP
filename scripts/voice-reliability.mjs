@@ -3,6 +3,7 @@ import { spawn, execFile } from 'node:child_process';
 import { mkdir, appendFile, readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { reliabilityResults, lifecyclePassed } from './voice-reliability-results.mjs';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const group = process.argv[2];
 if (!['normal', 'stressed', 'cold', 'regression', 'outage', 'lease-expiry'].includes(group)) throw new Error('Expected normal, stressed, cold, regression, outage or lease-expiry');
@@ -70,13 +71,7 @@ async function bench(label, attempts, regression = false, timeoutMs = 7200000) {
   const reportFile = (await readdir(directory)).find(name => !before.has(name) && name.startsWith(label + '-') && name.endsWith('.json'));
   if (!reportFile) return { ...result, reportMissing: true, unaccounted: attempts };
   const report = JSON.parse(await readFile(path.join(directory, reportFile), 'utf8'));
-  const sessions = report.records.filter(value => value.case === 'first_turn_session');
-  const success = name => report.records.filter(value => value.case === name && value.outcome === 'ok').length;
-  return { ...result, reportFile, attemptedSessions: sessions.length, unaccounted: Math.max(0, attempts - sessions.length),
-    greetingSuccess: success('first_turn_session'), firstTurnSuccess: success('first_turn'), secondTurnSuccess: success('second_turn'),
-    sessionFailures: sessions.filter(value => value.outcome !== 'ok').length,
-    sessionOutcomes: sessions.reduce((out, value) => { out[value.outcome] = (out[value.outcome] ?? 0) + 1; return out; }, {}),
-    retries: sessions.filter(value => value.retried).length };
+  return { ...result, reportFile, ...reliabilityResults(report.records, attempts, regression) };
 }
 const loadName = 'dialog-voice-1rg-controlled-load';
 let loadStarted = false;
@@ -92,8 +87,9 @@ try {
   for (let round = 1; round <= rounds; round++) {
     const start = performance.now();
     if (group === 'cold') {
+      const restartingAt = performance.now();
       const restarted = await run('docker', [...compose, 'restart', 'worker']);
-      await record({ event: 'restart', round, ...restarted });
+      await record({ event: 'restart', round, restartMs: Math.round(performance.now() - restartingAt), ...restarted });
       if (restarted.code !== 0) { process.exitCode = 1; continue; }
     }
     const readiness = await ready();
@@ -102,7 +98,7 @@ try {
     if (group === 'outage' || group === 'lease-expiry') {
       const previous = new Set((await workerEvidence()).filter(value => value.event === 'subscription_ready').map(value => value.diagnosticId));
       const population = bench(`1rg-${group}-${round}`, 1, false, 180000);
-      let diagnosticId, injected = false;
+      let diagnosticId, injected = false, restored = false;
       try {
         const deadline = performance.now() + 45000;
         while (performance.now() < deadline) {
@@ -120,20 +116,24 @@ try {
         }
       } finally {
         const action = group === 'outage' ? ['start', 'livekit'] : ['unpause', 'worker'];
-        await record({ event: 'lifecycle_restore', group, ...await run('docker', [...compose, ...action], {}, 30000) });
+        const restoration = await run('docker', [...compose, ...action], {}, 30000);
+        restored = restoration.code === 0 && !restoration.timedOut;
+        await record({ event: 'lifecycle_restore', group, ...restoration });
       }
       const result = await population;
       const closed = (await workerEvidence()).find(value => value.diagnosticId === diagnosticId && value.event === 'livekit_session_closed');
-      await record({ event: 'lifecycle_result', group, injected, cleanupConfirmed: Boolean(closed), reason: closed?.reason ?? null, ...result });
-      if (!injected || !closed || result.reportMissing || result.unaccounted) process.exitCode = 1;
+      const passed = lifecyclePassed(result, injected, Boolean(closed), restored);
+      await record({ event: 'lifecycle_result', group, injected, restored, cleanupConfirmed: Boolean(closed), lifecyclePassed: passed, reason: closed?.reason ?? null, ...result });
+      if (!passed) process.exitCode = 1;
       continue;
     }
     const attempts = group === 'normal' ? 100 : group === 'stressed' ? 50 : group === 'cold' ? 1 : 0;
     const result = await bench(`1rg-${group}-${round}`, attempts, group === 'regression');
     await record({ event: 'population', group, round, plannedAttempts: attempts, elapsedMs: Math.round(performance.now() - start), ...result });
-    if (result.code !== 0 || result.reportMissing || result.unaccounted || (attempts && (result.greetingSuccess !== attempts || result.firstTurnSuccess !== attempts || result.secondTurnSuccess !== attempts))) process.exitCode = 1;
+    if (result.code !== 0 || result.reportMissing || !result.populationPassed) process.exitCode = 1;
+    if (result.harnessErrors || result.reportMissing || result.unaccounted) break; // Host/harness failure leaves a visibly incomplete run.
   }
 } finally {
-  if (loadStarted) await record({ event: 'controlled_load_cleanup', ...await run('docker', ['stop', '--time', '1', loadName]) });
+  if (loadStarted) await record({ event: 'controlled_load_cleanup', ...await run('docker', ['stop', '--timeout', '1', loadName]) });
   await retainWorkerEvidence();
 }

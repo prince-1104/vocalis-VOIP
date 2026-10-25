@@ -2,6 +2,7 @@ import { chromium } from 'playwright';
 import assert from 'node:assert/strict';
 import { readFile, writeFile, mkdir, appendFile } from 'node:fs/promises';
 import os from 'node:os';
+import { completedResponseEnd, greetingCompletion } from './voice-audio-boundary.mjs';
 const credentials = JSON.parse(await readFile('/run/dialog-local/login.json', 'utf8'));
 const BENCH = process.env.VOICE_BENCH === '1';
 const MOCKS = 'http://mock-providers:8090';
@@ -17,6 +18,8 @@ const browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '
 try {
   const context = await browser.newContext({ permissions: ['microphone'] });
   const page = await context.newPage();
+  await page.addInitScript({ content: 'window.__completedResponseEnd = ' + completedResponseEnd.toString() });
+  await page.addInitScript({ content: 'window.__greetingCompletion = ' + greetingCompletion.toString() });
   // Only sanitized assertion names go to stdout. No traces, HARs or provider payload logs.
   // Failure diagnostics print redacted, truncated error text only — never tokens or payloads.
   const redact = text => String(text).replace(/(token|secret|authorization|key)[=:"'\s]+[^&\s"']+/gi, '$1=***')
@@ -83,13 +86,22 @@ try {
     window.__audioEvidence = { get peak() { return window.__env.peak; } };
     // Elements may start via autoplay without play(), so watch for new subscribed streams instead.
     const observed = new Map(); // stream id -> stop()
-    const observe = stream => {
+    const observe = (stream, element) => {
       const audio = new AudioContext(); const input = audio.createMediaStreamSource(stream);
       const analyser = audio.createAnalyser(); analyser.fftSize = 256; input.connect(analyser); const data = new Float32Array(analyser.fftSize);
+      let lastReport = 0, windowPeak = 0;
       const timer = setInterval(() => {
         analyser.getFloatTimeDomainData(data);
         let peak = 0; for (const v of data) peak = Math.max(peak, Math.abs(v));
         const env = window.__env, now = performance.now();
+        windowPeak = Math.max(windowPeak, peak);
+        if (now - lastReport >= 250) {
+          const correlation = element.dataset.dialogDiagnostic;
+          window.dispatchEvent(new CustomEvent('dialog-media', { detail: { e: 'browser_analyser', t: now,
+            correlation: /^[0-9a-f-]{36}$/.test(correlation ?? '') ? correlation : undefined,
+            track: Number(element.dataset.dialogTrack), peak: windowPeak, running: audio.state === 'running', threshold: 0.02 } }));
+          lastReport = now; windowPeak = 0;
+        }
         env.peak = Math.max(env.peak, peak);
         if (peak > 0.02) { if (!env.audible) { env.audible = true; env.onAt = now; } env.lastLoud = now; }
         else if (env.audible && now - env.lastLoud > 25) { env.audible = false; env.segments.push([env.onAt, env.lastLoud]); }
@@ -103,7 +115,7 @@ try {
         const stream = el.srcObject;
         if (!(stream instanceof MediaStream) || !stream.getAudioTracks().some(t => t.readyState === 'live')) continue;
         live.add(stream.id);
-        if (!observed.has(stream.id)) observed.set(stream.id, observe(stream));
+        if (!observed.has(stream.id)) observed.set(stream.id, observe(stream, el));
       }
       for (const [id, stop] of observed) if (!live.has(id)) { stop(); observed.delete(id); }
     }, 50);
@@ -123,9 +135,11 @@ try {
   await page.evaluate(token => localStorage.setItem('ss_auth_token', token), tokens[0]);
   await page.goto('http://127.0.0.1:5173/dev/livekit');
   if (LIVE) await page.evaluate(clip => window.__setClip(clip), (await readFile(LIVE_CLIP)).toString('base64'));
+  let createdSessions = 0;
   await page.route('**/api/dev/livekit/sessions', async route => {
     const response = await route.fetch();
     if (response.status() !== 201) { await route.fulfill({ response }); return; }
+    createdSessions++;
     const data = await response.json();
     // The browser runs inside the isolated bridge; loopback reaches the gateway relay.
     data.url = 'ws://127.0.0.1:7880';
@@ -181,13 +195,13 @@ try {
   await page.getByRole('status').filter({ hasText: 'Stopped' }).waitFor();
   console.log('PASS explicit session shutdown');
   }
-  if (BENCH) await benchmark(page, context);
+  if (BENCH) await benchmark(page, context, () => createdSessions);
   await context.close();
 } finally { await browser.close(); }
 }
 
 // ── Latency benchmark (VOICE_BENCH=1) ────────────────────────────────────────
-async function benchmark(page, context) {
+async function benchmark(page, context, sessionCount) {
   // Manual-live runs are bounded (paid provider requests) and never inject faults.
   const config = {
     label: /^[a-z0-9-]{1,40}$/.test(process.env.VOICE_BENCH_LABEL ?? '') ? process.env.VOICE_BENCH_LABEL : 'unlabelled',
@@ -213,12 +227,11 @@ async function benchmark(page, context) {
     return seg ? seg[0] : (env.audible && env.onAt > after ? env.onAt : false);
   }, [after], { timeout, polling: 10 }).then(h => h.jsonValue()).catch(() => null);
   // End of an agent response: last audible sample followed by `quiet` ms of silence.
-  const responseEnd = (after, quiet, timeout) => page.waitForFunction(([after, quiet]) => {
+  const responseEnd = (after, quiet, timeout, completionAfter = null) => page.waitForFunction(([after, quiet, completionAfter]) => {
     const env = window.__env;
-    if (env.audible || performance.now() - env.lastLoud < quiet) return false;
-    const last = env.segments.at(-1);
-    return last && last[1] > after ? last[1] : false;
-  }, [after, quiet], { timeout, polling: 20 }).then(h => h.jsonValue()).catch(() => null);
+    const completed = completionAfter === null || window.__greetingCompletion(window.__bench, window.__media, completionAfter);
+    return window.__completedResponseEnd(env, performance.now(), after, quiet, completed);
+  }, [after, quiet, completionAfter], { timeout, polling: 20 }).then(h => h.jsonValue()).catch(() => null);
   const segmentsBetween = (from, to) => page.evaluate(([from, to]) => {
     const env = window.__env, all = [...env.segments, ...(env.audible ? [[env.onAt, env.lastLoud]] : [])];
     return all.filter(s => s[1] >= from && s[0] <= to);
@@ -254,8 +267,9 @@ async function benchmark(page, context) {
             JSON.stringify(events.map(e => [e.e, Math.round(e.t - (events[0]?.t ?? 0))])).slice(0, 1500));
           return { ok: false, reason: 'no_greeting' };
         }
-        const greetingEnd = await responseEnd(greetingOn, quiet, 20000);
-        return { ok: true, connectToGreetingMs: greetingOn - start, greetingEnd: greetingEnd ?? await now() };
+        const greetingEnd = await responseEnd(greetingOn, quiet, 20000, clicked);
+        if (greetingEnd === null) return { ok: false, reason: 'greeting_incomplete' };
+        return { ok: true, connectToGreetingMs: greetingOn - start, greetingOn, greetingEnd };
       }
       await stopSession(); await page.waitForTimeout(2000);
     }
@@ -272,7 +286,7 @@ async function benchmark(page, context) {
     const bounds = await page.evaluate(s => window.__speak(s), segments);
     const speechStart = bounds[0][0], speechEnd = bounds.at(-1)[1];
     const onset = await nextOnset(speechStart, expectLong ? 15000 : 12000);
-    const record = { case: name, browser: {}, outcome: 'ok' };
+    const record = { case: name, browser: { speechStartMs: speechStart, speechEndMs: speechEnd }, outcome: 'ok' };
     if (onset === null) { record.outcome = 'timeout_no_response'; }
     else {
       record.browser.e2eFirstAudioMs = onset - speechEnd;
@@ -290,6 +304,8 @@ async function benchmark(page, context) {
     const all = await segmentsBetween(caseStart, caseEnd);
     record.browser.responsesInWindow = playback(all).responses;
     const events = await eventsBetween(caseStart, caseEnd);
+    record.media = await page.evaluate(([from, to]) => window.__media.filter(e => e.t >= from && e.t <= to), [caseStart, caseEnd]);
+    record.stages = events;
     record.worker = workerStages(events);
     // No worker event at all while the user spoke: the job stopped processing (silent session).
     if (record.outcome === 'timeout_no_response' && !events.length) record.outcome = 'timeout_session_silent';
@@ -439,9 +455,9 @@ async function benchmark(page, context) {
     const from = await now();
     const started = await startSession(120);
     const session = { case: 'first_turn_session', iteration, gapMs, retried: Boolean(started.retried),
-      outcome: started.ok ? (started.retried ? 'ok_after_no_greeting_retry' : 'ok') : started.reason, browser: started.ok ? { connectToGreetingMs: started.connectToGreetingMs } : {} };
+      outcome: started.ok ? (started.retried ? 'ok_after_no_greeting_retry' : 'ok') : started.reason, browser: started.ok ? { connectToGreetingMs: started.connectToGreetingMs, greetingOnMs: started.greetingOn, greetingEndMs: started.greetingEnd } : {} };
     session.media = await page.evaluate(from => window.__media.filter(e => e.t >= from), from);
-    if (!started.ok) { session.diagnostics = sessionDiagnostics(await eventsBetween(from, await now())); await stopSession(); return [session]; }
+    if (!started.ok) { session.stages = await eventsBetween(from, await now()); session.diagnostics = sessionDiagnostics(session.stages); await stopSession(); return [session]; }
     await page.waitForTimeout(Math.max(0, started.greetingEnd + gapMs - await now()));
     // Mock STT counters around each turn: did the recognizer receive loud audio and emit results?
     const sttDelta = async work => {
@@ -449,6 +465,7 @@ async function benchmark(page, context) {
       return { ...record, sttDelta: Object.fromEntries(STT_KEYS.map(k => [k, (after[k] ?? 0) - (before[k] ?? 0)])) };
     };
     const first = { ...(await sttDelta(() => turn('first_turn', [[1200, 0]]))), iteration, gapMs };
+    first.browser.actualGreetingGapMs = first.browser.speechStartMs - started.greetingEnd;
     const second = { ...(await sttDelta(() => turn('second_turn', [[1200, 0]]))), iteration, gapMs };
     const d = sessionDiagnostics(await eventsBetween(from, await now()));
     // Did the user start speaking (worker VAD) before the worker finished greeting playout?
@@ -456,12 +473,15 @@ async function benchmark(page, context) {
     d.userBeforeGreetingDone = d._greetingDoneT !== undefined && firstSpeech ? firstSpeech.t < d._greetingDoneT : null;
     delete d._greetingDoneT;
     session.diagnostics = d;
+    session.stages = await eventsBetween(from, await now());
+    session.media = await page.evaluate(from => window.__media.filter(e => e.t >= from), from);
     await stopSession();
     return [session, first, second];
   };
   await control({ reset: true });
   for (let i = 0; i < config.warmupSessions; i++) await run(false, -1 - i, false);
   for (let i = 0; i < config.firstTurnSessions; i++) {
+    const createdBefore = sessionCount();
     let records;
     try { records = await firstTurnSession(i + 1); }
     catch {
@@ -469,9 +489,11 @@ async function benchmark(page, context) {
       await stopSession().catch(() => undefined);
     }
     samples.push(...records);
+    const sessionRecord = records.find(record => record.case === 'first_turn_session');
+    if (sessionRecord) sessionRecord.genuineSession = sessionCount() > createdBefore;
     // Retain completed attempts even if a subsequent attempt or report generation crashes.
     if (!LIVE) await appendFile(attemptLedger, JSON.stringify({ attempt: i + 1, records }) + '\n');
-    if (page.isClosed()) break; // Remaining planned attempts were not executed.
+    if (page.isClosed() || sessionRecord?.outcome === 'harness_error') break; // Remaining planned attempts were not executed.
   }
   for (let i = 0; i < config.repeatSessions; i++) samples.push(...await run(false, i + 1, true));
   for (let i = 0; i < config.mixedSessions; i++) samples.push(...await run(true, i + 1, true));

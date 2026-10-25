@@ -11,6 +11,7 @@ import { StageClock, forwardToWorker, type CloseReason } from "./bench";
 import { voiceTuning } from "./voice-tuning";
 import { DialogSentenceTokenizer } from "./sentences";
 import { observePublication, MediaReadinessError } from "./media-readiness";
+import { observeAudioPipeline, frameMeasure } from "./audio-diagnostics";
 import { logger } from "@workspace/observability/runtime/logger";
 import { metrics } from "@workspace/observability/runtime/operational-metrics";
 
@@ -46,6 +47,7 @@ class DialogAgent extends voice.Agent {
     try {
       response = await this.api.request(`/${this.sessionId}/llm`, { messages: chat.items.flatMap(i => i.type === "message" && i.role !== "system" ? [{ role: i.role, content: i.textContent ?? "" }] : []) }, this.claim.credential, signal);
     } catch (e) { end(signal.aborted ? "cancelled" : "error"); throw e; }
+    clock.mark("llm_authorized");
     const reader = response.body!.getReader();
     // One decoder per stream: multi-byte characters (Devanagari is 3 bytes) can span chunks.
     const decoder = new TextDecoder();
@@ -92,7 +94,7 @@ class DialogAgent extends voice.Agent {
     const audio = await super.ttsNode(source, settings);
     if (!audio) return null;
     const reader = audio.getReader(); const api = this.api, id = this.sessionId, claim = this.claim, signal = this.signal;
-    let settled = false, firstAudio = false;
+    let settled = false, firstAudio = false, frames = 0, audioMs = 0, peak = 0;
     const settle = async (ended: "complete" | "cancelled" | "failed") => {
       if (settled) return; settled = true;
       // The plugin ends the stream normally when the provider socket is refused or closes before
@@ -101,6 +103,7 @@ class DialogAgent extends voice.Agent {
       const outcome = ended === "complete" && (firstAudio || characters === 0) ? "charged" : "unknown";
       const cancelled = ended === "cancelled";
       clock.mark("tts_end", { cancelled, noAudio: !firstAudio });
+      clock.mark("tts_audio_summary", { frames, audioMs: Math.round(audioMs), peak, cancelled, failed: ended === "failed" });
       clock.observe("tts_total", "sarvam", cancelled ? "cancelled" : outcome === "charged" ? "success" : "error", clock.now() - authorized);
       if (cancelled && turn.interruptedAt !== undefined) { clock.observe("interruption_cancel", "livekit", "success", clock.now() - turn.interruptedAt); turn.interruptedAt = undefined; }
       await api.request(`/${id}/usage`, { operationId, outcome, quantity: characters }, claim.credential).catch(() => undefined);
@@ -111,6 +114,7 @@ class DialogAgent extends voice.Agent {
           signal.throwIfAborted(); const next = await reader.read(); signal.throwIfAborted();
           if (next.done) { await settle("complete"); out.close(); }
           else {
+            const measured = frameMeasure(next.value); frames++; audioMs += measured.ms; peak = Math.max(peak, measured.peak);
             if (!firstAudio) { firstAudio = true; clock.observe("tts_first_audio", "sarvam", "success", clock.mark("tts_first_audio") - authorized); }
             out.enqueue(next.value);
           }
@@ -145,12 +149,12 @@ export default defineAgent({
     const id = reference(ctx.job.metadata);
     if (!ctx.proc.userData.vad) throw new Error("VAD not prewarmed");
     const diagnosticId = ctx.info.acceptArguments.attributes?.["dialog.diagnostic"] ?? randomUUID();
-    logger.info({ event: "livekit_job_entry", diagnosticId }, "Voice job entered prewarmed process");
+    logger.info({ event: "livekit_job_entry", diagnosticId, uptimeMs: Math.round(performance.now()) }, "Voice job entered prewarmed process");
     // The claim is authorized before joining, so ctx.room is not connected yet and
     // its name is still undefined; only the job's room descriptor carries it here.
     const claimSent = performance.now();
     const claim = await api.json<Claim>("/claim", { id, room: ctx.job.room?.name ?? "", worker: ctx.workerId });
-    logger.info({ event: "livekit_job_claimed", diagnosticId, claimMs: Math.round(performance.now() - claimSent) }, "Voice job claimed");
+    logger.info({ event: "livekit_job_claimed", diagnosticId, uptimeMs: Math.round(performance.now()), claimMs: Math.round(performance.now() - claimSent) }, "Voice job claimed");
     // Stage events go to the room only for local benchmarking; they contain timings, never content.
     const bench = process.env.DIALOG_VOICE_BENCH === "1" && (claim.mode === "mock" || process.env.DIALOG_LOCAL_VOICE_PROFILE === "manual-live");
     const clock = new StageClock(claim.mode,
@@ -163,6 +167,7 @@ export default defineAgent({
     let connectDeadline: NodeJS.Timeout | undefined;
     let ending: Promise<void> | undefined;
     let media: ReturnType<typeof observePublication> | undefined;
+    let audioDiagnostics: ReturnType<typeof observeAudioPipeline> | undefined;
     const sttOperation = randomUUID();
     let sttAdmitted = false;
     // Event-loop stalls starve the heartbeat and audio pacing; record them (duration only).
@@ -200,6 +205,7 @@ export default defineAgent({
       };
       await bounded(ctx.room.disconnect());
       if (session) await bounded(session.close());
+      audioDiagnostics?.dispose();
       if (sttAdmitted) await api.request(`/${id}/usage`, { operationId: sttOperation, outcome: "unknown" }, claim.credential).catch(() => undefined);
       await api.request(`/${id}/close`, {}, claim.credential).catch(() => undefined);
       await clock.flush();
@@ -258,6 +264,15 @@ export default defineAgent({
         connOptions: { sttConnOptions: { maxRetry: 0, timeoutMs: 8000 }, ttsConnOptions: { maxRetry: 0, timeoutMs: 8000 }, maxUnrecoverableErrors: 1 } });
       session.input.setAudioEnabled(false);
       let interimFrom: number | undefined;
+      let speechOrdinal = 0;
+      session.on(voice.AgentSessionEventTypes.SpeechCreated, ev => {
+        const speech = ++speechOrdinal;
+        clock.mark("speech_created", { speech, userInitiated: ev.userInitiated });
+        ev.speechHandle.addDoneCallback(handle => { clock.mark("speech_done", { speech, interrupted: handle.interrupted }); });
+      });
+      session.on(voice.AgentSessionEventTypes.ConversationItemAdded, ev => {
+        if (ev.item.type === "message") clock.mark("conversation_committed", { user: ev.item.role === "user", assistant: ev.item.role === "assistant" });
+      });
       session.on(voice.AgentSessionEventTypes.UserStateChanged, ev => {
         if (ev.newState === "speaking") {
           const at = clock.mark("user_speaking"); interimFrom = at;
@@ -289,7 +304,7 @@ export default defineAgent({
         void close("session_error");
       });
       // Agent audio plays out only after the participant subscribes to the published track.
-      ctx.room.once(RoomEvent.LocalTrackPublished, () => { clock.mark("agent_track_published"); });
+      ctx.room.once(RoomEvent.LocalTrackPublished, publication => { clock.mark("agent_track_published"); if (publication?.track) audioDiagnostics?.published(publication.track as import("@livekit/rtc-node").LocalAudioTrack); });
       ctx.room.once(RoomEvent.LocalTrackSubscribed, () => { clock.mark("agent_track_subscribed"); });
       connectDeadline = setTimeout(() => { void close("connection_timeout"); }, 12000);
       await ctx.connect();
@@ -298,6 +313,7 @@ export default defineAgent({
       clock.mark("agent_connected");
       if (!ctx.room.localParticipant) throw new Error("Missing local participant");
       const mediaOrigin = performance.now();
+      if (bench) audioDiagnostics = observeAudioPipeline(clock, controller.signal);
       media = observePublication(ctx.room.localParticipant, (event, state) => {
         clock.mark(event, state);
         const fields = { event, diagnosticId, elapsedMs: Math.round(performance.now() - mediaOrigin), ...state };
@@ -312,6 +328,7 @@ export default defineAgent({
       controller.signal.throwIfAborted();
       await media.ready;
       controller.signal.throwIfAborted();
+      if (session.output.audio) audioDiagnostics?.output(session.output.audio);
       session.input.setAudioEnabled(true);
       const greeting = session.say(claim.greeting, { allowInterruptions: true });
       void greeting.waitForPlayout().then(() => clock.mark("greeting_done", { interrupted: greeting.interrupted }), () => undefined);

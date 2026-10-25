@@ -26,7 +26,8 @@ export default function LivekitPreview() {
       if (!response.ok) throw new Error("Unavailable");
       const data = await response.json(); id.current = data.id;
       const connection = new Room({ adaptiveStream: false, dynacast: false }); room.current = connection;
-      const diagnostic = (e: string, correlation?: string) => window.dispatchEvent(new CustomEvent("dialog-media", { detail: { e, t: performance.now(), correlation: /^[0-9a-f-]{36}$/.test(correlation ?? "") ? correlation : undefined } }));
+      let trackOrdinal = 0;
+      const diagnostic = (e: string, correlation?: string, fields: Record<string, number | boolean> = {}) => window.dispatchEvent(new CustomEvent("dialog-media", { detail: { e, t: performance.now(), correlation: /^[0-9a-f-]{36}$/.test(correlation ?? "") ? correlation : undefined, ...fields } }));
       connection.on(RoomEvent.ParticipantDisconnected, participant => {
         if (/^[0-9a-f-]{36}$/.test(participant.attributes["dialog.diagnostic"] ?? "") && room.current === connection) {
           diagnostic("browser_agent_disconnected", participant.attributes["dialog.diagnostic"]);
@@ -38,19 +39,30 @@ export default function LivekitPreview() {
         if (track.kind === Track.Kind.Audio) {
           diagnostic("browser_track_subscribed", participant.attributes["dialog.diagnostic"]);
           const element = track.attach();
+          const ordinal = ++trackOrdinal;
+          element.dataset.dialogDiagnostic = participant.attributes["dialog.diagnostic"];
+          element.dataset.dialogTrack = String(ordinal);
           element.addEventListener("playing", () => diagnostic("browser_playing", participant.attributes["dialog.diagnostic"]), { once: true });
           output.current?.appendChild(element);
           if (track instanceof RemoteAudioTrack) {
-            const deadline = performance.now() + 12000;
+            const deadline = performance.now() + 120000;
+            let received = false;
             const poll = async () => {
               if (connection.state !== ConnectionState.Connected || performance.now() >= deadline) return;
               try {
                 const stats = await track.getReceiverStats();
-                if ((stats?.totalSamplesDuration ?? 0) > 0) {
-                  diagnostic("browser_first_audio_samples", participant.attributes["dialog.diagnostic"]); return;
+                diagnostic("browser_receiver", participant.attributes["dialog.diagnostic"], {
+                  track: ordinal, samplesMs: (stats?.totalSamplesDuration ?? 0) * 1000, energy: stats?.totalAudioEnergy ?? 0,
+                  samplesAvailable: Number.isFinite(stats?.totalSamplesDuration), energyAvailable: Number.isFinite(stats?.totalAudioEnergy),
+                  bytes: stats?.bytesReceived ?? 0, concealed: stats?.concealedSamples ?? 0,
+                  playing: !element.paused, muted: element.muted, volume: element.volume, elementMs: element.currentTime * 1000,
+                  trackLive: track.mediaStreamTrack.readyState === "live", trackMuted: track.mediaStreamTrack.muted,
+                });
+                if (!received && (stats?.totalSamplesDuration ?? 0) > 0) {
+                  received = true; diagnostic("browser_first_audio_samples", participant.attributes["dialog.diagnostic"]);
                 }
               } catch { return; }
-              setTimeout(() => { void poll(); }, 100);
+              setTimeout(() => { void poll(); }, 250);
             };
             void poll();
           }

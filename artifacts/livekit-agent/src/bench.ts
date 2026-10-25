@@ -4,7 +4,10 @@ import type { VoiceStage } from "@workspace/observability/runtime/operational-me
 export const stageEvents = ["session_start", "user_speaking", "user_listening", "stt_interim", "stt_final", "eou", "llm_start", "llm_first", "llm_end",
   "tts_start", "tts_authorized", "tts_first_audio", "tts_end", "agent_listening", "agent_thinking", "agent_speaking", "false_interruption", "error",
   "greeting_done", "loop_stall", "heartbeat_late", "heartbeat_retry", "heartbeat_lost", "session_end", "agent_track_published", "agent_track_subscribed",
-  "agent_connected", "audio_track_created", "publication_started", "publication_resolved", "publication_rejected", "publication_timeout", "subscription_timeout", "subscription_ready"] as const;
+  "agent_connected", "audio_track_created", "publication_started", "publication_resolved", "publication_rejected", "publication_timeout", "subscription_timeout", "subscription_ready",
+  "tts_audio_summary", "output_capture", "output_captured", "output_capture_error", "output_flush", "output_clear", "output_pause", "output_resume", "output_playback_started", "output_playback_finished",
+  "source_capture", "source_captured", "source_capture_error", "source_clear", "source_drain_started", "source_drained", "track_source_link", "published_source_link",
+  "llm_authorized", "speech_created", "speech_done", "conversation_committed"] as const;
 /** Why a job ended its session; a closed set so logs and events stay bounded. */
 export const closeReasons = ["heartbeat", "room_disconnected", "session_closed", "session_error", "shutdown", "start_failed", "connection_timeout", "media_timeout", "publication_rejected", "media_cancelled"] as const;
 export type CloseReason = typeof closeReasons[number];
