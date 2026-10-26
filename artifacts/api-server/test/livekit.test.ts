@@ -120,6 +120,27 @@ async function database(t: any, run: (store: VoiceSessions, p: Principal[], pool
     } finally { await pool.end(); }
   });
 }
+
+test("PostgreSQL closed sessions reconcile stranded admitted operations conservatively and idempotently", { skip: !configured }, async t => {
+  await database(t, async (store, [p], pool) => {
+    const s = await store.create(p), claim = await store.claim(s.id, s.room, "fixture-worker");
+    const operation = randomUUID();
+    await store.admitOperation(s.id, claim.credential, operation, "tts", async () => ({ mode: "mock" }));
+    await store.close(s.id); await store.close(s.id); await store.reconcile();
+    const first = (await pool.query("select * from livekit_operations where id=$1", [operation])).rows[0];
+    assert.equal(first.state, "unknown");
+    assert.equal(first.details.reconciliationReason, "session_closed_without_terminal_usage");
+    await store.settleOperation(s.id, operation, "completed");
+    const settled = (await pool.query("select * from livekit_operations where id=$1", [operation])).rows[0];
+    await Promise.all([store.reconcile(), store.settleOperation(s.id, operation, "unknown"), store.settleOperation(s.id, operation, "completed")]);
+    const final = (await pool.query("select * from livekit_operations where id=$1", [operation])).rows[0];
+    assert.equal(final.state, "completed");
+    assert.deepEqual(final.completed_at, settled.completed_at, "duplicates do not settle twice");
+    assert.equal(final.details.reconciliationReason, undefined);
+    assert.deepEqual((await store.settlementSession(s.id, claim.credential)).id, s.id, "late usage remains authorized for settlement only");
+    await assert.rejects(store.validate(s.id, claim.credential));
+  });
+});
 test("PostgreSQL LiveKit upgrade, tenant isolation, preview limits and independent-connection atomic admission", { skip: !configured }, async t => {
   await database(t, async (store, [a, b], pool) => {
     const s = await store.create(a);
@@ -162,6 +183,33 @@ test("PostgreSQL LiveKit expired/replayed claims, suspended tenants, ownership m
     await store.reconcile();
     await pool.query("update tenants set status='active',owner_id=null where id=$1", [p.tenantId]);
     await assert.rejects(store.create(p));
+  });
+});
+
+test("PostgreSQL cleanup deletes resurrected closed rooms even after recorded deletion without touching active rooms", { skip: !configured }, async t => {
+  await database(t, async (store, [p], pool) => {
+    const closed = await store.create(p); await store.close(closed.id);
+    await pool.query("insert into livekit_operations(id,session_id,kind,state,completed_at) values($1,$2,'room_delete','completed',now())", [closed.id + ':room-delete', closed.id]);
+    const active = await store.create(p);
+    const deleted: string[] = []; let rejectDelete = false;
+    const app = express(); app.use(express.json());
+    app.post('/twirp/livekit.RoomService/ListRooms', (_req, res) => res.json({ rooms: [{ name: closed.room }, { name: active.room }, { name: 'unmanaged-room' }] }));
+    app.post('/twirp/livekit.RoomService/DeleteRoom', (req, res) => { deleted.push(req.body.room); if (rejectDelete) res.status(500).json({code:'internal',msg:'fixture failure'}); else res.json({}); });
+    const server = app.listen(0, '127.0.0.1'); await once(server, 'listening');
+    t.after(() => { server.closeAllConnections(); server.close(); });
+    const routes = createLivekitRoutes({ ...localEnv, LIVEKIT_URL: `http://127.0.0.1:${(server.address() as any).port}`, LIVEKIT_BROWSER_URL: 'ws://localhost', LIVEKIT_API_KEY: 'test-key', LIVEKIT_API_SECRET: 'a'.repeat(43) }, store);
+    await routes.reconcile();
+    assert.deepEqual(deleted, [closed.room]);
+    await routes.reconcile();
+    assert.deepEqual(deleted, [closed.room, closed.room], 'a completed operation cannot conceal another recreated room');
+    rejectDelete = true;
+    await routes.reconcile();
+    assert.equal((await pool.query("select state from livekit_operations where id=$1", [closed.id + ':room-delete'])).rows[0].state, 'pending', 'an upstream failure must reopen the cleanup receipt');
+    rejectDelete = false;
+    await routes.reconcile();
+    assert.equal((await pool.query("select state from livekit_operations where id=$1", [closed.id + ':room-delete'])).rows[0].state, 'completed', 'automatic retries settle the same cleanup receipt');
+    assert.equal((await store.get(active.id, p.tenantId)).state, 'pending');
+    assert.equal((await pool.query("select count(*) from livekit_operations where session_id=$1 and kind='room_delete'", [closed.id])).rows[0].count, '1');
   });
 });
 test("PostgreSQL LiveKit webhooks deduplicate, ignore forged participant metadata and finalize once", { skip: !configured }, async t => {

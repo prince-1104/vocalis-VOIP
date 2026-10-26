@@ -1,6 +1,700 @@
+diff --git a/dist/ipc/proc_pool.cjs b/dist/ipc/proc_pool.cjs
+--- a/dist/ipc/proc_pool.cjs
++++ b/dist/ipc/proc_pool.cjs
+@@ -71,8 +71,9 @@
+   }
+   async launchJob(info) {
+     let proc;
++    const signal = AbortSignal.any([this.controller.signal, AbortSignal.timeout(this.initializeTimeout)]);
+     if (this.procMutex) {
+-      const entry = await this.warmedProcQueue.get();
++      const entry = await this.warmedProcQueue.get({ signal: signal });
+       proc = entry.proc;
+       entry.unlock();
+     } else {
+@@ -92,7 +93,21 @@
+       await proc.initialize({ sessionEndTimeout: this.sessionEndTimeout });
+     }
+     info.launchedAt = Date.now();
+-    await proc.launchJob(info);
++    try {
++      if (!proc.isAlive) throw new Error('warmed process exited before assignment');
++      let onAbort;
++      try {
++        await Promise.race([proc.launchJob(info), new Promise((_, reject) => {
++          onAbort = () => reject(new Error('job process startup expired'));
++          signal.addEventListener('abort', onAbort, { once: true });
++          if (signal.aborted) onAbort();
++        })]);
++      } finally { if (onAbort) signal.removeEventListener('abort', onAbort); }
++    } catch (error) {
++      // Ambiguous IPC delivery never returns a single-use executor to the idle queue.
++      await proc.close();
++      throw error;
++    }
+   }
+   async procWatchTask(procUnlock) {
+     const proc = new import_job_proc_executor.JobProcExecutor({
+@@ -110,7 +125,10 @@
+       this.executors.push(proc);
+       const unlock = await this.initMutex.lock();
+       let initReleased = false;
+-      let procUnlockTransferred = false;
++      let slotReleased = false;
++      const releaseSlot = () => {
++        if (!slotReleased) { slotReleased = true; procUnlock(); }
++      };
+       try {
+         if (this.closed) {
+           return;
+@@ -118,8 +136,7 @@
+         await proc.start();
+         try {
+           await proc.initialize({ sessionEndTimeout: this.sessionEndTimeout });
+-          await this.warmedProcQueue.put({ proc, unlock: procUnlock });
+-          procUnlockTransferred = true;
++          await this.warmedProcQueue.put({ proc, unlock: releaseSlot });
+           unlock();
+           initReleased = true;
+         } catch {
+@@ -129,9 +146,10 @@
+         if (!initReleased) {
+           unlock();
+         }
+-        if (!procUnlockTransferred) {
+-          procUnlock();
+-        }
++        // Remove an idle process that exited before dispatch and restore pool capacity.
++        const queuedIndex = this.warmedProcQueue.items.findIndex(entry => entry.proc === proc);
++        if (queuedIndex !== -1) this.warmedProcQueue.items.splice(queuedIndex, 1);
++        releaseSlot();
+       }
+     } finally {
+       const procIndex = this.executors.indexOf(proc);
+@@ -155,7 +173,7 @@
+         const procUnlock = await this.procMutex.lock();
+         const task = this.procWatchTask(procUnlock);
+         this.tasks.push(task);
+-        task.finally(() => {
++        void task.catch(() => {}).finally(() => {
+           const taskIndex = this.tasks.indexOf(task);
+           if (taskIndex !== -1) {
+             this.tasks.splice(taskIndex, 1);
+diff --git a/dist/ipc/proc_pool.js b/dist/ipc/proc_pool.js
+--- a/dist/ipc/proc_pool.js
++++ b/dist/ipc/proc_pool.js
+@@ -48,8 +48,9 @@
+   }
+   async launchJob(info) {
+     let proc;
++    const signal = AbortSignal.any([this.controller.signal, AbortSignal.timeout(this.initializeTimeout)]);
+     if (this.procMutex) {
+-      const entry = await this.warmedProcQueue.get();
++      const entry = await this.warmedProcQueue.get({ signal: signal });
+       proc = entry.proc;
+       entry.unlock();
+     } else {
+@@ -69,7 +70,21 @@
+       await proc.initialize({ sessionEndTimeout: this.sessionEndTimeout });
+     }
+     info.launchedAt = Date.now();
+-    await proc.launchJob(info);
++    try {
++      if (!proc.isAlive) throw new Error('warmed process exited before assignment');
++      let onAbort;
++      try {
++        await Promise.race([proc.launchJob(info), new Promise((_, reject) => {
++          onAbort = () => reject(new Error('job process startup expired'));
++          signal.addEventListener('abort', onAbort, { once: true });
++          if (signal.aborted) onAbort();
++        })]);
++      } finally { if (onAbort) signal.removeEventListener('abort', onAbort); }
++    } catch (error) {
++      // Ambiguous IPC delivery never returns a single-use executor to the idle queue.
++      await proc.close();
++      throw error;
++    }
+   }
+   async procWatchTask(procUnlock) {
+     const proc = new JobProcExecutor({
+@@ -87,7 +102,10 @@
+       this.executors.push(proc);
+       const unlock = await this.initMutex.lock();
+       let initReleased = false;
+-      let procUnlockTransferred = false;
++      let slotReleased = false;
++      const releaseSlot = () => {
++        if (!slotReleased) { slotReleased = true; procUnlock(); }
++      };
+       try {
+         if (this.closed) {
+           return;
+@@ -95,8 +113,7 @@
+         await proc.start();
+         try {
+           await proc.initialize({ sessionEndTimeout: this.sessionEndTimeout });
+-          await this.warmedProcQueue.put({ proc, unlock: procUnlock });
+-          procUnlockTransferred = true;
++          await this.warmedProcQueue.put({ proc, unlock: releaseSlot });
+           unlock();
+           initReleased = true;
+         } catch {
+@@ -106,9 +123,10 @@
+         if (!initReleased) {
+           unlock();
+         }
+-        if (!procUnlockTransferred) {
+-          procUnlock();
+-        }
++        // Remove an idle process that exited before dispatch and restore pool capacity.
++        const queuedIndex = this.warmedProcQueue.items.findIndex(entry => entry.proc === proc);
++        if (queuedIndex !== -1) this.warmedProcQueue.items.splice(queuedIndex, 1);
++        releaseSlot();
+       }
+     } finally {
+       const procIndex = this.executors.indexOf(proc);
+@@ -132,7 +150,7 @@
+         const procUnlock = await this.procMutex.lock();
+         const task = this.procWatchTask(procUnlock);
+         this.tasks.push(task);
+-        task.finally(() => {
++        void task.catch(() => {}).finally(() => {
+           const taskIndex = this.tasks.indexOf(task);
+           if (taskIndex !== -1) {
+             this.tasks.splice(taskIndex, 1);
+diff --git a/dist/job.cjs b/dist/job.cjs
+--- a/dist/job.cjs
++++ b/dist/job.cjs
+@@ -637,7 +637,7 @@
+   /** Accepts the job, launching it on an idle child process. */
+   async accept(name = "", identity = "", metadata = "", attributes) {
+     if (identity === "") identity = "agent-" + this.id;
+-    this.#onAccept({ name, identity, metadata, attributes });
++    return this.#onAccept({ name, identity, metadata, attributes });
+   }
+ }
+ // Annotate the CommonJS export names for ESM import in node:
+diff --git a/dist/job.js b/dist/job.js
+--- a/dist/job.js
++++ b/dist/job.js
+@@ -612,7 +612,7 @@
+   /** Accepts the job, launching it on an idle child process. */
+   async accept(name = "", identity = "", metadata = "", attributes) {
+     if (identity === "") identity = "agent-" + this.id;
+-    this.#onAccept({ name, identity, metadata, attributes });
++    return this.#onAccept({ name, identity, metadata, attributes });
+   }
+ }
+ export {
+diff --git a/dist/voice/agent_activity.cjs b/dist/voice/agent_activity.cjs
+--- a/dist/voice/agent_activity.cjs
++++ b/dist/voice/agent_activity.cjs
+@@ -1491,6 +1491,10 @@
+       this.userSilenceEvent.clear();
+     } else {
+       this.userSilenceEvent.set();
++      const paused = this.pausedSpeech;
++      if (!ev.speaking && paused && this._currentSpeech === paused.handle && !paused.handle.interrupted && !paused.handle.done() && this.agentSession._activity === this && this.pauseEnabled() && this.falseInterruptionTimer === void 0 && !this.falseInterruptionPending) {
++        this.startFalseInterruptionTimer(paused.timeout);
++      }
+     }
+   }
+   onBackchannelConfirmed() {
+@@ -4268,26 +4272,26 @@
+   async cancelSpeechPause(options) {
+     const { interrupt = true } = options ?? {};
+     if (this.cancelSpeechPauseTask) {
+-      try {
+-        await this.cancelSpeechPauseTask;
+-      } catch {
+-        this.logger.debug("previous cancelSpeechPause task failed, ignoring");
+-      }
+-      this.cancelSpeechPauseTask = void 0;
++      try { await this.cancelSpeechPauseTask; }
++      catch { this.logger.debug('previous cancelSpeechPause task failed, ignoring'); }
++      this.cancelSpeechPauseTask = undefined;
+     }
+     this.cancelFalseInterruptionTimer();
+-    if (!this.pausedSpeech) {
+-      return;
+-    }
+-    if (interrupt && !this.pausedSpeech.handle.interrupted && this.pausedSpeech.handle.allowInterruptions) {
+-      this.pausedSpeech.handle.interrupt(false, "user_turn");
+-      if (this.pausedSpeech.handle._hasGenerations) {
+-        await this.pausedSpeech.handle.waitIfNotInterrupted([
+-          this.pausedSpeech.handle._waitForGeneration()
+-        ]);
+-      }
+-    }
+-    this.pausedSpeech = void 0;
++    const pausedSpeech = this.pausedSpeech;
++    if (!pausedSpeech) return;
++    const shouldInterrupt = interrupt && !pausedSpeech.handle.interrupted && pausedSpeech.handle.allowInterruptions;
++    if (shouldInterrupt) pausedSpeech.handle.interrupt(false, 'user_turn');
++    // Invalidate held capture synchronously. Resuming before the forwarding task observes
++    // handle.interrupt() otherwise leaks an obsolete frame into the native source.
++    if (interrupt && pausedSpeech.handle.interrupted && this._currentSpeech === pausedSpeech.handle) {
++      this.agentSession.output.audio?.clearBuffer();
++    }
++    if (shouldInterrupt && pausedSpeech.handle._hasGenerations) {
++      await pausedSpeech.handle.waitIfNotInterrupted([pausedSpeech.handle._waitForGeneration()]);
++    }
++    // A newer pause owns its own gate; an old cancellation must not release it.
++    if (this.pausedSpeech !== pausedSpeech) return;
++    this.pausedSpeech = undefined;
+     const interruptionOptions = this.agentSession.sessionOptions.turnHandling.interruption;
+     if (interruptionOptions.resumeFalseInterruption && this.agentSession.output.audio) {
+       this.agentSession.output.audio.resume();
+diff --git a/dist/voice/agent_activity.js b/dist/voice/agent_activity.js
+--- a/dist/voice/agent_activity.js
++++ b/dist/voice/agent_activity.js
+@@ -1544,6 +1544,10 @@
+       this.userSilenceEvent.clear();
+     } else {
+       this.userSilenceEvent.set();
++      const paused = this.pausedSpeech;
++      if (!ev.speaking && paused && this._currentSpeech === paused.handle && !paused.handle.interrupted && !paused.handle.done() && this.agentSession._activity === this && this.pauseEnabled() && this.falseInterruptionTimer === void 0 && !this.falseInterruptionPending) {
++        this.startFalseInterruptionTimer(paused.timeout);
++      }
+     }
+   }
+   onBackchannelConfirmed() {
+@@ -4321,26 +4325,26 @@
+   async cancelSpeechPause(options) {
+     const { interrupt = true } = options ?? {};
+     if (this.cancelSpeechPauseTask) {
+-      try {
+-        await this.cancelSpeechPauseTask;
+-      } catch {
+-        this.logger.debug("previous cancelSpeechPause task failed, ignoring");
+-      }
+-      this.cancelSpeechPauseTask = void 0;
++      try { await this.cancelSpeechPauseTask; }
++      catch { this.logger.debug('previous cancelSpeechPause task failed, ignoring'); }
++      this.cancelSpeechPauseTask = undefined;
+     }
+     this.cancelFalseInterruptionTimer();
+-    if (!this.pausedSpeech) {
+-      return;
+-    }
+-    if (interrupt && !this.pausedSpeech.handle.interrupted && this.pausedSpeech.handle.allowInterruptions) {
+-      this.pausedSpeech.handle.interrupt(false, "user_turn");
+-      if (this.pausedSpeech.handle._hasGenerations) {
+-        await this.pausedSpeech.handle.waitIfNotInterrupted([
+-          this.pausedSpeech.handle._waitForGeneration()
+-        ]);
+-      }
+-    }
+-    this.pausedSpeech = void 0;
++    const pausedSpeech = this.pausedSpeech;
++    if (!pausedSpeech) return;
++    const shouldInterrupt = interrupt && !pausedSpeech.handle.interrupted && pausedSpeech.handle.allowInterruptions;
++    if (shouldInterrupt) pausedSpeech.handle.interrupt(false, 'user_turn');
++    // Invalidate held capture synchronously. Resuming before the forwarding task observes
++    // handle.interrupt() otherwise leaks an obsolete frame into the native source.
++    if (interrupt && pausedSpeech.handle.interrupted && this._currentSpeech === pausedSpeech.handle) {
++      this.agentSession.output.audio?.clearBuffer();
++    }
++    if (shouldInterrupt && pausedSpeech.handle._hasGenerations) {
++      await pausedSpeech.handle.waitIfNotInterrupted([pausedSpeech.handle._waitForGeneration()]);
++    }
++    // A newer pause owns its own gate; an old cancellation must not release it.
++    if (this.pausedSpeech !== pausedSpeech) return;
++    this.pausedSpeech = undefined;
+     const interruptionOptions = this.agentSession.sessionOptions.turnHandling.interruption;
+     if (interruptionOptions.resumeFalseInterruption && this.agentSession.output.audio) {
+       this.agentSession.output.audio.resume();
+diff --git a/dist/voice/room_io/_output.cjs b/dist/voice/room_io/_output.cjs
+--- a/dist/voice/room_io/_output.cjs
++++ b/dist/voice/room_io/_output.cjs
+@@ -391,6 +391,9 @@
+   sourceDiscardedDuration = 0;
+   interruptionGeneration = 0;
+   forwardingCount = 0;
++  pendingQueueFrames = [];
++  _dialogReplayFrames = 0;
++  _dialogReplayMs = 0;
+   /** Resolved only while no capture is held or being submitted to AudioSource. */
+   forwardingIdleFuture = new import_utils.Future();
+   startedFuture = new import_utils.Future();
+@@ -487,20 +490,25 @@
+       if (interruptionGeneration !== this.interruptionGeneration || interruptionFuture.done) {
+         return;
+       }
+-      while (!this.playbackEnabledFuture.done) {
+-        const queuedDuration = this.audioSource.queuedDuration;
+-        this.sourceDiscardedDuration += queuedDuration / 1e3;
+-        this.reportRun({
+-          offset: this.sourcePushedDuration * 1e3 - queuedDuration,
+-          endedAt: Date.now(),
+-          resumesAt: this.sourcePushedDuration * 1e3
+-        });
+-        this.audioSource.clearQueue();
+-        await Promise.race([this.playbackEnabledFuture.await, interruptionFuture.await]);
+-        if (interruptionGeneration !== this.interruptionGeneration || interruptionFuture.done) {
+-          return;
++      const replay = [];
++      while (!this.playbackEnabledFuture.done || replay.length > 0) {
++        if (!this.playbackEnabledFuture.done) {
++          const queuedDuration = this.audioSource.queuedDuration;
++          replay.unshift(...this.queuedFrames(queuedDuration));
++          this.sourceDiscardedDuration += queuedDuration / 1000;
++          this.reportRun({ offset: this.sourcePushedDuration * 1000 - queuedDuration,
++            endedAt: Date.now(), resumesAt: this.sourcePushedDuration * 1000 });
++          this.audioSource.clearQueue();
++          this.pendingQueueFrames = [];
++          await Promise.race([this.playbackEnabledFuture.await, interruptionFuture.await]);
++          if (interruptionGeneration !== this.interruptionGeneration || interruptionFuture.done) return;
+         }
+-      }
++        if (replay.length) {
++          await this.captureSource(replay.shift(), true);
++          if (interruptionGeneration !== this.interruptionGeneration || interruptionFuture.done) return;
++        }
++      }
++
+       if (!this.firstFrameEmitted) {
+         this.firstFrameEmitted = true;
+         this.onPlaybackStarted(Date.now());
+@@ -508,9 +516,7 @@
+       if (this.dryAt !== void 0 && Date.now() >= this.dryAt) {
+         this.reportRun({ offset: this.sourcePushedDuration * 1e3, endedAt: this.dryAt });
+       }
+-      this.sourcePushedDuration += frameDuration;
+-      await this.audioSource.captureFrame(frame);
+-      this.dryAt = Date.now() + this.audioSource.queuedDuration;
++      await this.captureSource(frame);
+     } finally {
+       this.forwardingCount--;
+       if (this.forwardingCount === 0) {
+@@ -518,6 +524,47 @@
+       }
+     }
+   }
++
++  queuedFrames(durationMs) {
++    if (durationMs <= 0) return [];
++    const history = this.pendingQueueFrames;
++    if (!history.length) throw new Error("Audio queue history unavailable for resume");
++    let samples = Math.ceil(durationMs * history[history.length - 1].sampleRate / 1e3);
++    const retained = [];
++    for (let i = history.length - 1; i >= 0 && samples > 0; i--) {
++      const frame = history[i];
++      const count = Math.min(samples, frame.samplesPerChannel);
++      retained.unshift(count === frame.samplesPerChannel ? frame : new import_rtc_node.AudioFrame(
++        frame.data.slice((frame.samplesPerChannel - count) * frame.channels),
++        frame.sampleRate,
++        frame.channels,
++        count
++      ));
++      samples -= count;
++    }
++    if (samples > 0) throw new Error("Audio queue history incomplete for resume");
++    return retained;
++  }
++  async captureSource(frame, replayed = false) {
++    const duration = frame.samplesPerChannel / frame.sampleRate;
++    this.sourcePushedDuration += duration;
++    await this.audioSource.captureFrame(frame);
++    if (replayed) {
++      this._dialogReplayFrames++;
++      this._dialogReplayMs += duration * 1e3;
++    }
++    const queued = Math.ceil(this.audioSource.queuedDuration * frame.sampleRate / 1e3);
++    if (queued <= 0) this.pendingQueueFrames = [];
++    else {
++      this.pendingQueueFrames.push(new import_rtc_node.AudioFrame(frame.data.slice(), frame.sampleRate, frame.channels, frame.samplesPerChannel));
++      let retained = this.pendingQueueFrames.reduce((n, f) => n + f.samplesPerChannel, 0);
++      while (this.pendingQueueFrames.length > 1 && retained - this.pendingQueueFrames[0].samplesPerChannel >= queued) {
++        retained -= this.pendingQueueFrames.shift().samplesPerChannel;
++      }
++    }
++    this.dryAt = Date.now() + this.audioSource.queuedDuration;
++  }
++
+   async waitForPlayoutTask() {
+     const interruptionFuture = this.interruptedFuture;
+     const waitForForwardingAndPlayout = async () => {
+@@ -535,9 +582,12 @@
+         endedAt: Date.now()
+       });
+       this.audioSource.clearQueue();
++      await this.forwardingIdleFuture.await;
++      this.audioSource.clearQueue();
+     } else {
+       this.reportRun({ offset: this.sourcePushedDuration * 1e3, endedAt: Date.now() });
+     }
++    this.pendingQueueFrames = [];
+     this.runOffset = 0;
+     this.pushedDuration = 0;
+     this.sourcePushedDuration = 0;
+diff --git a/dist/voice/room_io/_output.js b/dist/voice/room_io/_output.js
+--- a/dist/voice/room_io/_output.js
++++ b/dist/voice/room_io/_output.js
+@@ -1,5 +1,6 @@
+ import { AgentSession as pb } from "@livekit/protocol";
+ import {
++  AudioFrame,
+   AudioSource,
+   LocalAudioTrack,
+   ParticipantKind,
+@@ -384,6 +385,9 @@
+   sourceDiscardedDuration = 0;
+   interruptionGeneration = 0;
+   forwardingCount = 0;
++  pendingQueueFrames = [];
++  _dialogReplayFrames = 0;
++  _dialogReplayMs = 0;
+   /** Resolved only while no capture is held or being submitted to AudioSource. */
+   forwardingIdleFuture = new Future();
+   startedFuture = new Future();
+@@ -480,20 +484,25 @@
+       if (interruptionGeneration !== this.interruptionGeneration || interruptionFuture.done) {
+         return;
+       }
+-      while (!this.playbackEnabledFuture.done) {
+-        const queuedDuration = this.audioSource.queuedDuration;
+-        this.sourceDiscardedDuration += queuedDuration / 1e3;
+-        this.reportRun({
+-          offset: this.sourcePushedDuration * 1e3 - queuedDuration,
+-          endedAt: Date.now(),
+-          resumesAt: this.sourcePushedDuration * 1e3
+-        });
+-        this.audioSource.clearQueue();
+-        await Promise.race([this.playbackEnabledFuture.await, interruptionFuture.await]);
+-        if (interruptionGeneration !== this.interruptionGeneration || interruptionFuture.done) {
+-          return;
++      const replay = [];
++      while (!this.playbackEnabledFuture.done || replay.length > 0) {
++        if (!this.playbackEnabledFuture.done) {
++          const queuedDuration = this.audioSource.queuedDuration;
++          replay.unshift(...this.queuedFrames(queuedDuration));
++          this.sourceDiscardedDuration += queuedDuration / 1000;
++          this.reportRun({ offset: this.sourcePushedDuration * 1000 - queuedDuration,
++            endedAt: Date.now(), resumesAt: this.sourcePushedDuration * 1000 });
++          this.audioSource.clearQueue();
++          this.pendingQueueFrames = [];
++          await Promise.race([this.playbackEnabledFuture.await, interruptionFuture.await]);
++          if (interruptionGeneration !== this.interruptionGeneration || interruptionFuture.done) return;
+         }
+-      }
++        if (replay.length) {
++          await this.captureSource(replay.shift(), true);
++          if (interruptionGeneration !== this.interruptionGeneration || interruptionFuture.done) return;
++        }
++      }
++
+       if (!this.firstFrameEmitted) {
+         this.firstFrameEmitted = true;
+         this.onPlaybackStarted(Date.now());
+@@ -501,9 +510,7 @@
+       if (this.dryAt !== void 0 && Date.now() >= this.dryAt) {
+         this.reportRun({ offset: this.sourcePushedDuration * 1e3, endedAt: this.dryAt });
+       }
+-      this.sourcePushedDuration += frameDuration;
+-      await this.audioSource.captureFrame(frame);
+-      this.dryAt = Date.now() + this.audioSource.queuedDuration;
++      await this.captureSource(frame);
+     } finally {
+       this.forwardingCount--;
+       if (this.forwardingCount === 0) {
+@@ -511,6 +518,47 @@
+       }
+     }
+   }
++
++  queuedFrames(durationMs) {
++    if (durationMs <= 0) return [];
++    const history = this.pendingQueueFrames;
++    if (!history.length) throw new Error("Audio queue history unavailable for resume");
++    let samples = Math.ceil(durationMs * history[history.length - 1].sampleRate / 1e3);
++    const retained = [];
++    for (let i = history.length - 1; i >= 0 && samples > 0; i--) {
++      const frame = history[i];
++      const count = Math.min(samples, frame.samplesPerChannel);
++      retained.unshift(count === frame.samplesPerChannel ? frame : new AudioFrame(
++        frame.data.slice((frame.samplesPerChannel - count) * frame.channels),
++        frame.sampleRate,
++        frame.channels,
++        count
++      ));
++      samples -= count;
++    }
++    if (samples > 0) throw new Error("Audio queue history incomplete for resume");
++    return retained;
++  }
++  async captureSource(frame, replayed = false) {
++    const duration = frame.samplesPerChannel / frame.sampleRate;
++    this.sourcePushedDuration += duration;
++    await this.audioSource.captureFrame(frame);
++    if (replayed) {
++      this._dialogReplayFrames++;
++      this._dialogReplayMs += duration * 1e3;
++    }
++    const queued = Math.ceil(this.audioSource.queuedDuration * frame.sampleRate / 1e3);
++    if (queued <= 0) this.pendingQueueFrames = [];
++    else {
++      this.pendingQueueFrames.push(new AudioFrame(frame.data.slice(), frame.sampleRate, frame.channels, frame.samplesPerChannel));
++      let retained = this.pendingQueueFrames.reduce((n, f) => n + f.samplesPerChannel, 0);
++      while (this.pendingQueueFrames.length > 1 && retained - this.pendingQueueFrames[0].samplesPerChannel >= queued) {
++        retained -= this.pendingQueueFrames.shift().samplesPerChannel;
++      }
++    }
++    this.dryAt = Date.now() + this.audioSource.queuedDuration;
++  }
++
+   async waitForPlayoutTask() {
+     const interruptionFuture = this.interruptedFuture;
+     const waitForForwardingAndPlayout = async () => {
+@@ -528,9 +576,12 @@
+         endedAt: Date.now()
+       });
+       this.audioSource.clearQueue();
++      await this.forwardingIdleFuture.await;
++      this.audioSource.clearQueue();
+     } else {
+       this.reportRun({ offset: this.sourcePushedDuration * 1e3, endedAt: Date.now() });
+     }
++    this.pendingQueueFrames = [];
+     this.runOffset = 0;
+     this.pushedDuration = 0;
+     this.sourcePushedDuration = 0;
+diff --git a/dist/worker.cjs b/dist/worker.cjs
+--- a/dist/worker.cjs
++++ b/dist/worker.cjs
+@@ -690,6 +690,9 @@
+       var _a2;
+       answered = true;
+       const acceptedAt = Date.now();
++      const pending = new PendingAssignment();
++      this.#pending[req.id] = pending;
++      try {
+       this.event.emit(
+         "worker_msg",
+         new import_protocol.WorkerMessage({
+@@ -712,15 +715,21 @@
+           }
+         })
+       );
+-      this.#pending[req.id] = new PendingAssignment();
++      } catch (error) {
++        delete this.#pending[req.id];
++        throw error;
++      }
+       const timer = setTimeout(() => {
+-        this.#logger.child({ req }).warn(`assignment for job ${req.id} timed out`);
+-        return;
++        if (this.#pending[req.id] === pending) delete this.#pending[req.id];
++        pending.resolve(undefined);
+       }, ASSIGNMENT_TIMEOUT);
+-      const asgn = await ((_a2 = this.#pending[req.id]) == null ? void 0 : _a2.promise.then(async (asgn2) => {
++      let asgn;
++      try { asgn = await pending.promise; }
++      finally {
+         clearTimeout(timer);
+-        return asgn2;
+-      }));
++        if (this.#pending[req.id] === pending) delete this.#pending[req.id];
++      }
++      if (!asgn) throw new Error('job assignment timed out');
+       if (asgn) {
+         try {
+           await this.#procPool.launchJob({
+@@ -737,6 +746,7 @@
+           });
+         } catch (e) {
+           this.#logger.child({ requestId: req.id }).error(e, "error launching job");
++          throw e;
+         }
+       } else {
+         this.#logger.child({ requestId: req.id }).warn("pending assignment not found");
+diff --git a/dist/worker.js b/dist/worker.js
+--- a/dist/worker.js
++++ b/dist/worker.js
+@@ -667,6 +667,9 @@
+       var _a2;
+       answered = true;
+       const acceptedAt = Date.now();
++      const pending = new PendingAssignment();
++      this.#pending[req.id] = pending;
++      try {
+       this.event.emit(
+         "worker_msg",
+         new WorkerMessage({
+@@ -689,15 +692,21 @@
+           }
+         })
+       );
+-      this.#pending[req.id] = new PendingAssignment();
++      } catch (error) {
++        delete this.#pending[req.id];
++        throw error;
++      }
+       const timer = setTimeout(() => {
+-        this.#logger.child({ req }).warn(`assignment for job ${req.id} timed out`);
+-        return;
++        if (this.#pending[req.id] === pending) delete this.#pending[req.id];
++        pending.resolve(undefined);
+       }, ASSIGNMENT_TIMEOUT);
+-      const asgn = await ((_a2 = this.#pending[req.id]) == null ? void 0 : _a2.promise.then(async (asgn2) => {
++      let asgn;
++      try { asgn = await pending.promise; }
++      finally {
+         clearTimeout(timer);
+-        return asgn2;
+-      }));
++        if (this.#pending[req.id] === pending) delete this.#pending[req.id];
++      }
++      if (!asgn) throw new Error('job assignment timed out');
+       if (asgn) {
+         try {
+           await this.#procPool.launchJob({
+@@ -714,6 +723,7 @@
+           });
+         } catch (e) {
+           this.#logger.child({ requestId: req.id }).error(e, "error launching job");
++          throw e;
+         }
+       } else {
+         this.#logger.child({ requestId: req.id }).warn("pending assignment not found");
+diff --git a/src/ipc/proc_pool.ts b/src/ipc/proc_pool.ts
 --- a/src/ipc/proc_pool.ts
 +++ b/src/ipc/proc_pool.ts
-@@ -114,7 +114,10 @@
+@@ -70,8 +70,9 @@
+ 
+   async launchJob(info: RunningJobInfo): Promise<Throws<void, Error>> {
+     let proc: JobExecutor;
++    const signal = AbortSignal.any([this.controller.signal, AbortSignal.timeout(this.initializeTimeout)]);
+     if (this.procMutex) {
+-      const entry = await this.warmedProcQueue.get();
++      const entry = await this.warmedProcQueue.get({ signal: signal });
+       proc = entry.proc;
+       // Release exactly the slot that produced this warmed process.
+       entry.unlock();
+@@ -93,7 +94,21 @@
+     }
+     // dispatch timeline: a warm process is now handling this job
+     info.launchedAt = Date.now();
+-    await proc.launchJob(info);
++    try {
++      if (!proc.isAlive) throw new Error('warmed process exited before assignment');
++      let onAbort: (() => void) | undefined;
++      try {
++        await Promise.race([proc.launchJob(info), new Promise<never>((_, reject) => {
++          onAbort = () => reject(new Error('job process startup expired'));
++          signal.addEventListener('abort', onAbort, { once: true });
++          if (signal.aborted) onAbort();
++        })]);
++      } finally { if (onAbort) signal.removeEventListener('abort', onAbort); }
++    } catch (error) {
++      // Ambiguous IPC delivery never returns a single-use executor to the idle queue.
++      await proc.close();
++      throw error;
++    }
+   }
+ 
+   async procWatchTask(procUnlock: () => void) {
+@@ -114,7 +129,10 @@
  
        const unlock = await this.initMutex.lock();
        let initReleased = false;
@@ -12,7 +706,7 @@
        try {
          if (this.closed) {
            return;
-@@ -123,8 +126,7 @@
+@@ -123,8 +141,7 @@
          await proc.start();
          try {
            await proc.initialize({ sessionEndTimeout: this.sessionEndTimeout });
@@ -22,7 +716,7 @@
            // Release initMutex after enqueue — holding it through join() serialises
            // the pool to concurrency 1 since child procs are one-shot.
            unlock();
-@@ -138,9 +140,10 @@
+@@ -138,9 +155,10 @@
          if (!initReleased) {
            unlock();
          }
@@ -36,79 +730,297 @@
        }
      } finally {
        const procIndex = this.executors.indexOf(proc);
---- a/dist/ipc/proc_pool.js
-+++ b/dist/ipc/proc_pool.js
-@@ -87,7 +87,10 @@
-       this.executors.push(proc);
-       const unlock = await this.initMutex.lock();
-       let initReleased = false;
--      let procUnlockTransferred = false;
-+      let slotReleased = false;
-+      const releaseSlot = () => {
-+        if (!slotReleased) { slotReleased = true; procUnlock(); }
-+      };
-       try {
-         if (this.closed) {
-           return;
-@@ -95,8 +98,7 @@
-         await proc.start();
+@@ -167,7 +185,7 @@
+         const procUnlock = await this.procMutex.lock();
+         const task = this.procWatchTask(procUnlock);
+         this.tasks.push(task);
+-        task.finally(() => {
++        void task.catch(() => {}).finally(() => {
+           const taskIndex = this.tasks.indexOf(task);
+           if (taskIndex !== -1) {
+             this.tasks.splice(taskIndex, 1);
+diff --git a/src/job.ts b/src/job.ts
+--- a/src/job.ts
++++ b/src/job.ts
+@@ -845,6 +845,6 @@
+   async accept(name = '', identity = '', metadata = '', attributes?: { [key: string]: string }) {
+     if (identity === '') identity = 'agent-' + this.id;
+ 
+-    this.#onAccept({ name, identity, metadata, attributes });
+-  }
+-}
++    return this.#onAccept({ name, identity, metadata, attributes });
++  }
++}
+diff --git a/src/voice/agent_activity.ts b/src/voice/agent_activity.ts
+--- a/src/voice/agent_activity.ts
++++ b/src/voice/agent_activity.ts
+@@ -2202,6 +2202,15 @@
+       this.userSilenceEvent.clear();
+     } else {
+       this.userSilenceEvent.set();
++      // STT EOT can flush a lagging VAD without a VAD END_OF_SPEECH.
++      // A later silent inference must arm the held speech's normal resume path.
++      const paused = this.pausedSpeech;
++      if (!ev.speaking && paused && this._currentSpeech === paused.handle &&
++          !paused.handle.interrupted && !paused.handle.done() &&
++          this.agentSession._activity === this && this.pauseEnabled() &&
++          this.falseInterruptionTimer === undefined && !this.falseInterruptionPending) {
++        this.startFalseInterruptionTimer(paused.timeout);
++      }
+     }
+   }
+ 
+@@ -6004,42 +6013,27 @@
+    */
+   private async cancelSpeechPause(options?: { interrupt?: boolean }): Promise<void> {
+     const { interrupt = true } = options ?? {};
+-
+-    // await any previously-started cancel task to avoid races
+     if (this.cancelSpeechPauseTask) {
+-      try {
+-        await this.cancelSpeechPauseTask;
+-      } catch {
+-        this.logger.debug('previous cancelSpeechPause task failed, ignoring');
+-      }
++      try { await this.cancelSpeechPauseTask; }
++      catch { this.logger.debug('previous cancelSpeechPause task failed, ignoring'); }
+       this.cancelSpeechPauseTask = undefined;
+     }
+-
+     this.cancelFalseInterruptionTimer();
+-
+-    if (!this.pausedSpeech) {
+-      return;
+-    }
+-
+-    if (
+-      interrupt &&
+-      !this.pausedSpeech.handle.interrupted &&
+-      this.pausedSpeech.handle.allowInterruptions
+-    ) {
+-      // a final transcript or a committed turn ended the pause
+-      this.pausedSpeech.handle.interrupt(false, 'user_turn');
+-      // ensure the generation is done — but only if a generation
+-      // was actually started. Must be raced against interrupt: an interrupted
+-      // paused speech may never mark its generation done, and an un-raced
+-      // await here wedges every subsequent user turn (silence loop, #1124)
+-      if (this.pausedSpeech.handle._hasGenerations) {
+-        await this.pausedSpeech.handle.waitIfNotInterrupted([
+-          this.pausedSpeech.handle._waitForGeneration(),
+-        ]);
+-      }
+-    }
++    const pausedSpeech = this.pausedSpeech;
++    if (!pausedSpeech) return;
++    const shouldInterrupt = interrupt && !pausedSpeech.handle.interrupted && pausedSpeech.handle.allowInterruptions;
++    if (shouldInterrupt) pausedSpeech.handle.interrupt(false, 'user_turn');
++    // Invalidate held capture synchronously. Resuming before the forwarding task observes
++    // handle.interrupt() otherwise leaks an obsolete frame into the native source.
++    if (interrupt && pausedSpeech.handle.interrupted && this._currentSpeech === pausedSpeech.handle) {
++      this.agentSession.output.audio?.clearBuffer();
++    }
++    if (shouldInterrupt && pausedSpeech.handle._hasGenerations) {
++      await pausedSpeech.handle.waitIfNotInterrupted([pausedSpeech.handle._waitForGeneration()]);
++    }
++    // A newer pause owns its own gate; an old cancellation must not release it.
++    if (this.pausedSpeech !== pausedSpeech) return;
+     this.pausedSpeech = undefined;
+-
+     const interruptionOptions = this.agentSession.sessionOptions.turnHandling.interruption;
+     if (interruptionOptions.resumeFalseInterruption && this.agentSession.output.audio) {
+       this.agentSession.output.audio.resume();
+diff --git a/src/voice/room_io/_output.ts b/src/voice/room_io/_output.ts
+--- a/src/voice/room_io/_output.ts
++++ b/src/voice/room_io/_output.ts
+@@ -4,7 +4,7 @@
+ import { AgentSession as pb } from '@livekit/protocol';
+ import type { RemoteParticipant } from '@livekit/rtc-node';
+ import {
+-  type AudioFrame,
++  AudioFrame,
+   AudioSource,
+   LocalAudioTrack,
+   type LocalTrackPublication,
+@@ -574,6 +574,9 @@
+   private sourceDiscardedDuration: number = 0;
+   private interruptionGeneration: number = 0;
+   private forwardingCount: number = 0;
++  private pendingQueueFrames: AudioFrame[] = [];
++  _dialogReplayFrames = 0;
++  _dialogReplayMs = 0;
+   /** Resolved only while no capture is held or being submitted to AudioSource. */
+   private forwardingIdleFuture: Future<void> = new Future();
+   private startedFuture: Future<void> = new Future();
+@@ -682,19 +685,22 @@
+       if (interruptionGeneration !== this.interruptionGeneration || interruptionFuture.done) {
+         return;
+       }
+-      while (!this.playbackEnabledFuture.done) {
+-        const queuedDuration = this.audioSource.queuedDuration;
+-        this.sourceDiscardedDuration += queuedDuration / 1000;
+-        // the dropped queue never plays, so the next run resumes past it
+-        this.reportRun({
+-          offset: this.sourcePushedDuration * 1000 - queuedDuration,
+-          endedAt: Date.now(),
+-          resumesAt: this.sourcePushedDuration * 1000,
+-        });
+-        this.audioSource.clearQueue();
+-        await Promise.race([this.playbackEnabledFuture.await, interruptionFuture.await]);
+-        if (interruptionGeneration !== this.interruptionGeneration || interruptionFuture.done) {
+-          return;
++      const replay: AudioFrame[] = [];
++      while (!this.playbackEnabledFuture.done || replay.length > 0) {
++        if (!this.playbackEnabledFuture.done) {
++          const queuedDuration = this.audioSource.queuedDuration;
++          replay.unshift(...this.queuedFrames(queuedDuration));
++          this.sourceDiscardedDuration += queuedDuration / 1000;
++          this.reportRun({ offset: this.sourcePushedDuration * 1000 - queuedDuration,
++            endedAt: Date.now(), resumesAt: this.sourcePushedDuration * 1000 });
++          this.audioSource.clearQueue();
++          this.pendingQueueFrames = [];
++          await Promise.race([this.playbackEnabledFuture.await, interruptionFuture.await]);
++          if (interruptionGeneration !== this.interruptionGeneration || interruptionFuture.done) return;
++        }
++        if (replay.length) {
++          await this.captureSource(replay.shift()!, true);
++          if (interruptionGeneration !== this.interruptionGeneration || interruptionFuture.done) return;
+         }
+       }
+ 
+@@ -708,15 +714,50 @@
+         this.reportRun({ offset: this.sourcePushedDuration * 1000, endedAt: this.dryAt });
+       }
+ 
+-      this.sourcePushedDuration += frameDuration;
+-      await this.audioSource.captureFrame(frame);
+-      this.dryAt = Date.now() + this.audioSource.queuedDuration;
++      await this.captureSource(frame);
+     } finally {
+       this.forwardingCount--;
+       if (this.forwardingCount === 0) {
+         this.forwardingIdleFuture.resolve();
+       }
+     }
++  }
++
++
++  private queuedFrames(durationMs: number): AudioFrame[] {
++    if (durationMs <= 0) return [];
++    const history = this.pendingQueueFrames;
++    if (!history.length) throw new Error('Audio queue history unavailable for resume');
++    let samples = Math.ceil(durationMs * history[history.length - 1]!.sampleRate / 1000);
++    const retained: AudioFrame[] = [];
++    for (let i = history.length - 1; i >= 0 && samples > 0; i--) {
++      const frame = history[i]!;
++      const count = Math.min(samples, frame.samplesPerChannel);
++      retained.unshift(count === frame.samplesPerChannel ? frame : new AudioFrame(
++        frame.data.slice((frame.samplesPerChannel - count) * frame.channels),
++        frame.sampleRate, frame.channels, count));
++      samples -= count;
++    }
++    if (samples > 0) throw new Error('Audio queue history incomplete for resume');
++    return retained;
++  }
++
++  private async captureSource(frame: AudioFrame, replayed = false): Promise<void> {
++    const duration = frame.samplesPerChannel / frame.sampleRate;
++    this.sourcePushedDuration += duration;
++    await this.audioSource.captureFrame(frame);
++    if (replayed) { this._dialogReplayFrames++; this._dialogReplayMs += duration * 1000; }
++    const queued = Math.ceil(this.audioSource.queuedDuration * frame.sampleRate / 1000);
++    if (queued <= 0) this.pendingQueueFrames = [];
++    else {
++      // Detach from caller-owned PCM; retain only the native queue plus one boundary frame.
++      this.pendingQueueFrames.push(new AudioFrame(frame.data.slice(), frame.sampleRate, frame.channels, frame.samplesPerChannel));
++      let retained = this.pendingQueueFrames.reduce((n, f) => n + f.samplesPerChannel, 0);
++      while (this.pendingQueueFrames.length > 1 && retained - this.pendingQueueFrames[0]!.samplesPerChannel >= queued) {
++        retained -= this.pendingQueueFrames.shift()!.samplesPerChannel;
++      }
++    }
++    this.dryAt = Date.now() + this.audioSource.queuedDuration;
+   }
+ 
+   private async waitForPlayoutTask(): Promise<void> {
+@@ -740,11 +781,14 @@
+         endedAt: Date.now(),
+       });
+       this.audioSource.clearQueue();
++      await this.forwardingIdleFuture.await;
++      this.audioSource.clearQueue();
+     } else {
+       // the source drained, so everything pushed has played
+       this.reportRun({ offset: this.sourcePushedDuration * 1000, endedAt: Date.now() });
+     }
+ 
++    this.pendingQueueFrames = [];
+     this.runOffset = 0;
+     this.pushedDuration = 0;
+     this.sourcePushedDuration = 0;
+diff --git a/src/worker.ts b/src/worker.ts
+--- a/src/worker.ts
++++ b/src/worker.ts
+@@ -317,10 +317,10 @@
+ }
+ 
+ class PendingAssignment {
+-  promise = new ThrowsPromise<JobAssignment, never>((resolve) => {
++  promise = new ThrowsPromise<JobAssignment | undefined, never>((resolve) => {
+     this.resolve = resolve; // this is how JavaScript lets you resolve promises externally
+   });
+-  resolve(arg: JobAssignment) {
++  resolve(arg: JobAssignment | undefined) {
+     arg; // useless call to counteract TypeScript E6133
+   }
+ }
+@@ -866,7 +866,10 @@
+     const onAccept = async (args: JobAcceptArguments) => {
+       answered = true;
+       const acceptedAt = Date.now();
+-
++      const pending = new PendingAssignment();
++      this.#pending[req.id] = pending;
++
++      try {
+       this.event.emit(
+         'worker_msg',
+         new WorkerMessage({
+@@ -890,17 +893,22 @@
+         }),
+       );
+ 
+-      this.#pending[req.id] = new PendingAssignment();
+-
++
++      } catch (error) {
++        delete this.#pending[req.id];
++        throw error;
++      }
+       const timer = setTimeout(() => {
+-        this.#logger.child({ req }).warn(`assignment for job ${req.id} timed out`);
+-        return;
++        if (this.#pending[req.id] === pending) delete this.#pending[req.id];
++        pending.resolve(undefined);
+       }, ASSIGNMENT_TIMEOUT);
+-      const asgn = await this.#pending[req.id]?.promise.then(async (asgn) => {
++      let asgn;
++      try { asgn = await pending.promise; }
++      finally {
+         clearTimeout(timer);
+-        return asgn;
+-      });
+-
++        if (this.#pending[req.id] === pending) delete this.#pending[req.id];
++      }
++      if (!asgn) throw new Error('job assignment timed out');
+       if (asgn) {
          try {
-           await proc.initialize({ sessionEndTimeout: this.sessionEndTimeout });
--          await this.warmedProcQueue.put({ proc, unlock: procUnlock });
--          procUnlockTransferred = true;
-+          await this.warmedProcQueue.put({ proc, unlock: releaseSlot });
-           unlock();
-           initReleased = true;
-         } catch {
-@@ -106,9 +108,10 @@
-         if (!initReleased) {
-           unlock();
+           await this.#procPool.launchJob({
+@@ -917,6 +925,7 @@
+           });
+         } catch (e) {
+           this.#logger.child({ requestId: req.id }).error(e, 'error launching job');
++          throw e;
          }
--        if (!procUnlockTransferred) {
--          procUnlock();
--        }
-+        // Remove an idle process that exited before dispatch and restore pool capacity.
-+        const queuedIndex = this.warmedProcQueue.items.findIndex(entry => entry.proc === proc);
-+        if (queuedIndex !== -1) this.warmedProcQueue.items.splice(queuedIndex, 1);
-+        releaseSlot();
-       }
-     } finally {
-       const procIndex = this.executors.indexOf(proc);
---- a/dist/ipc/proc_pool.cjs
-+++ b/dist/ipc/proc_pool.cjs
-@@ -110,7 +110,10 @@
-       this.executors.push(proc);
-       const unlock = await this.initMutex.lock();
-       let initReleased = false;
--      let procUnlockTransferred = false;
-+      let slotReleased = false;
-+      const releaseSlot = () => {
-+        if (!slotReleased) { slotReleased = true; procUnlock(); }
-+      };
-       try {
-         if (this.closed) {
-           return;
-@@ -118,8 +121,7 @@
-         await proc.start();
-         try {
-           await proc.initialize({ sessionEndTimeout: this.sessionEndTimeout });
--          await this.warmedProcQueue.put({ proc, unlock: procUnlock });
--          procUnlockTransferred = true;
-+          await this.warmedProcQueue.put({ proc, unlock: releaseSlot });
-           unlock();
-           initReleased = true;
-         } catch {
-@@ -129,9 +131,10 @@
-         if (!initReleased) {
-           unlock();
-         }
--        if (!procUnlockTransferred) {
--          procUnlock();
--        }
-+        // Remove an idle process that exited before dispatch and restore pool capacity.
-+        const queuedIndex = this.warmedProcQueue.items.findIndex(entry => entry.proc === proc);
-+        if (queuedIndex !== -1) this.warmedProcQueue.items.splice(queuedIndex, 1);
-+        releaseSlot();
-       }
-     } finally {
-       const procIndex = this.executors.indexOf(proc);
+       } else {
+         this.#logger.child({ requestId: req.id }).warn('pending assignment not found');

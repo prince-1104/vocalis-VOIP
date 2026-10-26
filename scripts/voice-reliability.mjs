@@ -56,11 +56,45 @@ function run(program, args, extra = {}, timeoutMs = 180000) {
 async function ready() {
   const start = performance.now();
   while (performance.now() - start < 90000) {
-    const result = await run('docker', [...compose, 'exec', '-T', 'worker', 'node', '-e', "fetch('http://127.0.0.1:8082/readyz',{signal:AbortSignal.timeout(1000)}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"], {}, 5000);
+    const result = await run('docker', [...compose, 'exec', '-T', 'worker', 'node', '-e', "Promise.all(['http://127.0.0.1:8082/readyz','http://fixture-api:3003/api/healthz'].map(url=>fetch(url,{signal:AbortSignal.timeout(1000)}))).then(rs=>process.exit(rs.every(r=>r.ok)?0:1)).catch(()=>process.exit(1))"], {}, 5000);
     if (result.code === 0) return { ready: true, readinessMs: Math.round(performance.now() - start) };
     await new Promise(resolve => setTimeout(resolve, 1000));
   }
   return { ready: false, readinessMs: Math.round(performance.now() - start) };
+}
+async function fixtureQuery(query) {
+  const output = await new Promise((resolve, reject) => execFile('docker', ['exec', 'dialog-voice-local-fixture-db-1', 'psql', '-U', 'dialog_test', '-d', 'dialog_test_livekit', '-At', '-c', query],
+    { env: safeEnv, windowsHide: true, timeout: 10000 }, (error, stdout) => error ? reject(Error('Mock lifecycle audit unavailable')) : resolve(stdout)));
+  return JSON.parse(output);
+}
+async function leaseSnapshot() {
+  const rows = await fixtureQuery("select coalesce(json_agg(json_build_object('id',id,'room',room,'leaseMs',extract(epoch from lease_until)*1000)), '[]') from livekit_sessions where state='active'");
+  if (rows.length !== 1 || !/^[0-9a-f-]{36}$/.test(rows[0].id) || !Number.isFinite(rows[0].leaseMs)) throw Error('Exactly one claimed mock lease required');
+  return rows[0];
+}
+async function leaseCleanup(snapshot) {
+  if (!snapshot) return { confirmed: false };
+  const audit = await fixtureQuery(`select json_build_object('closed',state='closed','closedMs',extract(epoch from closed_at)*1000,'roomDeleteCompleted',exists(select 1 from livekit_operations where session_id=s.id and kind='room_delete' and state='completed'),'unsettled',(select count(*) from livekit_operations where session_id=s.id and state in ('admitted','authorizing'))) from livekit_sessions s where id='${snapshot.id}'`);
+  const code = "const {RoomServiceClient}=require('livekit-server-sdk');const client=new RoomServiceClient(process.env.LIVEKIT_URL.replace(/^ws/,'http'),process.env.LIVEKIT_API_KEY,process.env.LIVEKIT_API_SECRET,{requestTimeout:2,failover:false});client.listRooms([process.argv[1]]).then(rooms=>process.exit(rooms.length===0?0:1)).catch(()=>process.exit(1))";
+  const absent = await run('docker', [...compose, 'exec', '-T', '-w', '/app/artifacts/livekit-agent', 'worker', 'node', '-e', code, snapshot.room], {}, 5000);
+  const expiredBeforeClose = audit.closedMs >= snapshot.leaseMs;
+  return { confirmed: audit.closed === true && expiredBeforeClose && audit.roomDeleteCompleted === true && audit.unsettled === 0 && absent.code === 0 && !absent.timedOut,
+    closed: audit.closed, expiredBeforeClose, roomDeleteCompleted: audit.roomDeleteCompleted, unsettled: audit.unsettled, roomAbsent: absent.code === 0 && !absent.timedOut };
+}
+async function expiredWhileSuspended(snapshot, since) {
+  const deadline = performance.now() + 5000;
+  do {
+    const proof = await fixtureQuery(`select json_build_object('closed',state='closed','closedMs',extract(epoch from closed_at)*1000) from livekit_sessions where id='${snapshot.id}'`);
+    if (proof.closed === true && proof.closedMs >= snapshot.leaseMs) {
+      const logged = await new Promise(resolve => execFile('docker', [...compose, 'logs', '--since', since, '--no-color', '--no-log-prefix', 'fixture-api'],
+        { env: safeEnv, windowsHide: true, timeout: 10000, maxBuffer: 1_000_000 }, (error, stdout) => resolve(error ? false : /Expired voice sessions closed[^\n]*\n\s+event:\s*"livekit_sessions_expired"\s*\n\s+count:\s*1(?:\r?\n|$)/.test(stdout.replace(/\x1b\[[0-9;]*m/g, '')) || stdout.split('\n').some(line => {
+          try { const event = JSON.parse(line); return event.event === 'livekit_sessions_expired' && event.count === 1; } catch { return false; }
+        }))));
+      return logged;
+    }
+    await new Promise(resolve => setTimeout(resolve, 500));
+  } while (performance.now() < deadline);
+  return false;
 }
 async function bench(label, attempts, regression = false, timeoutMs = 7200000) {
   const before = new Set(await readdir(directory));
@@ -98,7 +132,7 @@ try {
     if (group === 'outage' || group === 'lease-expiry') {
       const previous = new Set((await workerEvidence()).filter(value => value.event === 'subscription_ready').map(value => value.diagnosticId));
       const population = bench(`1rg-${group}-${round}`, 1, false, 180000);
-      let diagnosticId, injected = false, restored = false;
+      let diagnosticId, injected = false, restored = false, snapshot, suspendedAt, expiredDuringSuspension = false;
       try {
         const deadline = performance.now() + 45000;
         while (performance.now() < deadline) {
@@ -108,11 +142,14 @@ try {
           await new Promise(resolve => setTimeout(resolve, 500));
         }
         if (diagnosticId) {
+          if (group === 'lease-expiry') snapshot = await leaseSnapshot();
+          suspendedAt = new Date().toISOString();
           const action = group === 'outage' ? ['stop', '--timeout', '5', 'livekit'] : ['pause', 'worker'];
           const fault = await run('docker', [...compose, ...action], {}, 15000);
           injected = fault.code === 0;
           await record({ event: 'lifecycle_fault', group, diagnosticId, injected, ...fault });
           if (injected) await new Promise(resolve => setTimeout(resolve, group === 'outage' ? 5000 : 18000));
+          if (injected && snapshot) expiredDuringSuspension = await expiredWhileSuspended(snapshot, suspendedAt);
         }
       } finally {
         const action = group === 'outage' ? ['start', 'livekit'] : ['unpause', 'worker'];
@@ -122,8 +159,13 @@ try {
       }
       const result = await population;
       const closed = (await workerEvidence()).find(value => value.diagnosticId === diagnosticId && value.event === 'livekit_session_closed');
-      const passed = lifecyclePassed(result, injected, Boolean(closed), restored);
-      await record({ event: 'lifecycle_result', group, injected, restored, cleanupConfirmed: Boolean(closed), lifecyclePassed: passed, reason: closed?.reason ?? null, ...result });
+      const recoveredReadiness = await ready();
+      // A suspended SDK child can exit on IPC timeout before application callbacks.
+      // Require independent lease, settlement and actual room-removal proof in that case.
+      const externalCleanup = group === 'lease-expiry' ? await leaseCleanup(snapshot) : null;
+      const cleanupConfirmed = group === 'lease-expiry' ? expiredDuringSuspension && externalCleanup?.confirmed === true : Boolean(closed);
+      const passed = lifecyclePassed(result, injected, cleanupConfirmed, restored && recoveredReadiness.ready);
+      await record({ event: 'lifecycle_result', group, injected, restored, recoveredReadiness, expiredDuringSuspension, workerCleanupConfirmed: Boolean(closed), externalCleanup, cleanupConfirmed, lifecyclePassed: passed, reason: closed?.reason ?? null, ...result });
       if (!passed) process.exitCode = 1;
       continue;
     }

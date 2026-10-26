@@ -131,6 +131,19 @@ test('publication rejection and cancellation settle once without retries', async
   }
 });
 
+test('publication failure classification is numeric and preserves the original SDK error', async () => {
+  for (const [message, failure] of [['request timed out: private-sentinel',1],['not connected: private-sentinel',2],['permission denied: private-sentinel',3],['private-sentinel',4]]) {
+    const error = new Error(message), events = [], controller = new AbortController();
+    const participant = { async publishTrack() { throw error; } };
+    const guard = observePublication(participant, (event,state) => events.push({event,state}), controller.signal, 1000);
+    await assert.rejects(participant.publishTrack(), e => e === error);
+    await assert.rejects(guard.ready, /publication_rejected/);
+    assert.equal(events.find(e => e.event === 'publication_rejected').state.failure, failure);
+    assert.doesNotMatch(JSON.stringify(events), /private-sentinel/);
+    guard.dispose();
+  }
+});
+
 test('publication timeout triggers one teardown and disconnect cancellation releases the pending call', async () => {
   const controller = new AbortController();
   let cleanupCount = 0, calls = 0;

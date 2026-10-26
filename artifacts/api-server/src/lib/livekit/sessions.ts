@@ -112,12 +112,28 @@ export class VoiceSessions {
   async close(id: string, tenantId?: number): Promise<VoiceSession | null> {
     const r = await this.pool.query(`update livekit_sessions set state='closed', closed_at=now(), lease_until=null
       where id=$1 and ($2::integer is null or tenant_id=$2) and state in ('pending','active') returning *`, [id, tenantId ?? null]);
+    await this.reconcileOperations();
     return r.rows[0] ?? null;
+  }
+  async settleOperation(sessionId: string, operationId: string, state: "unknown" | "completed") {
+    await this.pool.query(`update livekit_operations set state=$3,completed_at=now(),
+      details=case when $3='completed' then details-'reconciliationReason' else details end
+      where id=$1 and session_id=$2 and kind in ('stt','tts') and state<>$3
+      and (state<>'completed' or $3<>'unknown')`, [operationId, sessionId, state]);
+  }
+  private async reconcileOperations(c: Pick<Pool, "query"> | PoolClient = this.pool) {
+    // Closure is evidence of lost ownership, never evidence of free/completed provider work.
+    // Preserve the conservative financial record for later provider reconciliation.
+    await c.query(`update livekit_operations o set state='unknown',completed_at=now(),
+      details=o.details || '{"reconciliationReason":"session_closed_without_terminal_usage"}'::jsonb
+      from livekit_sessions s where o.session_id=s.id and s.state='closed'
+      and o.kind in ('stt','tts') and o.state in ('authorizing','admitted')`);
   }
   async reconcile(c: Pick<Pool, "query"> | PoolClient = this.pool): Promise<VoiceSession[]> {
     const r = await c.query(`update livekit_sessions s set state='closed', closed_at=now(), lease_until=null
       where (state='pending' and admission_until<=now()) or (state='active' and
       (lease_until<=now() or active_until<=now())) or (state in ('pending','active') and not (${authorization})) returning *`);
+    await this.reconcileOperations(c);
     return r.rows;
   }
   async event(eventId: string, room: string, participant: string | undefined, end: boolean): Promise<VoiceSession | null> {
@@ -128,6 +144,7 @@ export class VoiceSessions {
       const inserted = await c.query(`insert into livekit_operations(id,session_id,kind,state) values ($1,$2,'webhook','completed') on conflict do nothing returning id`, [eventId, s.id]);
       if (!inserted.rows.length || !end) return null;
       const closed = await c.query("update livekit_sessions set state='closed',closed_at=now(),lease_until=null where id=$1 and state in ('pending','active') returning *", [s.id]);
+      await this.reconcileOperations(c);
       return closed.rows[0] ?? null;
     });
   }

@@ -8,7 +8,7 @@ const { WebSocketServer } = require('ws');
 const fresh = () => ({ sttConnections: 0, sttTurns: 0, sttInterims: 0, sttFinals: 0, sttFrames: 0, sttLoudFrames: 0,
   ttsConnections: 0, ttsRequests: 0, ttsTextMessages: 0, ttsCharacters: 0, ttsChunks: 0, ttsCancelled: 0, audioSamples: 0, injectedFailures: 0 });
 let metrics = fresh();
-// Failure injection for the benchmark only: each armed failure applies to the next connection(s).
+// TTS faults apply to connections; STT faults apply to the next utterance on the live stream.
 const faults = { tts: { mode: 'ok', remaining: 0 }, stt: { mode: 'ok', remaining: 0 } };
 const take = kind => {
   const fault = faults[kind];
@@ -32,7 +32,7 @@ const http = createServer(async (req, res) => {
       const { kind, mode, count = 1, reset } = JSON.parse(body || '{}');
       if (reset) { metrics = fresh(); faults.tts = { mode: 'ok', remaining: 0 }; faults.stt = { mode: 'ok', remaining: 0 }; }
       if (kind !== undefined) {
-        const modes = { tts: ['ok', 'refuse', 'stall'], stt: ['ok', 'drop'] };
+        const modes = { tts: ['ok', 'refuse', 'stall'], stt: ['ok', 'drop', 'noise'] };
         if (!modes[kind]?.includes(mode) || !(count >= 0 && count <= 10)) throw new Error('invalid');
         faults[kind] = { mode, remaining: count };
       }
@@ -47,7 +47,6 @@ ws.on('connection', (socket, req) => {
   const url = new URL(req.url, 'http://local');
   if (url.pathname === '/v1/listen') {
     metrics.sttConnections++;
-    if (take('stt') === 'drop') { setTimeout(() => socket.terminate(), 1500); }
     // Deepgram semantics: `endpointing` is the trailing silence (ms) before speech_final, `false` disables it.
     const endpointing = url.searchParams.get('endpointing');
     const endpointMs = endpointing === null || endpointing === 'false' ? Infinity : Math.max(10, Number(endpointing) || 10);
@@ -73,11 +72,16 @@ ws.on('connection', (socket, req) => {
         if (!speaking) { speaking = true; loudMs = 0; sinceInterim = 0; segmentStart = audioMs - frameMs; socket.send(JSON.stringify({ type: 'SpeechStarted', channel: [0], timestamp: segmentStart / 1000 })); }
         loudMs += frameMs; silenceMs = 0; sinceInterim += frameMs;
         // Bursts shorter than 300 ms carry no words, like noise does for a real recognizer.
-        if (interim && loudMs >= 300 && sinceInterim >= 300) { sinceInterim = 0; metrics.sttInterims++; result(false, false); }
+        if (interim && loudMs >= 300 && sinceInterim >= 300 && !(faults.stt.remaining > 0 && ['drop','noise'].includes(faults.stt.mode))) { sinceInterim = 0; metrics.sttInterims++; result(false, false); }
       } else if (speaking) {
         silenceMs += frameMs;
         if (silenceMs >= endpointMs) {
           speaking = false;
+          // Faults are armed after greeting. Drop the intended utterance before its final,
+          // rather than disconnecting during greeting and silently recovering before the test.
+          const fault = loudMs >= 300 || faults.stt.mode === 'noise' ? take('stt') : 'ok';
+          if (fault === 'drop') { socket.terminate(); return; }
+          if (fault === 'noise') return; // Physical VAD input, deliberately no recognized words.
           if (loudMs >= 300) { metrics.sttFinals++; metrics.sttTurns++; result(true, true); }
         }
       }

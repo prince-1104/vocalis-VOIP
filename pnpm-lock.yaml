@@ -155,7 +155,7 @@ overrides:
 
 patchedDependencies:
   '@livekit/agents@1.9.3':
-    hash: e414679f5278ce06741a66f9cb9bde2ce9fcbc96b87bdb91caf716e2bbef7e1f
+    hash: 05221d6b44cc362eb9747270d582998ba559ab3b90fab0246e0492399cdbc4b2
     path: patches/@livekit__agents@1.9.3.patch
 
 importers:
@@ -297,16 +297,16 @@ importers:
     dependencies:
       '@livekit/agents':
         specifier: 1.9.3
-        version: 1.9.3(patch_hash=e414679f5278ce06741a66f9cb9bde2ce9fcbc96b87bdb91caf716e2bbef7e1f)(@livekit/rtc-node@1.1.0)(@types/node@25.3.5)(typescript@5.9.3)(zod@3.25.76)
+        version: 1.9.3(patch_hash=05221d6b44cc362eb9747270d582998ba559ab3b90fab0246e0492399cdbc4b2)(@livekit/rtc-node@1.1.0)(@types/node@25.3.5)(typescript@5.9.3)(zod@3.25.76)
       '@livekit/agents-plugin-deepgram':
         specifier: 1.9.3
-        version: 1.9.3(@livekit/agents@1.9.3(patch_hash=e414679f5278ce06741a66f9cb9bde2ce9fcbc96b87bdb91caf716e2bbef7e1f)(@livekit/rtc-node@1.1.0)(@types/node@25.3.5)(typescript@5.9.3)(zod@3.25.76))(@livekit/rtc-node@1.1.0)
+        version: 1.9.3(@livekit/agents@1.9.3(patch_hash=05221d6b44cc362eb9747270d582998ba559ab3b90fab0246e0492399cdbc4b2)(@livekit/rtc-node@1.1.0)(@types/node@25.3.5)(typescript@5.9.3)(zod@3.25.76))(@livekit/rtc-node@1.1.0)
       '@livekit/agents-plugin-sarvam':
         specifier: 1.9.3
-        version: 1.9.3(@livekit/agents@1.9.3(patch_hash=e414679f5278ce06741a66f9cb9bde2ce9fcbc96b87bdb91caf716e2bbef7e1f)(@livekit/rtc-node@1.1.0)(@types/node@25.3.5)(typescript@5.9.3)(zod@3.25.76))(@livekit/rtc-node@1.1.0)
+        version: 1.9.3(@livekit/agents@1.9.3(patch_hash=05221d6b44cc362eb9747270d582998ba559ab3b90fab0246e0492399cdbc4b2)(@livekit/rtc-node@1.1.0)(@types/node@25.3.5)(typescript@5.9.3)(zod@3.25.76))(@livekit/rtc-node@1.1.0)
       '@livekit/agents-plugin-silero':
         specifier: 1.9.3
-        version: 1.9.3(@livekit/agents@1.9.3(patch_hash=e414679f5278ce06741a66f9cb9bde2ce9fcbc96b87bdb91caf716e2bbef7e1f)(@livekit/rtc-node@1.1.0)(@types/node@25.3.5)(typescript@5.9.3)(zod@3.25.76))(@livekit/rtc-node@1.1.0)
+        version: 1.9.3(@livekit/agents@1.9.3(patch_hash=05221d6b44cc362eb9747270d582998ba559ab3b90fab0246e0492399cdbc4b2)(@livekit/rtc-node@1.1.0)(@types/node@25.3.5)(typescript@5.9.3)(zod@3.25.76))(@livekit/rtc-node@1.1.0)
       '@livekit/rtc-node':
         specifier: 1.1.0
         version: 1.1.0
@@ -4766,27 +4766,27 @@ snapshots:
       '@jridgewell/resolve-uri': 3.1.2
       '@jridgewell/sourcemap-codec': 1.5.5
 
-  '@livekit/agents-plugin-deepgram@1.9.3(@livekit/agents@1.9.3(patch_hash=e414679f5278ce06741a66f9cb9bde2ce9fcbc96b87bdb91caf716e2bbef7e1f)(@livekit/rtc-node@1.1.0)(@types/node@25.3.5)(typescript@5.9.3)(zod@3.25.76))(@livekit/rtc-node@1.1.0)':
+  '@livekit/agents-plugin-deepgram@1.9.3(@livekit/agents@1.9.3(patch_hash=05221d6b44cc362eb9747270d582998ba559ab3b90fab0246e0492399cdbc4b2)(@livekit/rtc-node@1.1.0)(@types/node@25.3.5)(typescript@5.9.3)(zod@3.25.76))(@livekit/rtc-node@1.1.0)':
     dependencies:
-      '@livekit/agents': 1.9.3(patch_hash=e414679f5278ce06741a66f9cb9bde2ce9fcbc96b87bdb91caf716e2bbef7e1f)(@livekit/rtc-node@1.1.0)(@types/node@25.3.5)(typescript@5.9.3)(zod@3.25.76)
+      '@livekit/agents': 1.9.3(patch_hash=05221d6b44cc362eb9747270d582998ba559ab3b90fab0246e0492399cdbc4b2)(@livekit/rtc-node@1.1.0)(@types/node@25.3.5)(typescript@5.9.3)(zod@3.25.76)
       '@livekit/rtc-node': 1.1.0
       ws: 8.21.0
     transitivePeerDependencies:
       - bufferutil
       - utf-8-validate
 
-  '@livekit/agents-plugin-sarvam@1.9.3(@livekit/agents@1.9.3(patch_hash=e414679f5278ce06741a66f9cb9bde2ce9fcbc96b87bdb91caf716e2bbef7e1f)(@livekit/rtc-node@1.1.0)(@types/node@25.3.5)(typescript@5.9.3)(zod@3.25.76))(@livekit/rtc-node@1.1.0)':
+  '@livekit/agents-plugin-sarvam@1.9.3(@livekit/agents@1.9.3(patch_hash=05221d6b44cc362eb9747270d582998ba559ab3b90fab0246e0492399cdbc4b2)(@livekit/rtc-node@1.1.0)(@types/node@25.3.5)(typescript@5.9.3)(zod@3.25.76))(@livekit/rtc-node@1.1.0)':
     dependencies:
-      '@livekit/agents': 1.9.3(patch_hash=e414679f5278ce06741a66f9cb9bde2ce9fcbc96b87bdb91caf716e2bbef7e1f)(@livekit/rtc-node@1.1.0)(@types/node@25.3.5)(typescript@5.9.3)(zod@3.25.76)
+      '@livekit/agents': 1.9.3(patch_hash=05221d6b44cc362eb9747270d582998ba559ab3b90fab0246e0492399cdbc4b2)(@livekit/rtc-node@1.1.0)(@types/node@25.3.5)(typescript@5.9.3)(zod@3.25.76)
       '@livekit/rtc-node': 1.1.0
       ws: 8.21.0
     transitivePeerDependencies:
       - bufferutil
       - utf-8-validate
 
-  '@livekit/agents-plugin-silero@1.9.3(@livekit/agents@1.9.3(patch_hash=e414679f5278ce06741a66f9cb9bde2ce9fcbc96b87bdb91caf716e2bbef7e1f)(@livekit/rtc-node@1.1.0)(@types/node@25.3.5)(typescript@5.9.3)(zod@3.25.76))(@livekit/rtc-node@1.1.0)':
+  '@livekit/agents-plugin-silero@1.9.3(@livekit/agents@1.9.3(patch_hash=05221d6b44cc362eb9747270d582998ba559ab3b90fab0246e0492399cdbc4b2)(@livekit/rtc-node@1.1.0)(@types/node@25.3.5)(typescript@5.9.3)(zod@3.25.76))(@livekit/rtc-node@1.1.0)':
     dependencies:
-      '@livekit/agents': 1.9.3(patch_hash=e414679f5278ce06741a66f9cb9bde2ce9fcbc96b87bdb91caf716e2bbef7e1f)(@livekit/rtc-node@1.1.0)(@types/node@25.3.5)(typescript@5.9.3)(zod@3.25.76)
+      '@livekit/agents': 1.9.3(patch_hash=05221d6b44cc362eb9747270d582998ba559ab3b90fab0246e0492399cdbc4b2)(@livekit/rtc-node@1.1.0)(@types/node@25.3.5)(typescript@5.9.3)(zod@3.25.76)
       '@livekit/rtc-node': 1.1.0
       onnxruntime-node: 1.24.3
       ws: 8.21.0
@@ -4794,7 +4794,7 @@ snapshots:
       - bufferutil
       - utf-8-validate
 
-  '@livekit/agents@1.9.3(patch_hash=e414679f5278ce06741a66f9cb9bde2ce9fcbc96b87bdb91caf716e2bbef7e1f)(@livekit/rtc-node@1.1.0)(@types/node@25.3.5)(typescript@5.9.3)(zod@3.25.76)':
+  '@livekit/agents@1.9.3(patch_hash=05221d6b44cc362eb9747270d582998ba559ab3b90fab0246e0492399cdbc4b2)(@livekit/rtc-node@1.1.0)(@types/node@25.3.5)(typescript@5.9.3)(zod@3.25.76)':
     dependencies:
       '@bufbuild/protobuf': 1.10.1
       '@livekit/av': 10.1.0

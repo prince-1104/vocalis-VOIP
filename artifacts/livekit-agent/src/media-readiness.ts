@@ -4,7 +4,7 @@ export class MediaReadinessError extends Error {
 }
 export function observePublication<P extends { waitForSubscription(): Promise<void> }, A extends unknown[]>(
   participant: { publishTrack(...args: A): Promise<P> },
-  mark: (event: "audio_track_created" | "publication_started" | "publication_resolved" | "publication_rejected" | "publication_timeout" | "subscription_timeout" | "subscription_ready", state?: { started: boolean; published: boolean }) => void,
+  mark: (event: "audio_track_created" | "publication_started" | "publication_resolved" | "publication_rejected" | "publication_timeout" | "subscription_timeout" | "subscription_ready", state?: { started: boolean; published: boolean; failure?: number }) => void,
   signal: AbortSignal, timeoutMs = 12000,
 ) {
   const original = participant.publishTrack;
@@ -33,7 +33,9 @@ export function observePublication<P extends { waitForSubscription(): Promise<vo
       }, () => finish(new MediaReadinessError("publication_rejected")));
       return publication;
     } catch (error) {
-      mark("publication_rejected"); finish(new MediaReadinessError("publication_rejected")); throw error;
+      const message = error instanceof Error ? error.message.toLowerCase() : '';
+      const failure = /timed?\s*out|timeout/.test(message) ? 1 : /disconnect|not connected/.test(message) ? 2 : /permission|denied|unauthoriz/.test(message) ? 3 : 4;
+      mark("publication_rejected", { started, published, failure }); finish(new MediaReadinessError("publication_rejected")); throw error;
     }
   };
   signal.addEventListener("abort", cancel, { once: true });

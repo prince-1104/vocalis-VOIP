@@ -2,7 +2,7 @@ import { chromium } from 'playwright';
 import assert from 'node:assert/strict';
 import { readFile, writeFile, mkdir, appendFile } from 'node:fs/promises';
 import os from 'node:os';
-import { completedResponseEnd, greetingCompletion } from './voice-audio-boundary.mjs';
+import { completedResponseEnd, greetingCompletion, replyDelivery, interruptionAccounting } from './voice-audio-boundary.mjs';
 const credentials = JSON.parse(await readFile('/run/dialog-local/login.json', 'utf8'));
 const BENCH = process.env.VOICE_BENCH === '1';
 const MOCKS = 'http://mock-providers:8090';
@@ -20,6 +20,8 @@ try {
   const page = await context.newPage();
   await page.addInitScript({ content: 'window.__completedResponseEnd = ' + completedResponseEnd.toString() });
   await page.addInitScript({ content: 'window.__greetingCompletion = ' + greetingCompletion.toString() });
+  await page.addInitScript({ content: 'window.__replyDelivery = ' + replyDelivery.toString() });
+  await page.addInitScript({ content: 'window.__interruptionAccounting = ' + interruptionAccounting.toString() });
   // Only sanitized assertion names go to stdout. No traces, HARs or provider payload logs.
   // Failure diagnostics print redacted, truncated error text only — never tokens or payloads.
   const redact = text => String(text).replace(/(token|secret|authorization|key)[=:"'\s]+[^&\s"']+/gi, '$1=***')
@@ -227,11 +229,12 @@ async function benchmark(page, context, sessionCount) {
     return seg ? seg[0] : (env.audible && env.onAt > after ? env.onAt : false);
   }, [after], { timeout, polling: 10 }).then(h => h.jsonValue()).catch(() => null);
   // End of an agent response: last audible sample followed by `quiet` ms of silence.
-  const responseEnd = (after, quiet, timeout, completionAfter = null) => page.waitForFunction(([after, quiet, completionAfter]) => {
+  const responseEnd = (after, quiet, timeout, completionAfter = null, replyFrom = null) => page.waitForFunction(([after, quiet, completionAfter, replyFrom]) => {
     const env = window.__env;
-    const completed = completionAfter === null || window.__greetingCompletion(window.__bench, window.__media, completionAfter);
+    const completed = replyFrom !== null ? window.__replyDelivery(window.__bench, window.__media, replyFrom).complete
+      : completionAfter === null || window.__greetingCompletion(window.__bench, window.__media, completionAfter);
     return window.__completedResponseEnd(env, performance.now(), after, quiet, completed);
-  }, [after, quiet, completionAfter], { timeout, polling: 20 }).then(h => h.jsonValue()).catch(() => null);
+  }, [after, quiet, completionAfter, replyFrom], { timeout, polling: 20 }).then(h => h.jsonValue()).catch(() => null);
   const segmentsBetween = (from, to) => page.evaluate(([from, to]) => {
     const env = window.__env, all = [...env.segments, ...(env.audible ? [[env.onAt, env.lastLoud]] : [])];
     return all.filter(s => s[1] >= from && s[0] <= to);
@@ -291,13 +294,17 @@ async function benchmark(page, context, sessionCount) {
     else {
       record.browser.e2eFirstAudioMs = onset - speechEnd;
       if (onset < speechEnd) record.outcome = 'premature_response';
-      if (extra) { const { browser = {}, ...rest } = await extra(onset, speechEnd); Object.assign(record.browser, browser); Object.assign(record, rest); }
-      const end = record.endAt ?? await responseEnd(onset, quiet, expectLong ? 30000 : 15000);
+      if (extra) {
+        const prior = record.outcome;
+        const { browser = {}, ...rest } = await extra(onset, speechEnd, caseStart); Object.assign(record.browser, browser); Object.assign(record, rest);
+        if (prior !== 'ok' && record.outcome === 'ok') record.outcome = prior;
+      }
+      const end = 'endAt' in record ? record.endAt : await responseEnd(onset, quiet, expectLong ? 30000 : 15000, null, record.interrupted ? null : caseStart);
       const segs = await segmentsBetween(onset - 1, (end ?? await now()) + 1);
       const p = playback(segs);
       record.browser.playbackMs = record.interrupted ? null : p.playbackMs;
       record.browser.gaps = p.gaps; record.browser.gapMs = p.gapMs; record.browser.responses = p.responses;
-      if (end === null) record.outcome = 'timeout_response_end';
+      if (end === null && record.outcome === 'ok') record.outcome = 'timeout_response_end';
     }
     await page.waitForTimeout(800);
     const caseEnd = await now();
@@ -306,16 +313,19 @@ async function benchmark(page, context, sessionCount) {
     const events = await eventsBetween(caseStart, caseEnd);
     record.media = await page.evaluate(([from, to]) => window.__media.filter(e => e.t >= from && e.t <= to), [caseStart, caseEnd]);
     record.stages = events;
+    record.delivery = await page.evaluate(from => window.__replyDelivery(window.__bench, window.__media, from), caseStart);
+    if (record.outcome === 'ok' && !record.interrupted && !record.delivery.complete) record.outcome = 'incomplete_audio_delivery';
     record.worker = workerStages(events);
     // No worker event at all while the user spoke: the job stopped processing (silent session).
     if (record.outcome === 'timeout_no_response' && !events.length) record.outcome = 'timeout_session_silent';
     if ((extra || record.outcome !== 'ok') && events.length) record.timeline = events.map(e => [e.e, Math.round(e.t - events[0].t)]);
     // A second synthesized reply in one user turn means the turn was split (premature closure).
-    if (record.outcome === 'ok' && !record.interrupted && !record.pausesAllowed && (record.worker.counts.tts_start ?? 0) > 1) record.outcome = 'duplicate_response';
+    if (record.outcome === 'ok' && !record.interrupted && !record.pausesAllowed
+      && (record.worker.counts.tts_start ?? 0) > 1 + (record.delivery.cancelledBeforeAudioStreams ?? 0)) record.outcome = 'duplicate_response';
     tuning ??= (await page.evaluate(() => window.__bench.find(e => e.e === 'session_start'))) ?? null;
     return record;
   }
-  const interruptExtra = async (onset) => {
+  const interruptExtra = async (onset, _speechEnd, caseStart) => {
     await page.waitForTimeout(Math.max(0, onset + 1200 - await now()));
     const bounds = await page.evaluate(() => window.__speak([[1200, 0]]));
     const userOn = bounds[0][0], userEnd = bounds[0][1];
@@ -331,19 +341,29 @@ async function benchmark(page, context, sessionCount) {
       return false;
     }, [userOn], { timeout: 8000, polling: 10 }).then(h => h.jsonValue()).catch(() => null);
     const reply = await nextOnset(Math.max(userEnd, stop ?? userEnd), 12000);
-    const replyEnd = reply === null ? null : await responseEnd(reply, 700, 15000);
-    return { interrupted: true, endAt: replyEnd, browser: { interruptStopMs: stop === null ? null : stop - userOn,
-      afterInterruptFirstAudioMs: reply === null ? null : reply - userEnd }, outcome: stop === null ? 'interrupt_not_stopped' : reply === null ? 'interrupt_reply_missing' : 'ok' };
+    const replyEnd = reply === null ? null : await responseEnd(reply, 700, 15000, null, userOn);
+    const recoveryDelivery = await page.evaluate(from => window.__replyDelivery(window.__bench, window.__media, from), userOn);
+    const interruptedDelivery = await page.evaluate(from => window.__interruptionAccounting(window.__bench, window.__media, from), caseStart);
+    return { interrupted: true, interruptedDelivery, recoveryDelivery, endAt: replyEnd,
+      browser: { interruptStopMs: stop === null ? null : stop - userOn, afterInterruptFirstAudioMs: reply === null ? null : reply - userEnd },
+      outcome: stop === null ? 'interrupt_not_stopped' : reply === null ? 'interrupt_reply_missing'
+        : !interruptedDelivery.confirmed ? 'interrupt_not_confirmed' : !recoveryDelivery.complete || replyEnd === null ? 'incomplete_interrupt_reply' : 'ok' };
   };
-  const falseInterruptExtra = async (onset) => {
+  const falseInterruptExtra = async (onset, _speechEnd, caseStart) => {
     await page.waitForTimeout(Math.max(0, onset + 1200 - await now()));
+    const before = await mockCounters();
+    await control({ kind: 'stt', mode: 'noise', count: 1 });
     const bounds = await page.evaluate(() => window.__speak([[250, 0]]));
     const burst = bounds[0][0];
-    const end = await responseEnd(onset, 2600, 40000);
+    const end = await responseEnd(onset, 2600, 40000, null, caseStart);
     const segs = await segmentsBetween(onset - 1, (end ?? await now()) + 1);
     const pauses = segs.slice(1).map((s, i) => s[0] - segs[i][1]).filter(g => g >= 400);
     const audible = segs.reduce((n, s) => n + s[1] - s[0], 0);
-    return { endAt: end, pausesAllowed: true, paused: pauses.length > 0, burstAt: burst, browser: { audibleMs: Math.round(audible) } };
+    const after = await mockCounters();
+    const noiseInjected = after.injectedFailures - before.injectedFailures === 1;
+    await control({ kind: 'stt', mode: 'ok', count: 0 });
+    return { endAt: end, pausesAllowed: true, paused: pauses.length > 0, burstAt: burst, noiseInjected,
+      ...(!noiseInjected ? { outcome: 'false_interruption_fault_not_injected' } : {}), browser: { audibleMs: Math.round(audible) } };
   };
   // Worker evidence decides the class: a second LLM/TTS turn means the burst became a user turn
   // (the reply was replaced); an SDK false-interruption event means playout paused and resumed.
@@ -390,42 +410,40 @@ async function benchmark(page, context, sessionCount) {
   const isDisconnected = timeout => page.getByRole('status').filter({ hasText: 'Disconnected' }).waitFor({ timeout }).then(() => true).catch(() => false);
   const failure = async (kind, mode, iteration) => {
     const before = await mockCounters();
-    let t0;
-    if (kind === 'stt') {
-      // The STT socket opens at session start; the fault drops it 1.5 s later.
-      await control({ kind, mode, count: 1 });
-      await page.evaluate(() => { window.__env.segments = []; window.__env.audible = false; });
-      await page.getByRole('button', { name: 'Start preview' }).click();
-      const ok = await page.getByRole('status').filter({ hasText: 'Connected' }).waitFor({ timeout: 30000 }).then(() => true).catch(() => false);
-      if (!ok) { await control({ kind, mode: 'ok', count: 0 }); await stopSession(); return { case: `${kind}_${mode}`, iteration, outcome: 'start_failed', browser: {}, worker: {} }; }
-      t0 = await now();
-    } else {
-      const started = await startSession();
-      if (!started.ok) { await stopSession(); return { case: `${kind}_${mode}`, iteration, outcome: started.reason, browser: {}, worker: {} }; }
-      t0 = await now();
-    }
-    // Faulted turn (TTS faults: the reply to this turn hits the fault; STT fault: the socket already dropped).
-    if (kind === 'tts') await control({ kind, mode, count: 1 });
-    else await page.waitForTimeout(Math.max(0, t0 + 3000 - await now()));
+    const started = await startSession();
+    if (!started.ok) { await stopSession(); return { case: `${kind}_${mode}`, iteration, outcome: started.reason, browser: {}, worker: {}, faultInjected: false }; }
+    const t0 = await now();
+    // Arm only after confirmed greeting completion; STT drops this live utterance.
+    await control({ kind, mode, count: 1 });
     const first = await page.evaluate(() => window.__speak([[1200, 0]]));
     const firstEnd = first[0][1];
     const firstReply = await nextOnset(first[0][0], 15000);
-    if (firstReply !== null) await responseEnd(firstReply, 700, 20000);
+    let faultedDelivery = null;
+    if (firstReply !== null) {
+      const completed = await responseEnd(firstReply, 700, 20000, null, t0);
+      faultedDelivery = await page.evaluate(from => window.__replyDelivery(window.__bench, window.__media, from), t0);
+      if (completed === null) faultedDelivery.complete = false;
+    }
     let disconnected = await isDisconnected(firstReply === null ? 5000 : 500);
     // Follow-up turn: does the session recover once the injected fault is spent?
-    let secondReply = null, secondEnd = null;
+    let secondReply = null, secondEnd = null, recoveryDelivery = null;
     if (!disconnected) {
+      const recoveryStart = await now();
       const second = await page.evaluate(() => window.__speak([[1200, 0]]));
       secondEnd = second[0][1];
       secondReply = await nextOnset(second[0][0], 15000);
-      if (secondReply !== null) await responseEnd(secondReply, 700, 20000);
+      if (secondReply !== null) {
+        const completed = await responseEnd(secondReply, 700, 20000, null, recoveryStart);
+        recoveryDelivery = await page.evaluate(from => window.__replyDelivery(window.__bench, window.__media, from), recoveryStart);
+        if (completed === null) recoveryDelivery.complete = false;
+      }
       disconnected = await isDisconnected(500);
     }
     const at = await now();
     const after = await mockCounters();
     const outcome = firstReply !== null ? (disconnected ? 'reply_then_closed' : 'reply_delivered')
-      : disconnected ? 'session_closed' : secondReply !== null ? 'turn_dropped_then_recovered' : 'turn_dropped_no_recovery';
-    const record = { case: `${kind}_${mode}`, iteration, outcome,
+      : disconnected ? 'session_closed' : secondReply !== null && recoveryDelivery?.complete ? 'turn_dropped_then_recovered' : 'turn_dropped_no_recovery';
+    const record = { case: `${kind}_${mode}`, iteration, outcome, greetingConfirmed: true, faultedDelivery, recoveryDelivery,
       browser: { faultedTurnFirstAudioMs: firstReply === null ? null : firstReply - firstEnd, recoveryTurnFirstAudioMs: secondReply === null ? null : secondReply - secondEnd },
       worker: workerStages(await eventsBetween(t0 - 1, at + 1000)),
       mockDelta: Object.fromEntries(COUNTER_KEYS.map(k => [k, (after[k] ?? 0) - (before[k] ?? 0)])) };
@@ -495,12 +513,23 @@ async function benchmark(page, context, sessionCount) {
     if (!LIVE) await appendFile(attemptLedger, JSON.stringify({ attempt: i + 1, records }) + '\n');
     if (page.isClosed() || sessionRecord?.outcome === 'harness_error') break; // Remaining planned attempts were not executed.
   }
-  for (let i = 0; i < config.repeatSessions; i++) samples.push(...await run(false, i + 1, true));
-  for (let i = 0; i < config.mixedSessions; i++) samples.push(...await run(true, i + 1, true));
+  const retain = async (group, iteration, work) => {
+    const before = sessionCount();
+    let records;
+    try { const value = await work(); records = Array.isArray(value) ? value : [value]; }
+    catch { records = [{ case: group, iteration, outcome: 'harness_error' }]; await stopSession().catch(() => undefined); }
+    const session = records.find(r => r.case === 'session') ?? records[0];
+    session.genuineSession = sessionCount() - before === 1;
+    session.createdAttempts = sessionCount() - before;
+    samples.push(...records);
+    if (!LIVE) await appendFile(attemptLedger, JSON.stringify({ group, iteration, records }) + '\n');
+  };
+  for (let i = 0; i < config.repeatSessions; i++) await retain('session', i + 1, () => run(false, i + 1, true));
+  for (let i = 0; i < config.mixedSessions; i++) await retain('session', i + 1, () => run(true, i + 1, true));
   for (let i = 0; i < config.failureRuns; i++) {
-    samples.push(await failure('tts', 'refuse', i + 1));
-    samples.push(await failure('tts', 'stall', i + 1));
-    samples.push(await failure('stt', 'drop', i + 1));
+    await retain('tts_refuse', i + 1, () => failure('tts', 'refuse', i + 1));
+    await retain('tts_stall', i + 1, () => failure('tts', 'stall', i + 1));
+    await retain('stt_drop', i + 1, () => failure('stt', 'drop', i + 1));
   }
   const mock = LIVE ? null : await context.request.get(`${MOCKS}/metrics`).then(response => response.json()).catch(() => ({}));
   const report = summarize(samples, { config, tuning, mock, chromium: page.context().browser()?.version() });

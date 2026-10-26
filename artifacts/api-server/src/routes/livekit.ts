@@ -97,7 +97,7 @@ export function createLivekitRoutes(env = process.env, sessions = new VoiceSessi
     const record = op.rows[0].details.record;
     if (record && req.body.outcome === "charged" && (!(req.body.quantity >= 0) || req.body.quantity > (op.rows[0].kind === "stt" ? 120 : 6000))) throw new VoiceDenied(400);
     if (record) await paidWork.reconcile(record, req.body.outcome, req.body.quantity);
-    await sessions.pool.query("update livekit_operations set state=$2,completed_at=now() where id=$1", [op.rows[0].id, req.body.outcome === "unknown" ? "unknown" : "completed"]);
+    await sessions.settleOperation(s.id, op.rows[0].id, req.body.outcome === "unknown" ? "unknown" : "completed");
     res.sendStatus(204);
   }));
   internal.post("/internal/livekit/:id/llm", wrap(async (req, res) => {
@@ -145,15 +145,26 @@ export function createLivekitRoutes(env = process.env, sessions = new VoiceSessi
     const closed = await sessions.reconcile();
     if (closed.length) logger.info({ event: "livekit_sessions_expired", count: closed.length }, "Expired voice sessions closed");
     await Promise.allSettled(closed.map(s => removeRoom(s.room)));
+    // A delayed RTC reconnect can recreate a deleted room. A completed delete
+    // records that operation, not permanent absence; sweep actual closed rooms too.
+    let existingRooms: string[] = [];
+    try { existingRooms = (await clients().rooms.listRooms()).map(room => room.name); }
+    catch { /* Keep durable pending deletions retryable during a LiveKit outage. */ }
     // Persist retryable cleanup separately: a failed delete must not reopen admission.
     const pending = await sessions.pool.query(`select s.id,s.room from livekit_sessions s where s.state='closed'
-      and not exists(select 1 from livekit_operations o where o.id=s.id||':room-delete' and o.state='completed')
-      order by s.closed_at limit 100`);
+      and (s.room=any($1::text[]) or not exists(select 1 from livekit_operations o where o.id=s.id||':room-delete' and o.state='completed'))
+      order by s.closed_at limit 100`, [existingRooms]);
     await Promise.allSettled(pending.rows.map(async s => {
+      // Redis/SFU state can outlive a successful delete. Re-open the cleanup
+      // receipt before retrying so upstream failure cannot leave a false success.
+      await sessions.pool.query(`insert into livekit_operations(id,session_id,kind,state)
+        values($1,$2,'room_delete','pending') on conflict(id) do update
+        set state='pending',completed_at=null`, [s.id + ':room-delete', s.id]);
       try { await removeRoom(s.room); }
       catch (e) { const error = e as { status?: number; code?: string }; if (error.status !== 404 && error.code !== "not_found") throw e; }
       await sessions.pool.query(`insert into livekit_operations(id,session_id,kind,state,completed_at)
-        values($1,$2,'room_delete','completed',now()) on conflict do nothing`, [s.id + ':room-delete', s.id]);
+        values($1,$2,'room_delete','completed',now()) on conflict(id) do update
+        set state='completed',completed_at=now()`, [s.id + ':room-delete', s.id]);
     }));
   };
   return { internal, preview, reconcile };

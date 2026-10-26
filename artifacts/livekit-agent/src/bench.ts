@@ -7,7 +7,7 @@ export const stageEvents = ["session_start", "user_speaking", "user_listening", 
   "agent_connected", "audio_track_created", "publication_started", "publication_resolved", "publication_rejected", "publication_timeout", "subscription_timeout", "subscription_ready",
   "tts_audio_summary", "output_capture", "output_captured", "output_capture_error", "output_flush", "output_clear", "output_pause", "output_resume", "output_playback_started", "output_playback_finished",
   "source_capture", "source_captured", "source_capture_error", "source_clear", "source_drain_started", "source_drained", "track_source_link", "published_source_link",
-  "llm_authorized", "speech_created", "speech_done", "conversation_committed"] as const;
+  "llm_authorized", "speech_created", "speech_done", "conversation_committed", "pause_lifecycle", "pause_observer_end"] as const;
 /** Why a job ended its session; a closed set so logs and events stay bounded. */
 export const closeReasons = ["heartbeat", "room_disconnected", "session_closed", "session_error", "shutdown", "start_failed", "connection_timeout", "media_timeout", "publication_rejected", "media_cancelled"] as const;
 export type CloseReason = typeof closeReasons[number];

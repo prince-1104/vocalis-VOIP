@@ -12,6 +12,8 @@ import { voiceTuning } from "./voice-tuning";
 import { DialogSentenceTokenizer } from "./sentences";
 import { observePublication, MediaReadinessError } from "./media-readiness";
 import { observeAudioPipeline, frameMeasure } from "./audio-diagnostics";
+import { installedPausePrototype, observePauseLifecycle } from "./pause-diagnostics";
+import { prewarmAudio } from "./prewarm-audio";
 import { logger } from "@workspace/observability/runtime/logger";
 import { metrics } from "@workspace/observability/runtime/operational-metrics";
 
@@ -26,7 +28,7 @@ class DialogTransportModel extends llm.LLM {
   chat(): llm.LLMStream { throw new Error("DialogAgent.llmNode is required"); }
 }
 /** Shared turn state used only to time interruption handling. */
-type TurnState = { agentSpeaking: boolean; interruptedAt?: number };
+type TurnState = { agentSpeaking: boolean; interruptedAt?: number; ttsOrdinal?: number };
 class DialogAgent extends voice.Agent {
   constructor(readonly api: DialogApi, readonly sessionId: string, readonly claim: Claim, readonly signal: AbortSignal,
     readonly clock: StageClock, readonly turn: TurnState) {
@@ -79,7 +81,9 @@ class DialogAgent extends voice.Agent {
   }
   override async ttsNode(text: Parameters<voice.Agent["ttsNode"]>[0], settings: Parameters<voice.Agent["ttsNode"]>[1]) {
     this.signal.throwIfAborted();
-    const clock = this.clock, turn = this.turn, started = clock.mark("tts_start");
+    const clock = this.clock, turn = this.turn;
+    const stream = turn.ttsOrdinal = (turn.ttsOrdinal ?? 0) + 1;
+    const started = clock.mark("tts_start", { stream });
     const operationId = randomUUID();
     await this.api.json(`/${this.sessionId}/authorize`, { component: "tts", operationId }, this.claim.credential, this.signal);
     const authorized = clock.mark("tts_authorized");
@@ -103,7 +107,7 @@ class DialogAgent extends voice.Agent {
       const outcome = ended === "complete" && (firstAudio || characters === 0) ? "charged" : "unknown";
       const cancelled = ended === "cancelled";
       clock.mark("tts_end", { cancelled, noAudio: !firstAudio });
-      clock.mark("tts_audio_summary", { frames, audioMs: Math.round(audioMs), peak, cancelled, failed: ended === "failed" });
+      clock.mark("tts_audio_summary", { stream, frames, audioMs: Math.round(audioMs), peak, cancelled, failed: ended === "failed" });
       clock.observe("tts_total", "sarvam", cancelled ? "cancelled" : outcome === "charged" ? "success" : "error", clock.now() - authorized);
       if (cancelled && turn.interruptedAt !== undefined) { clock.observe("interruption_cancel", "livekit", "success", clock.now() - turn.interruptedAt); turn.interruptedAt = undefined; }
       await api.request(`/${id}/usage`, { operationId, outcome, quantity: characters }, claim.credential).catch(() => undefined);
@@ -133,11 +137,13 @@ export default defineAgent({
     try {
       proc.userData.vad = await silero.VAD.load({ forceCPU: true });
       const vadLoaded = performance.now();
+      await prewarmAudio();
+      const nativeReady = performance.now();
       const ready = await fetch(`http://127.0.0.1:8082/process-ready/${process.pid}`, {
         method: "POST", headers: { authorization: `Bearer ${process.env.LIVEKIT_WORKER_SECRET}` }, signal: AbortSignal.timeout(2000),
       });
       if (!ready.ok) { await ready.body?.cancel(); throw new Error("Process readiness unavailable"); }
-      logger.info({ event: "livekit_process_ready", vadLoadMs: Math.round(vadLoaded - started), registrationMs: Math.round(performance.now() - vadLoaded), uptimeMs: Math.round(process.uptime() * 1000) }, "Voice job process ready");
+      logger.info({ event: "livekit_process_ready", vadLoadMs: Math.round(vadLoaded - started), nativeWarmMs: Math.round(nativeReady - vadLoaded), registrationMs: Math.round(performance.now() - nativeReady), uptimeMs: Math.round(process.uptime() * 1000) }, "Voice job process ready");
     } catch {
       logger.warn({ event: "livekit_process_failed", elapsedMs: Math.round(performance.now() - started) }, "Voice process initialization failed");
       throw new Error("Voice process initialization failed");
@@ -149,12 +155,17 @@ export default defineAgent({
     const id = reference(ctx.job.metadata);
     if (!ctx.proc.userData.vad) throw new Error("VAD not prewarmed");
     const diagnosticId = ctx.info.acceptArguments.attributes?.["dialog.diagnostic"] ?? randomUUID();
+    const entry = await fetch(`http://127.0.0.1:8082/process-entry/${diagnosticId}/${process.pid}`, {
+      method: "POST", headers: { authorization: `Bearer ${process.env.LIVEKIT_WORKER_SECRET}` }, signal: AbortSignal.timeout(2000),
+    });
+    if (!entry.ok) { await entry.body?.cancel(); throw new Error("Process assignment no longer authorized"); }
     logger.info({ event: "livekit_job_entry", diagnosticId, uptimeMs: Math.round(performance.now()) }, "Voice job entered prewarmed process");
     // The claim is authorized before joining, so ctx.room is not connected yet and
     // its name is still undefined; only the job's room descriptor carries it here.
     const claimSent = performance.now();
     const claim = await api.json<Claim>("/claim", { id, room: ctx.job.room?.name ?? "", worker: ctx.workerId });
     logger.info({ event: "livekit_job_claimed", diagnosticId, uptimeMs: Math.round(performance.now()), claimMs: Math.round(performance.now() - claimSent) }, "Voice job claimed");
+    const startup = (stage: number) => logger.info({ event: "livekit_startup_stage", diagnosticId, stage, uptimeMs: Math.round(performance.now()) }, "Voice startup transition");
     // Stage events go to the room only for local benchmarking; they contain timings, never content.
     const bench = process.env.DIALOG_VOICE_BENCH === "1" && (claim.mode === "mock" || process.env.DIALOG_LOCAL_VOICE_PROFILE === "manual-live");
     const clock = new StageClock(claim.mode,
@@ -168,6 +179,7 @@ export default defineAgent({
     let ending: Promise<void> | undefined;
     let media: ReturnType<typeof observePublication> | undefined;
     let audioDiagnostics: ReturnType<typeof observeAudioPipeline> | undefined;
+    let pauseDiagnostics: ReturnType<typeof observePauseLifecycle> | undefined;
     const sttOperation = randomUUID();
     let sttAdmitted = false;
     // Event-loop stalls starve the heartbeat and audio pacing; record them (duration only).
@@ -205,6 +217,7 @@ export default defineAgent({
       };
       await bounded(ctx.room.disconnect());
       if (session) await bounded(session.close());
+      pauseDiagnostics?.dispose();
       audioDiagnostics?.dispose();
       if (sttAdmitted) await api.request(`/${id}/usage`, { operationId: sttOperation, outcome: "unknown" }, claim.credential).catch(() => undefined);
       await api.request(`/${id}/close`, {}, claim.credential).catch(() => undefined);
@@ -245,9 +258,12 @@ export default defineAgent({
       const fixtures = mocked ? new URL(process.env.MOCK_PROVIDER_URL ?? "") : undefined;
       if (mocked && !['mock-providers', '127.0.0.1', 'localhost'].includes(fixtures!.hostname)) throw new Error("Mock provider configuration missing");
       if (!mocked && (process.env.DIALOG_LOCAL_VOICE_PROFILE !== "manual-live" || !process.env.DEEPGRAM_API_KEY || !process.env.SARVAM_API_KEY)) throw new Error("Manual provider configuration missing");
+      startup(1);
       await api.json(`/${id}/authorize`, { component: "stt", operationId: sttOperation }, claim.credential, controller.signal);
       sttAdmitted = true;
+      startup(2);
       await beat();
+      startup(3);
       controller.signal.throwIfAborted();
       const vad = ctx.proc.userData.vad as silero.VAD;
       if (!vad) throw new Error("VAD not prewarmed");
@@ -263,6 +279,9 @@ export default defineAgent({
           interruption: { mode: "vad", enabled: true }, preemptiveGeneration: { enabled: tuning.preemptiveLlm, preemptiveTts: false } },
         connOptions: { sttConnOptions: { maxRetry: 0, timeoutMs: 8000 }, ttsConnOptions: { maxRetry: 0, timeoutMs: 8000 }, maxUnrecoverableErrors: 1 } });
       session.input.setAudioEnabled(false);
+      startup(4);
+      if (bench && claim.mode === "mock") pauseDiagnostics = observePauseLifecycle(await installedPausePrototype(), session, clock);
+      startup(5);
       let interimFrom: number | undefined;
       let speechOrdinal = 0;
       session.on(voice.AgentSessionEventTypes.SpeechCreated, ev => {
@@ -307,7 +326,9 @@ export default defineAgent({
       ctx.room.once(RoomEvent.LocalTrackPublished, publication => { clock.mark("agent_track_published"); if (publication?.track) audioDiagnostics?.published(publication.track as import("@livekit/rtc-node").LocalAudioTrack); });
       ctx.room.once(RoomEvent.LocalTrackSubscribed, () => { clock.mark("agent_track_subscribed"); });
       connectDeadline = setTimeout(() => { void close("connection_timeout"); }, 12000);
+      startup(6);
       await ctx.connect();
+      startup(7);
       clearTimeout(connectDeadline);
       controller.signal.throwIfAborted();
       clock.mark("agent_connected");
